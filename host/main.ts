@@ -2,7 +2,7 @@
 // herdr-chat-host: serve | run | tui-session | inspect | send | op | build
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Chat } from "./chat.ts";
 import { Attachments } from "./attachments.ts";
@@ -18,6 +18,7 @@ import { appHomeOf, labelSelf, newChatId, planSubagent } from "./subagent.ts";
 import { readChatConfig } from "./settings.ts";
 import { PaneWatch } from "./panewatch.ts";
 import { hostBuild } from "./build.ts";
+import { clipboardImage } from "./clipboard.ts";
 
 const USAGE = `herdr-chat-host serve   --chat <id> --cwd <dir> --state-dir <dir> [--provider pi] [--session <file>] [--after-pid <pid> [--model <provider/id>] [--thinking <level>]] [--app-home <dir>] [--<provider> <cmd>] [-- <agent args>]
   (--app-home: the Herdr app's home, whose app it asks to close its hidden pane once its chat's pane is gone; default $HERDR_APP_HOME, else ~/.config/herdr-app)
@@ -31,7 +32,10 @@ herdr-chat-host inspect --chat <id> --state-dir <dir> [--wait 'phase=idle,items>
 herdr-chat-host send    --chat <id> --state-dir <dir> [--mode auto|steer|followUp] [--image <path>]... <text>
 herdr-chat-host op      --chat <id> --state-dir <dir> <op> ['<json args>']
 herdr-chat-host build
-  (this host's {version, build} as JSON: the install records it, so a chat can tell a host older than the install)`;
+  (this host's {version, build} as JSON: the install records it, so a chat can tell a host older than the install)
+herdr-chat-host clipboard-image --out <file>
+  (this computer's clipboard image saved as a PNG, {path} as JSON, path null when it holds none: a chat whose host
+   runs on another machine sends it there)`;
 
 function die(msg: string): never {
   process.stderr.write(`herdr-chat-host: ${msg}\n`);
@@ -235,6 +239,17 @@ async function main(): Promise<void> {
       Object.assign(process.env, plan.env);
       const warning = labelSelf(plan);
       return serve(plan.serve, { hint: plan.hint, warning });
+    }
+    case "clipboard-image": {
+      const out = a.flags.get("out")?.[0];
+      if (!out) die("clipboard-image needs --out <file>");
+      try {
+        mkdirSync(dirname(resolve(out)), { recursive: true });
+        process.stdout.write(JSON.stringify({ path: await clipboardImage(resolve(out)) }) + "\n");
+      } catch (e) {
+        die(e instanceof Error ? e.message : String(e));
+      }
+      return;
     }
     case "tui-session": {
       const provider = a.flags.get("provider")?.[0] ?? "";

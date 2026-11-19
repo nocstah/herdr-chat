@@ -8,6 +8,7 @@
 
 import { exec, panes, spaces } from "herdr";
 import { randomBytes } from "crypto";
+import { bare, machineOf, qualify } from "./machines.js";
 
 const HELLO = '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1}}';
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
@@ -25,15 +26,16 @@ async function rpc(method, params, at = null) {
   return res.result;
 }
 
-// The layout document and its version: {value, version}.
-export async function getDoc() {
-  const r = await rpc("doc.get", { name: "herdr-app" });
+// The layout document and its version: {value, version}. `machine`: another
+// machine's (its own ids, bare: machines.js), for a chat in one of its spaces.
+export async function getDoc(machine = null) {
+  const r = await rpc("doc.get", { name: "herdr-app", ...(machine ? { on: machine } : {}) });
   return { value: r?.value ?? null, version: r?.version ?? 0 };
 }
 
 // Write it if nobody wrote since `version` read it: the new version, else throws (kind "conflict").
-export async function setDoc(value, version, at = null) {
-  return (await rpc("doc.set", { name: "herdr-app", value, version }, at))?.version ?? null;
+export async function setDoc(value, version, at = null, machine = null) {
+  return (await rpc("doc.set", { name: "herdr-app", value, version, ...(machine ? { on: machine } : {}) }, at))?.version ?? null;
 }
 
 function walk(n, f, parent = null) {
@@ -44,12 +46,16 @@ function walk(n, f, parent = null) {
 
 // Where things are in the document: the chat's own pane and the host's.
 // {chat: {pane, tab, space} | null, host: {pane, tab, space, hidden, px} | null}
-export function locate(doc, chat, terminal) {
+// `machine`: the document is that machine's: `terminal` is given as the app names
+// it ("box/t7"), and the ids come back so too.
+export function locate(doc, chat, terminal, machine = null) {
   let me = null, host = null;
+  const term = terminal ? bare(terminal) : terminal;
+  const q = (id) => qualify(machine, id);
   for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) walk(t.root, (n) => {
     const c = n.content;
-    if (c?.mod && c.props?.chat === chat && !me) me = { pane: n.id, tab: t.id, space: s.id };
-    if (terminal && c?.terminal === terminal && !host) host = { pane: n.id, tab: t.id, space: s.id, hidden: Boolean(n.hidden), px: n.size?.px ?? null };
+    if (c?.mod && c.props?.chat === chat && !me) me = { pane: q(n.id), tab: q(t.id), space: q(s.id) };
+    if (term && c?.terminal === term && !host) host = { pane: q(n.id), tab: q(t.id), space: q(s.id), hidden: Boolean(n.hidden), px: n.size?.px ?? null };
   });
   return { chat: me, host };
 }
@@ -80,15 +86,16 @@ export function hideIn(doc, tab, terminal) {
 // change (a new tab gone: "Layout changed elsewhere"). So ours waits until
 // the app's latest change is in the document. (This machine's only: remote
 // ids have a "/".)
-export function inStep(doc, except = null) {
+export function inStep(doc, except = null, machine = null) {
   const docTabs = new Set(), docPanes = new Set();
   for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) {
     docTabs.add(t.id);
     walk(t.root, (n) => { if (!n.children?.length && n.id !== except) docPanes.add(n.id); }); // the leaves: panes (`except`: the one we add)
   }
-  const local = (id) => !String(id).includes("/");
-  const appTabs = spaces().flatMap((s) => s.tabs.map((t) => t.id)).filter(local);
-  const appPanes = panes().map((p) => p.pane).filter(local);
+  // The document's machine's: this computer's ids have no "/", another machine's are "box/…" (compared bare).
+  const ours = (id) => machineOf(id) === machine;
+  const appTabs = spaces().flatMap((s) => s.tabs.map((t) => t.id)).filter(ours).map(bare);
+  const appPanes = panes().map((p) => p.pane).filter(ours).map(bare);
   return appTabs.length === docTabs.size && appTabs.every((t) => docTabs.has(t))
     && appPanes.length === docPanes.size && appPanes.every((p) => docPanes.has(p));
 }
@@ -99,14 +106,17 @@ export function inStep(doc, except = null) {
 // `beforeWrite()`: awaited between the edit and the write, it gives the time the write
 // should land (main.js: just before the app's next read of the document), or false: not
 // now. The app must not have moved meanwhile.
+// `tab` and `terminal` as the app names them: a tab of another machine's space ("box/tb1") is
+// hidden in that machine's document.
 export async function hideHost(tab, terminal, { tries = 4, force = false, beforeWrite = null } = {}) {
+  const machine = machineOf(tab);
   for (let i = 0; ; i++) {
-    const { value, version } = await getDoc();
-    if (!value?.spaces) throw new Error("no layout document");
-    if (!force && !inStep(value)) return { did: "waiting", pane: null, tab };
-    const edit = hideIn(value, tab, terminal);
+    const { value, version } = await getDoc(machine);
+    if (!value?.spaces) throw new Error(machine ? `no layout document on ${machine}` : "no layout document");
+    if (!force && !inStep(value, null, machine)) return { did: "waiting", pane: null, tab };
+    const edit = hideIn(value, bare(tab), bare(terminal));
     if (!edit) {
-      const where = locate(value, null, terminal).host;
+      const where = locate(value, null, terminal, machine).host;
       if (!where) throw new Error(`no tab ${tab} in the layout document`);
       return { did: "already", pane: where.pane, tab: where.tab };
     }
@@ -114,11 +124,11 @@ export async function hideHost(tab, terminal, { tries = 4, force = false, before
     if (beforeWrite) {
       at = await beforeWrite();
       if (at === false && !force) return { did: "waiting", pane: null, tab };
-      if (!force && !inStep(value, edit.did === "added" ? edit.pane : null)) return { did: "waiting", pane: null, tab };
+      if (!force && !inStep(value, edit.did === "added" ? edit.pane : null, machine)) return { did: "waiting", pane: null, tab };
     }
     try {
-      await setDoc(value, version, typeof at === "number" ? at : null);
-      return { ...edit, tab };
+      await setDoc(value, version, typeof at === "number" ? at : null, machine);
+      return { ...edit, pane: qualify(machine, edit.pane), tab };
     } catch (e) {
       if (e?.kind !== "conflict" || i + 1 >= tries) throw e;
     }

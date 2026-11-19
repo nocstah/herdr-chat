@@ -30,11 +30,15 @@ import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { randomBytes } from "crypto";
-import { modPanes, readDoc } from "./place.js";
+import * as fs from "fs/promises";
+import { Buffer } from "buffer";
+import { exec } from "herdr";
+import { allModPanes, modPanes, readDoc } from "./place.js";
+import { bare, machineOf, qualify } from "./machines.js";
 import { getDoc, hideHost, locate } from "./hostpane.js";
 import { SHORTCUTS, actionName, errors as keyErrors, keyHint, loadShortcuts, shortcuts, withKey } from "./shortcuts.js";
 import { keepKeys } from "./keymap.js";
-import { Connection, hostTerminal, readConfig, runsHost } from "./connection.js";
+import { Connection, hostSide, hostTerminal, readConfig, runsHost } from "./connection.js";
 import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { lineOf, planProgress, row, samePlan } from "./cards.js";
@@ -148,6 +152,8 @@ export default class HerdrChat extends View {
       handOver: p.afterPid ? { pid: p.afterPid, model: p.model ?? null, thinking: p.thinking ?? null } : null,
       attachOnly: Boolean(this.sub),
       place: () => this.findPlace(),
+      // A chat in another machine's space: its host runs there (machines.js).
+      machine: () => (this.place ? machineOf(this.place.pane) : null),
       onRecord: (rec, cx) => this.onRecord(rec, cx),
       onFlush: (cx) => { this.debug.mark(); cx.notify(); },
       onChange: (cx) => { this.debug.mark(); cx.notify(); },
@@ -208,14 +214,23 @@ export default class HerdrChat extends View {
     this.placeTried = Date.now();
     cx.spawn(async (cx) => {
       try {
-        const doc = await readDoc();
-        this.docPanes = modPanes(doc, MOD);
+        // This computer's document, and those of the machines whose spaces the app shows: a chat
+        // in another machine's space is in that machine's (its host then runs there).
+        this.docPanes = await allModPanes(MOD);
         this.docAt = Date.now();
         const live = this.docPanes.filter((x) => x.props?.chat === this.chat).find((x) => panes().some((p) => p.pane === x.pane));
         if (live) {
           this.place = { pane: live.pane, tab: live.tab, space: live.space };
           this.placeFrom = "doc";
-          this.log(`place: pane ${live.pane} in tab ${live.tab} (layout document)`);
+          this.log(`place: pane ${live.pane} in tab ${live.tab} (layout document${live.machine ? ` of ${live.machine}` : ""})`);
+          // Its host's install is that machine's: the update check compares with it, and its files
+          // (images, diagrams) are under that machine's app home (imageRel).
+          if (live.machine) cx.spawn(async (cx) => {
+            this.remoteHome = (await hostSide(live.machine).catch(() => null))?.home ?? null;
+            await this.updater.load(live.machine);
+            this.debug.mark();
+            cx.notify();
+          });
         } else this.placeMisses = (this.placeMisses ?? 0) + 1;
       } catch (e) {
         this.placeError = message(e);
@@ -233,7 +248,8 @@ export default class HerdrChat extends View {
   // No layout document (no hc on PATH?): the host's tab label, else the only chat pane.
   guessPlace() {
     const mine = panes().filter((p) => p.mod === MOD);
-    const hostTab = hostTerminal(this.chat)?.labels?.["herdr.tab"];
+    const host = hostTerminal(this.chat);
+    const hostTab = qualify(machineOf(host?.address), host?.labels?.["herdr.tab"]);
     const pane = (hostTab && mine.find((p) => p.tab === hostTab)) || (mine.length === 1 ? mine[0] : null);
     if (!pane || String(pane.tab).includes("/")) return;
     const space = spaces().find((sp) => sp.tabs.some((x) => x.id === pane.tab))?.id;
@@ -383,6 +399,7 @@ export default class HerdrChat extends View {
     }
     if (this.conn.status === "connected" && this.store.loaded) this.syncTheme(cx);
     if (this.svgWanted?.size) this.loadSizes(cx);
+    if (this.mirrorWanted?.size) this.loadMirrors(cx);
     if (Date.now() - (this.sweptAt ?? 0) > 30000) this.sweepOrphans(cx);
     // Elapsed seconds (thinking, the activity line) while Pi works: data, once a second.
     const sec = Math.floor(Date.now() / 1000);
@@ -422,7 +439,8 @@ export default class HerdrChat extends View {
     }
     const term = hostTerminal(this.chat);
     if (term?.parent) return false; // a sub-agent is its parent's: never restarted from here
-    const label = term?.labels?.["herdr.tab"];
+    // Labels name tabs as the terminal's own machine does ("tb1"); the place as the app does ("box/tb1").
+    const label = qualify(machineOf(term?.address), term?.labels?.["herdr.tab"]);
     const docTab = this.hide?.terminal === term?.address ? this.hide?.tab : null;
     const tab = label || docTab;
     if (!term || !tab || this.placeFrom !== "doc" || !this.place || tab === this.place.tab) return false;
@@ -489,8 +507,9 @@ export default class HerdrChat extends View {
     h.stale = false;
     cx.spawn(async (cx) => {
       try {
-        const { value } = await getDoc();
-        const at = locate(value, this.chat, term.address);
+        const machine = machineOf(this.place.tab);
+        const { value } = await getDoc(machine);
+        const at = locate(value, this.chat, term.address, machine);
         h.checkedAt = Date.now();
         const was = h.hidden;
         h.pane = at.host?.pane ?? null;
@@ -525,7 +544,8 @@ export default class HerdrChat extends View {
         if (!term.labels?.["herdr.tab"] && !h.labeling) {
           h.labeling = true;
           const { space, tab } = this.place;
-          const r = await hc(["label", term.address, `herdr.space=${space}`, `herdr.tab=${tab}`]);
+          // As the host's own machine names them (the app's own labels there are bare).
+          const r = await hc(["label", term.address, `herdr.space=${bare(space)}`, `herdr.tab=${bare(tab)}`]);
           h.labeling = false;
           if (r.code !== 0) this.log(`hc label ${term.address}: ${(r.stderr || r.stdout).trim()}`);
           else this.log(`host ${term.address}: labeled for tab ${tab}`);
@@ -593,7 +613,7 @@ export default class HerdrChat extends View {
       if (term.labels?.["herdr.tab"] || f.labeled) return;
       f.labeled = true;
       const { space, tab } = this.place;
-      cx.spawn(async () => { await hc(["label", term.address, `herdr.space=${space}`, `herdr.tab=${tab}`]); });
+      cx.spawn(async () => { await hc(["label", term.address, `herdr.space=${bare(space)}`, `herdr.tab=${bare(tab)}`]); });
       return;
     }
     if (px === 0 || (f.resized === pane.pane && Date.now() - f.resizedAt < 3000)) return; // (px: what the document says)
@@ -659,13 +679,14 @@ export default class HerdrChat extends View {
       let doc;
       try { doc = await readDoc(); } catch { return; }
       if (!doc?.spaces) return;
-      this.docPanes = modPanes(doc, MOD);
-      this.docAt = Date.now();
-      const chats = new Set(this.docPanes.map((x) => x.props?.chat).filter(Boolean));
+      const chats = new Set(modPanes(doc, MOD).map((x) => x.props?.chat).filter(Boolean));
       const missing = new Set();
       for (const t of terminals()) {
         const chat = t.labels?.["herdr-chat.chat"];
         if (t.state !== "live" || !chat) continue;
+        // Another machine's host ("box/t7"): its chat's pane is in that machine's document, not this one;
+        // its host ends itself when the pane goes (host/panewatch.ts). Never this computer's to end.
+        if (machineOf(t.address)) continue;
         // The shell herdr-core restored in a host's place (connection.js runsHost): nobody's, end it.
         const shell = !runsHost(t);
         // A sub-agent (a parent, or the launcher's role=subagent) has no pane by design: never an orphan.
@@ -677,8 +698,16 @@ export default class HerdrChat extends View {
       }
       this.orphans = missing;
       // The host removes the attachments of chats closed while their host was down (protocol.md
-      // "Attachments"). An older host has no sweep_attachments: req logs it.
-      if (this.conn.status === "connected") this.req("sweep_attachments", { open: [...chats] }).catch(() => {});
+      // "Attachments"): the chats open on its own machine, from that machine's document. An older
+      // host has no sweep_attachments: req logs it.
+      if (this.conn.status !== "connected") return;
+      const machine = this.place ? machineOf(this.place.pane) : null;
+      let open = chats;
+      if (machine) {
+        try { open = new Set(modPanes(await readDoc(machine), MOD).map((x) => x.props?.chat).filter(Boolean)); } catch { return; }
+        if (!open.has(this.chat)) return; // its document doesn't have this chat yet: never sweep then
+      }
+      this.req("sweep_attachments", { open: [...open] }).catch(() => {});
     });
   }
 
@@ -902,10 +931,40 @@ export default class HerdrChat extends View {
   }
 
   pasteImage(cx) {
+    // A host on another machine would read that machine's clipboard: this computer's goes there instead.
+    if (this.remoteMachine()) return this.pasteImageThere(cx);
     this.fire("clipboard_image", {}, cx, (d, cx) => {
       if (d?.path) this.composer.addChip(d.path, { size: d.size ?? null });
       else this.flash("The clipboard has no image", cx);
       this.debug.mark();
+    });
+  }
+
+  // This computer's clipboard image for a host on another machine: saved here by this computer's
+  // own host program (`clipboard-image`), sent beside the host there, then made the chat's copy.
+  pasteImageThere(cx) {
+    cx.spawn(async (cx) => {
+      try {
+        const cfg = await readConfig();
+        if (!cfg.host) throw new Error("herdr-chat's host isn't installed on this computer: an image can't be pasted from here");
+        const dir = `${appHome().replace(/\/+$/, "")}/data/herdr-chat/outgoing`;
+        await fs.mkdir(dir, { recursive: true });
+        const file = `${dir}/${this.chat}-${Date.now()}-paste.png`;
+        const r = await exec("/usr/bin/env", [...(cfg.node ? [`HERDR_CHAT_NODE=${cfg.node}`] : []), cfg.host, "clipboard-image", "--out", file]);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().replace(/^herdr-chat-host: /, "") || "couldn't read the clipboard");
+        if (!JSON.parse(r.stdout || "{}")?.path) return this.flash("The clipboard has no image", cx);
+        try {
+          const there = await this.putForHost(file);
+          const d = await this.req("attach_image", { path: there }, cx);
+          this.composer.addChip(d.path, { size: d.size ?? null });
+        } finally {
+          fs.unlink(file).catch(() => {});
+        }
+      } catch (e) {
+        this.flash(message(e), cx);
+      }
+      this.debug.mark();
+      cx.notify();
     });
   }
 
@@ -932,7 +991,9 @@ export default class HerdrChat extends View {
   attachImage(chip, cx) {
     cx.spawn(async (cx) => {
       try {
-        const { path, size } = await this.req("attach_image", { path: chip.path }, cx);
+        // A host on another machine can't read this computer's file: it goes there first.
+        const from = this.remoteMachine() ? await this.putForHost(chip.path) : chip.path;
+        const { path, size } = await this.req("attach_image", { path: from }, cx);
         if (this.composer.chips.includes(chip)) Object.assign(chip, { path, size: size ?? null });
         else this.req("detach_image", { path }).catch(() => {});
       } catch (e) {
@@ -1482,8 +1543,8 @@ export default class HerdrChat extends View {
 
   // An image or diagram, big, in a dialog over the window.
   enlarge(path, size, cx) {
-    const rel = homeRel(path, appHome());
-    if (!rel) return this.flash("Can't show a file outside the app's folder", cx);
+    const rel = this.imageRel(path);
+    if (!rel) return this.flash(this.remoteMachine() && this.remoteHome ? "That image is still on its way from the other machine" : "Can't show a file outside the app's folder", cx);
     const w = Math.min(1400, Math.max(320, (size?.w ?? 900) + 48));
     const h = Math.min(1000, Math.max(240, (size?.h ?? 600) + 80));
     this.enlarged = path;
@@ -1497,8 +1558,82 @@ export default class HerdrChat extends View {
   svgSize(path) {
     if (!path) return null;
     if (this.svgSizes.has(path)) return this.svgSizes.get(path);
-    if (/\.svg$/i.test(path)) (this.svgWanted ??= new Set()).add(path);
+    // Another machine's: read from its copy here, once it's here (imageRel).
+    if (/\.svg$/i.test(path) && (!this.remoteMachine() || this.imageRel(path))) (this.svgWanted ??= new Set()).add(path);
     return null;
+  }
+
+  // ---- a host on another machine: its files here --------------------------------
+
+  // The machine of the chat's space when it isn't this computer's: its host runs there (machines.js).
+  remoteMachine() {
+    return this.place ? machineOf(this.place.pane) : null;
+  }
+
+  // A file the host names (a path on its machine: an attachment, a rendered diagram) as image()
+  // takes it: relative to this app's home, else null. A host on another machine keeps them under
+  // its app home there; the same relative path here gets a copy (loadMirrors, through herdr-core),
+  // and until it has one, this is null (the row shows its fallback and redraws once it's here).
+  imageRel(path) {
+    const machine = this.remoteMachine();
+    if (!machine) return homeRel(path, appHome());
+    if (!this.remoteHome || !path) return null;
+    const rel = homeRel(path, this.remoteHome);
+    if (!rel) return null;
+    const st = (this.mirrors ??= new Map()).get(rel);
+    if (st === "here") return rel;
+    if (!st) {
+      this.mirrors.set(rel, "wanted");
+      (this.mirrorWanted ??= new Map()).set(rel, { machine, path });
+    }
+    return null;
+  }
+
+  // A file of the host's machine on its way here (imageRel asked for it, it isn't here yet).
+  imagePending(path) {
+    if (!this.remoteMachine() || !this.remoteHome) return Boolean(this.remoteMachine());
+    const st = this.mirrors?.get(homeRel(path, this.remoteHome) ?? "");
+    return st === "wanted" || st === "loading";
+  }
+
+  // Copies the wanted files of the host's machine here, at most 6 MB each (an exec's output is
+  // base64), then redraws. One already here (an earlier open) isn't fetched again.
+  loadMirrors(cx) {
+    const want = [...this.mirrorWanted];
+    this.mirrorWanted.clear();
+    for (const [rel] of want) this.mirrors.set(rel, "loading");
+    cx.spawn(async (cx) => {
+      for (const [rel, { machine, path }] of want) {
+        const local = `${appHome().replace(/\/+$/, "")}/${rel}`;
+        try {
+          // fs here may write the app's data folder but not read it: test(1) says whether it's here.
+          if ((await exec("test", ["-f", local])).code !== 0) {
+            const r = await exec("/bin/sh", ["-c", '[ -f "$1" ] || exit 3; [ "$(wc -c < "$1")" -le 6000000 ] || exit 4; base64 < "$1"', "sh", path], { on: machine, timeout: 60000 });
+            if (r.code !== 0) throw new Error(r.code === 3 ? "not there" : r.code === 4 ? "over 6 MB" : (r.stderr || "").trim() || `exit ${r.code}`);
+            await fs.mkdir(local.slice(0, local.lastIndexOf("/")), { recursive: true });
+            await fs.writeFile(local, Buffer.from(r.stdout.replace(/\s+/g, ""), "base64"));
+          }
+          this.mirrors.set(rel, "here");
+        } catch (e) {
+          this.mirrors.set(rel, "failed");
+          this.log(`${machine}:${path}: ${message(e)}`);
+        }
+      }
+      this.debug.mark();
+      cx.notify();
+    });
+  }
+
+  // A file of this computer's (a pasted or dropped image) for a host on another machine: sent
+  // beside the host's terminal there (hc put, at most 8 MB), and its path there.
+  async putForHost(path) {
+    const host = hostTerminal(this.chat);
+    if (!host) throw new Error("the chat's host isn't running");
+    const r = await hc(["put", host.address, path, "--json"]);
+    if (r.code !== 0) throw new Error(`couldn't send the image to ${machineOf(host.address)}: ${(r.stderr || r.stdout).trim()}`);
+    const landed = JSON.parse(r.stdout)?.path;
+    if (!landed) throw new Error("hc put said nothing of where the image landed");
+    return landed;
   }
 
   loadSizes(cx) {
@@ -1508,7 +1643,9 @@ export default class HerdrChat extends View {
     cx.spawn(async (cx) => {
       for (const p of want) {
         try {
-          const sz = await readSvgSize(p);
+          // Another machine's file: its copy here.
+          const rel = this.remoteMachine() ? this.imageRel(p) : null;
+          const sz = await readSvgSize(rel ? `${appHome().replace(/\/+$/, "")}/${rel}` : p);
           if (sz) this.svgSizes.set(p, sz);
         } catch {}
       }
@@ -1523,7 +1660,7 @@ export default class HerdrChat extends View {
     this.lastOpen = { path: abs, line, at: Date.now(), how: null };
     cx.spawn(async (cx) => {
       try {
-        const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space });
+        const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine: this.remoteMachine() });
         this.lastOpen.how = r.how;
         if (r.terminal) {
           this.editorTerm = { address: r.terminal, at: Date.now(), seen: false };
@@ -1745,7 +1882,9 @@ export default class HerdrChat extends View {
     this.debug.mark();
     cx.spawn(async (cx) => {
       try {
-        const cfg = await readConfig();
+        // A chat in another machine's space: the TUI runs there, as its host does.
+        const machine = this.place ? machineOf(this.place.pane) : null;
+        const cfg = await readConfig(await hostSide(machine));
         // The TUI's command: the adapter's (e.g. `claude --resume <id>`). The
         // person's settings `<agent>.tui` replaces the program, keeping its arguments.
         const prog = cfg.agent(this.providerId()).tui;
@@ -1756,7 +1895,7 @@ export default class HerdrChat extends View {
           argv = prog ? withProgram(d.argv, prog) : [...d.argv];
         } else argv = prog ? withProgram(utilityArgv, prog) : [...utilityArgv];
         // No herdr.space/tab labels: no pane, so the layout and the chat's tab stay as they are.
-        const r = await hc(["run", "--bg", "--json", "--no-parent", "--name", `chat-tui-${this.chat}`, "--cwd", this.cwd ?? this.store.state.cwd ?? "/",
+        const r = await hc(["run", "--bg", "--json", "--no-parent", ...(machine ? ["--on", machine] : []), "--name", `chat-tui-${this.chat}`, "--cwd", this.cwd ?? this.store.state.cwd ?? "/",
           "--label", `herdr-chat.tui=${this.chat}`, "--", ...argv]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "hc run failed");
         this.handoff.terminal = JSON.parse(r.stdout).address;
@@ -1764,7 +1903,8 @@ export default class HerdrChat extends View {
         this.log(`handoff ${name}: ${argv.join(" ")} in ${this.handoff.terminal}`);
         this.openTermDialog();
         // The host owns the hand-off: it watches this terminal and resumes when it ends.
-        if (mode === "session") this.req("handoff_started", { terminal: this.handoff.terminal }, cx)
+        // (Its address as the host's own core names it: "t7", not "box/t7".)
+        if (mode === "session") this.req("handoff_started", { terminal: bare(this.handoff.terminal) }, cx)
           .then(() => { this.handoff && (this.handoff.reported = true); }, () => {});
         if (input) this.typeWhenIdle(this.handoff.terminal, input);
       } catch (e) {
@@ -1917,9 +2057,10 @@ export default class HerdrChat extends View {
     const k = this.subTerm();
     const all = terminals();
     const parent = k?.parent ? all.find((t) => t.address === k.parent) : null;
-    const tabOf = (addr) => parent?.labels?.["herdr.tab"] ?? panes().find((p) => p.terminal === addr)?.tab ?? null;
+    const pm = machineOf(parent?.address);
+    const tabOf = (addr) => qualify(pm, parent?.labels?.["herdr.tab"]) ?? panes().find((p) => p.terminal === addr)?.tab ?? null;
     const ptab = parent ? tabOf(parent.address) : null;
-    const space = parent?.labels?.["herdr.space"] ?? spaces().find((sp) => sp.tabs.some((x) => x.id === ptab))?.id ?? focused()?.space ?? null;
+    const space = qualify(pm, parent?.labels?.["herdr.space"]) ?? spaces().find((sp) => sp.tabs.some((x) => x.id === ptab))?.id ?? focused()?.space ?? null;
     const name = k?.name || this.displayName();
     const provider = this.store.state.provider ?? this.conn.provider ?? this.provider ?? null;
     cx.spawn(async (cx) => {
@@ -2010,7 +2151,7 @@ export default class HerdrChat extends View {
       hideError: this.hide?.error ?? null, widths: this.widths ?? [],
       hostAgent: ((a) => (a ? { pane: a.pane, tab: a.tab, status: a.status } : null))(host && agents().find((x) => x.address === host.address)),
       windowActive: Boolean(appWindow()?.active), tabStatus: spaces().flatMap((sp) => sp.tabs).find((x) => x.id === me?.tab)?.status ?? null, fallback: this.fallback, redirects: this.redirects ?? 0, redirectsFromRender: this.redirectsFromRender ?? 0, seenSent: this.seenSent ?? null,
-      hostTab: host?.labels?.["herdr.tab"] ?? null, tabPanes: panes().filter((p) => p.tab === me?.tab).map((p) => ({ pane: p.pane, terminal: p.terminal, mod: p.mod ?? null })),
+      hostTab: qualify(machineOf(host?.address), host?.labels?.["herdr.tab"]) ?? null, tabPanes: panes().filter((p) => p.tab === me?.tab).map((p) => ({ pane: p.pane, terminal: p.terminal, mod: p.mod ?? null })),
       shortcuts: this.keysReady ? shortcuts() : null, keyErrors: keyErrors, lastShortcut: this.lastShortcut ?? null, lastNewChat: this.lastNewChat ?? null,
       reports: this.store.items.filter((it) => it.kind === "user" && isReport(it)).map((it) => it.id),
       place: this.place, zoomed: me?.zoomed ?? null, zoomedPane: panes().find((p) => p.tab === me?.tab && p.zoomed)?.pane ?? null, paneTitle: me?.title ?? null, name: this.displayName(),
@@ -2129,6 +2270,7 @@ export default class HerdrChat extends View {
       toggle: (id, cx) => this.toggle(id, cx), more: (id, cx) => this.more(id, cx),
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
+      imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       openFile: (p, line, cx) => this.openFile(p, line, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null,
       setSvgHover: (key, on, cx) => this.setSvgHover(key, on, cx), groupOpen: (id) => this.groups.get(id),

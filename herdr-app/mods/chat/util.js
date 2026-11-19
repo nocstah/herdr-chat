@@ -162,7 +162,10 @@ export function homeRel(p, appHomeDir) {
 // image() can't show it: it takes only app-home-relative paths. `size`: its pixel size from the
 // host (protocol.md v3.7), for the viewer; null when unknown.
 export function thumbnail(id, { path, size }, w, h, c) {
-  const rel = homeRel(path, appHome());
+  // c.imageRel: the view's (main.js): a host on another machine's file is shown from its copy here.
+  const rel = c.imageRel ? c.imageRel(path) : homeRel(path, appHome());
+  // On its way from the host's machine: its box now, so the row keeps its height when it lands.
+  if (!rel && c.imagePending?.(path)) return h_flex().id(id).flex_none().w(w).h(h).rounded(10).border_1().border_color(c.t.border).bg(c.t.hover);
   if (!rel) return null;
   c.traceThumb(path, w, h);
   return h_flex().id(id).flex_none().cursor_pointer().rounded(10).overflow_hidden().border_1().border_color(c.t.border)

@@ -138,7 +138,9 @@ function mermaid(key, b, c) {
   const t = c.t;
   if (b.open || (!b.svg && !b.ascii?.length)) return codeCard(key, "mermaid", b.source ?? "", null, b.open, c);
   const src = c.expanded.has(`src:${key}`);
-  const rel = b.svg ? homeRel(b.svg, appHome()) : null;
+  const rel = b.svg ? (c.imageRel ? c.imageRel(b.svg) : homeRel(b.svg, appHome())) : null;
+  // No picture to show yet (a host on another machine's, on its way here) and no ASCII: the source.
+  if (!rel && !b.ascii?.length) return codeCard(key, "mermaid", b.source ?? "", null, false, c);
   const size = rel ? c.svgSize(b.svg) : null;
   const head = h_flex().h(30).pl(12).pr(6).gap(4).items_center().border_b_1().border_color(c.line)
     .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(b.error && !rel ? "mermaid · shown as text" : "mermaid"))

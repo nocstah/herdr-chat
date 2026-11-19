@@ -132,7 +132,8 @@ it; every key is optional):
   "pi":     { "command": "/path/to/pi", "args": ["--model", "anthropic/claude-sonnet-4-5"] },
   "claude": { "env": { "CLAUDE_CONFIG_DIR": "/path/to/config" } },
   "codex":  { "tui": ["my-wrapper", "codex"] },
-  "updates": { "check": false }
+  "updates": { "check": false },
+  "machines": { "box": { "direct": true } }
 }
 ```
 
@@ -140,11 +141,31 @@ it; every key is optional):
 found), `args` (added to the agent's), `env`, and `tui` (the program `/tui`
 runs). A new chat picks up a change. `updates.check: false` stops the daily
 look for a new release (a release install only); `updates.feed` points it at
-another URL with GitHub's release JSON.
+another URL with GitHub's release JSON. `machines.<name>.direct: true` is for
+a machine that shares this computer's loopback (a second herdr-core here):
+its chats connect to the host's port as it is, with no ssh forward.
+
+### Spaces on another machine
+
+A chat in a space of another machine (`hc machine add`) runs where that
+space's terminals do: its host starts on that machine (`hc run --on`), from
+herdr-chat installed there, so install it on both. The agent, its files, its
+sessions and its hooks are that machine's, and so are its settings above.
+This computer only draws the chat. It reaches the host through an ssh port
+forward of its own (one ssh connection per machine, to the machine's `hc
+machine` target, with your ssh keys and config). A machine added with
+`--via` (reached through a command, not ssh) can have chats only when it is
+`direct`.
+
+Images and diagrams the host saves are copied here when the chat shows them
+(up to 6 MB each). A pasted or dropped image goes there first (`hc put`,
+up to 8 MB). Continue as chat and `/tui` work on that machine's agents as on
+this computer's, except for sub-agents, which still open their TUI.
 
 ## Limitations
 
-- **This computer only.** Spaces on other machines still open the agent's TUI.
+- **Another machine's spaces need ssh** to that machine, and herdr-chat
+  installed there (above). Its sub-agents can't continue as chats yet.
 - **The end-to-end tests drive macOS only** (`tests/e2e/`); on Linux the
   host's tests run, and the mods were tried by hand.
 - **Run the install again after a Herdr update.** The agents list and the

@@ -1,9 +1,20 @@
 import { appHome, hc, readTextFile, terminals } from "herdr";
 import { openLink } from "./transport.js";
+import { forget, reach, readRemoteText, remoteInstall } from "./machines.js";
 import { DEFAULT_PROVIDER, MOD, message } from "./util.js";
 
 export const stateDir = () => `${appHome()}/data/herdr-chat`;
 export const registryPath = (chat) => `${stateDir()}/chats/${chat}.json`;
+
+/**
+ * The install a chat's host runs from: this computer's (null), or, for a chat
+ * in another machine's space, that machine's (machines.js): {machine, home,
+ * config, settings}, `home` its app home there.
+ */
+export async function hostSide(machine) {
+  return machine ? { machine, ...(await remoteInstall(machine)) } : null;
+}
+const sideState = (side) => (side ? `${side.home}/data/herdr-chat` : stateDir());
 
 async function readJson(path) {
   try {
@@ -21,9 +32,9 @@ export const settingsPath = () => `${stateDir()}/settings.json`;
  * it found) with the person's settings over it. One agent's:
  * {command, args, env, tui}, `tui` an argv or null.
  */
-export async function readConfig() {
-  const cfg = await readJson(`${appHome()}/mods/${MOD}/config.json`);
-  const mine = await readJson(settingsPath());
+export async function readConfig(side = null) {
+  const cfg = side ? side.config ?? {} : await readJson(`${appHome()}/mods/${MOD}/config.json`);
+  const mine = side ? side.settings ?? {} : await readJson(settingsPath());
   const list = (v) => (Array.isArray(v) ? v.map(String) : typeof v === "string" && v ? [v] : null);
   const agent = (id) => {
     const a = mine[id] && typeof mine[id] === "object" ? mine[id] : {};
@@ -37,9 +48,9 @@ export async function readConfig() {
   return { host: cfg.host ?? null, node: cfg.node ?? null, hc: cfg.hc ?? null, version: cfg.version ?? null, build: cfg.build ?? null, installedAt: cfg.installedAt ?? null, agent };
 }
 
-export async function readRegistry(chat) {
+export async function readRegistry(chat, side = null) {
   try {
-    const text = await readTextFile(registryPath(chat));
+    const text = side ? await readRemoteText(side.machine, `${sideState(side)}/chats/${chat}.json`) : await readTextFile(registryPath(chat));
     return text ? JSON.parse(text) : null;
   } catch {
     return null;
@@ -73,7 +84,9 @@ export function startError(text, cwd) {
 const BACKOFF = [250, 500, 1000, 2000, 2000];
 
 export class Connection {
-  // opts: {chat, cwd, attachOnly (never start a host), place: () => ({space, tab}) | null (a host starts only once the chat's tab is known), session, hostEnv, handOver ({pid, model, thinking} | null), onRecord(rec, cx), onChange(cx), log}
+  // opts: {chat, cwd, attachOnly (never start a host), place: () => ({space, tab}) | null (a host starts only once the chat's tab is known),
+  // machine: () => the machine of the chat's space, null for this computer's (its host runs there: machines.js),
+  // session, hostEnv, handOver ({pid, model, thinking} | null), onRecord(rec, cx), onChange(cx), log}
   constructor(opts) {
     this.o = opts;
     this.status = "connecting"; // connecting | starting | connected | reconnecting | stopped | failed
@@ -107,6 +120,11 @@ export class Connection {
 
   start(cx) {
     cx.spawn(async (cx) => {
+      // Into a turn the scheduler resumed first: the start of a spawned body runs inside the call
+      // that spawned it, and a promise it awaits that's already settled (a cached lookup,
+      // machines.js) continues after that call, outside any. The read loop would then run
+      // there too, and the code views it makes (syncCode's cx.new) come out released.
+      await cx.sleep(0);
       while (!this.closed) {
         try {
           await this.once(cx);
@@ -133,16 +151,19 @@ export class Connection {
 
   // One connection attempt and, when it works, its whole read loop.
   async once(cx) {
-    const entry = await readRegistry(this.o.chat);
+    const machine = this.o.machine?.() ?? null;
+    const side = await hostSide(machine);
+    const entry = await readRegistry(this.o.chat, side);
     if (!entry?.port || !entry?.pid) {
-      await this.ensureHost(cx, entry);
+      await this.ensureHost(cx, entry, side);
       return;
     }
     let link;
     try {
-      link = await openLink(entry);
+      link = await this.open(entry, machine);
     } catch (e) {
-      await this.ensureHost(cx, entry);
+      if (machine) this.o.log?.(`${machine}: ${message(e)}`);
+      await this.ensureHost(cx, entry, side);
       return;
     }
     this.link = link;
@@ -189,9 +210,27 @@ export class Connection {
     }
   }
 
+  // The link to the host: here, its port; on another machine, a port here that
+  // an ssh forward takes there (machines.js). A forward that fails is dropped, so
+  // the next attempt makes a new one (the machine's connection may have gone).
+  async open(entry, machine) {
+    if (!machine) return openLink(entry);
+    if (!entry.wsPort) throw new Error(`the host on ${machine} has no WebSocket port (an older herdr-chat there)`);
+    const mine = await readJson(settingsPath());
+    const how = mine.machines?.[machine] ?? {};
+    const local = await reach(machine, entry.wsPort, { direct: how.direct === true, node: (await readConfig()).node });
+    this.forwarded = { machine, port: entry.wsPort };
+    try {
+      return await openLink({ ...entry, wsPort: local, port: null });
+    } catch (e) {
+      await forget(machine, entry.wsPort);
+      throw e;
+    }
+  }
+
   // No host answered: start one, unless a live terminal already runs it
   // (it may still be starting) or we just did.
-  async ensureHost(cx, entry) {
+  async ensureHost(cx, entry, side = null) {
     const live = hostTerminal(this.o.chat);
     // A sub-agent's chat only attaches: its host is the parent's to start and end.
     if (this.o.attachOnly) {
@@ -216,7 +255,7 @@ export class Connection {
     }
     this.startedHostAt = Date.now();
     this.set("starting", null, cx);
-    const cfg = await readConfig();
+    const cfg = await readConfig(side);
     // The chat's agent: its props, else what the registry recorded (a reopened chat keeps it).
     const provider = this.o.provider ?? entry?.provider ?? DEFAULT_PROVIDER;
     this.provider = provider;
@@ -224,7 +263,7 @@ export class Connection {
     const agent = cfg.agent(provider);
     if (!host) {
       this.startFailed = true;
-      this.set("failed", `mods/${MOD}/config.json has no "host"`, cx);
+      this.set("failed", side ? `herdr-chat isn't installed on ${side.machine} (its mods/${MOD}/config.json names no host): install it there too` : `mods/${MOD}/config.json has no "host"`, cx);
       return;
     }
     const env = { ...agent.env, ...(this.o.hostEnv ?? {}) };
@@ -236,10 +275,10 @@ export class Connection {
       // labels yet: the app would adopt it as a visible pane. The chat adds
       // its pane, hidden, to the layout document, then labels it (main.js
       // keepHostHidden). --keep: the core keeps it, as adoption would.
-      "run", "--bg", "--json", "--keep", "--no-parent", "--cwd", this.o.cwd,
+      "run", "--bg", "--json", "--keep", "--no-parent", ...(side ? ["--on", side.machine] : []), "--cwd", this.o.cwd,
       "--label", `herdr-chat.chat=${this.o.chat}`, "--label", "herdr-chat.role=host",
       "--", "/usr/bin/env", ...Object.entries(env).map(([k, v]) => `${k}=${v}`),
-      host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", stateDir(), "--app-home", appHome(), "--provider", provider,
+      host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", sideState(side), "--app-home", side ? side.home : appHome(), "--provider", provider,
       ...(session ? ["--session", session] : []),
       // A Pi TUI this chat takes over: the host waits for its pid, then uses its model and
       // thinking (only while that pid lives: a later restart of the chat ignores them).
@@ -284,5 +323,6 @@ export class Connection {
   close() {
     this.closed = true;
     this.resync();
+    if (this.forwarded) forget(this.forwarded.machine, this.forwarded.port);
   }
 }

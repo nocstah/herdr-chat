@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { clipboardImage } from "../../host/clipboard.ts";
 
 const PNG = Buffer.from(
@@ -67,4 +68,26 @@ test("Linux clipboard: X11 takes the PNG through xclip; a file that isn't a PNG 
   const out2 = join(dir, "paste2.png");
   assert.equal(await withEnv({ PATH: `${liar}:/usr/bin:/bin`, WAYLAND_DISPLAY: undefined, DISPLAY: ":9" }, () => clipboardImage(out2)), null);
   assert.ok(!existsSync(out2), "nothing written");
+});
+
+test("clipboard-image: the host command saves this computer's clipboard image for a chat whose host is elsewhere", { skip: linux }, () => {
+  const src = join(mkdtempSync(join(tmpdir(), "herdr-chat-png-")), "in.png");
+  writeFileSync(src, PNG);
+  const out = join(mkdtempSync(join(tmpdir(), "herdr-chat-cli-")), "sub", "paste.png");
+  const host = join(import.meta.dirname, "../../host/main.ts");
+  const run = (dir: string) => spawnSync(process.execPath, [host, "clipboard-image", "--out", out],
+    { encoding: "utf8", env: { PATH: `${dir}:/usr/bin:/bin`, WAYLAND_DISPLAY: "wayland-test", HOME: tmpdir() } });
+
+  const r = run(standIn("wl-paste", "image/png", src));
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { path: out }, "its folder made, the path said");
+  assert.deepEqual(readFileSync(out), PNG);
+
+  const none = run(standIn("wl-paste", "text/plain", src));
+  assert.equal(none.status, 0, none.stderr);
+  assert.deepEqual(JSON.parse(none.stdout), { path: null }, "no image: path null, exit 0");
+
+  const bare = spawnSync(process.execPath, [host, "clipboard-image"], { encoding: "utf8" });
+  assert.equal(bare.status, 2);
+  assert.match(bare.stderr, /needs --out/);
 });

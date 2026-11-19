@@ -11,7 +11,7 @@
 // the restart.
 
 import { shared, terminals } from "herdr";
-import { readConfig } from "./connection.js";
+import { hostSide, readConfig } from "./connection.js";
 
 /** The build the person asked every chat to restart on (new-chat's question sets it; the same key there). */
 const RESTART_ALL = "herdr-chat.update.restart";
@@ -49,8 +49,10 @@ export class Updater {
     this.updatingTo = null; // the version a restart is under way to (the note once the new host answers)
   }
 
-  async load() {
-    this.cfg = await readConfig();
+  // `machine`: the chat's host runs on that machine, from its install (machines.js): compared with that one.
+  async load(machine = null) {
+    if (machine) this.cfg = null; // until that install is read, no restart: this computer's isn't the host's
+    this.cfg = await readConfig(await hostSide(machine));
   }
 
   /** The one rule: this chat can restart onto the install. */
