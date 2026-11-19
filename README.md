@@ -162,6 +162,16 @@ Images and diagrams the host saves are copied here when the chat shows them
 up to 8 MB). Continue as chat and `/tui` work on that machine's agents as on
 this computer's, except for sub-agents, which still open their TUI.
 
+### Plan limits for other tools
+
+Claude Code tells a chat its plan limits as it runs (it hands them to a status
+line otherwise, and a chat has none). The last ones any chat heard are in
+`~/.config/herdr-app/data/herdr-chat/limits/claude.json`, in the shape Claude
+Code gives a status line, with the time they were seen:
+`{"at": 1795000000, "five_hour": {"used_percentage": 25, "resets_at": …},
+"seven_day": {…}}`. Nothing else goes there; a panel or a status bar can read
+it.
+
 ## Limitations
 
 - **Another machine's spaces need ssh** to that machine, and herdr-chat
