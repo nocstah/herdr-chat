@@ -9,6 +9,9 @@
   "stop": "ctrl-c",
   "tui": "cmd-alt-t",
   "resume": "cmd-shift-r",
+  "pageUp": "pageup",
+  "pageDown": "pagedown",
+  "top": null,
   "latest": "cmd-shift-b",
   "focusComposer": "cmd-l",
   "newChat": "cmd-shift-n"

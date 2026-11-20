@@ -57,6 +57,21 @@ export class Timeline {
     this.sticky = true;
   }
 
+  // Page Up (dir 1) and Page Down (-1): most of a screen, keeping a few lines
+  // of the last one in view, as a wheel would scroll it.
+  /** @param {1 | -1} dir */
+  page(dir) {
+    this.scrollBy(dir * Math.max(40, Math.round(this.viewH * 0.85)));
+  }
+
+  // The first loaded row at the top. Near the top, older history loads in front
+  // (onNearTop) and the rows on screen stay put, so pressing it again goes further back.
+  toTop() {
+    if (this.total <= this.viewH) return;
+    this.sticky = false;
+    this.top = 0;
+  }
+
   // Items were put in front (history): keep what's on screen where it is. The
   // next view() finds one of the rows shown now and puts it back at the same
   // y. (The items themselves don't say how much room they take: tools and

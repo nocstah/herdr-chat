@@ -1144,6 +1144,9 @@ export default class HerdrChat extends View {
         if (caps?.tui === false) return this.flash(`${this.providerName()} has no terminal UI to continue in`, cx);
         return this.startHandoff("session", "tui", cx);
       case "resume": return toggle("sessions", () => this.openSessionsPicker(cx));
+      case "pageUp": this.timeline.page(1); break;
+      case "pageDown": this.timeline.page(-1); break;
+      case "top": this.timeline.toTop(); break;
       case "latest": this.timeline.toBottom(); break;
       case "focusComposer":
         if (this.picker) this.picker = null;
