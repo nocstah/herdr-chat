@@ -103,6 +103,9 @@ function hoverable(el, it, c) {
   return el.id(`msg-${it.id}`).on_hover((h, cx) => c.setHover(it.id, h, cx));
 }
 
+// A long message of yours (a pasted log, a spec) folds to its first lines in
+// its bubble, with "Show full message" under them; Copy and Edit take it whole.
+const USER_LINES = 12;
 function user(it, c) {
   const t = c.t;
   const env = unwrapHc(it.text);
@@ -121,7 +124,14 @@ function user(it, c) {
   // of that (a two-line message took four). The actions are placed against its
   // left edge, outside the layout.
   const b = SPACE.bubble;
-  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}`, text || " "));
+  const lines = (text ?? "").split("\n");
+  const long = lines.length > USER_LINES + 2 || (text ?? "").length > 1500;
+  const open = !long || c.expanded.has(`user:${it.id}`);
+  const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
+  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, shown || " "));
+  const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
+    .on_click((_e, cx) => c.toggle(`user:${it.id}`, cx))
+    .child(icon(open ? "chevron-up" : "chevron-down", 11)).child(open ? "Show less" : `Show full message · ${plural(lines.length, "line")}`)] : [];
   const skill = it.skill;
   // What the agent got for the skill, under its pill once opened.
   const skillBody = Boolean(skill?.body) && c.expanded.has(`skill:${it.id}`)
@@ -139,6 +149,7 @@ function user(it, c) {
       .child(div().absolute().right_full().bottom(2).pr(6).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
       .when(tags.length > 0, (e) => e.child(h_flex().gap(8).text_size(11).text_color(t.dim).children(tags)))
       .children(content)
+      .children(more)
       .children([images(it.imagePaths, it.imageSizes, it.id, c)].filter(Boolean)));
 }
 
