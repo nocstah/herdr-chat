@@ -116,6 +116,10 @@ function user(it, c) {
   else if (it.source === "queued") tags.push(div().child("queued"));
   if (it.images) tags.push(h_flex().gap(4).items_center().child(icon("image", 11)).child(plural(it.images, "image")));
   // The actions sit left of the bubble, on its last line: no extra height.
+  // The bubble is the column's own child, aligned right, so it is as wide as
+  // its text up to its max: as an item of a row it was laid out at a fraction
+  // of that (a two-line message took four). The actions are placed against its
+  // left edge, outside the layout.
   const b = SPACE.bubble;
   const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}`, text || " "));
   const skill = it.skill;
@@ -130,9 +134,9 @@ function user(it, c) {
   else if (!text) content = [h_flex().child(skillPill(it, c)), ...skillBody];
   else if (!text.includes("\n") && text.length <= 80) content = [h_flex().gap(8).items_center().child(skillPill(it, c)).child(body("-i").flex_1().min_w(0)), ...skillBody];
   else content = [h_flex().child(skillPill(it, c)), ...skillBody, body("-s")];
-  return hoverable(h_flex().gap(6).items_end().justify_end(), it, c)
-    .child(div().flex_none().pb(2).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
-    .child(v_flex().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised)
+  return hoverable(v_flex().items_end(), it, c)
+    .child(v_flex().relative().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised)
+      .child(div().absolute().right_full().bottom(2).pr(6).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
       .when(tags.length > 0, (e) => e.child(h_flex().gap(8).text_size(11).text_color(t.dim).children(tags)))
       .children(content)
       .children([images(it.imagePaths, it.imageSizes, it.id, c)].filter(Boolean)));
