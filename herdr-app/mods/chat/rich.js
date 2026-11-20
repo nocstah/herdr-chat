@@ -101,8 +101,11 @@ export function copyButton(id, text, c, { size = 12, label = null } = {}) {
     .child(icon(done ? "check" : "copy", size)).when(Boolean(label), (e) => e.child(done ? "Copied" : label));
 }
 
-// A code card: language and copy on top, highlighted monospace lines below,
-// capped at CODE_CAP lines until "Show all N lines".
+// A code card: highlighted monospace lines, capped at CODE_CAP lines until
+// "Show all N lines". The language and Copy sit in the card's top right corner.
+// A finished block (codeview.js) shows them while the pointer is over it
+// (c.codeHover) or just after a copy: at rest it is the code alone. A card drawn
+// in place (a fence still streaming, with a spinner; a diagram's source) always does.
 export function codeCard(key, lang, code, lines, open, c) {
   const t = c.t;
   // Streaming (open fence): plain lines, one text run each, far cheaper to
@@ -112,10 +115,13 @@ export function codeCard(key, lang, code, lines, open, c) {
   const full = c.expanded.has(`code:${key}`);
   const shown = full ? all.slice(0, RENDER_MAX) : all.slice(0, CODE_CAP);
   const more = n - shown.length;
-  const head = h_flex().h(30).pl(12).pr(6).gap(8).items_center().border_b_1().border_color(c.line)
-    .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(lang || "text"))
-    .when(Boolean(open), (e) => e.child(spinner(11, t.dim)))
-    .child(copyButton(`code:${key}`, code, c));
+  const corner = open || !c.codeBody || c.codeHover || c.copied(`code:${key}`)
+    ? h_flex().absolute().top(4).right(4).h(26).pl(9).pr(2).gap(6).items_center().rounded(7)
+      .bg(c.codeBg).border_1().border_color(c.line)
+      .child(div().text_size(11.5).text_color(t.dim).child(lang || "text"))
+      .when(Boolean(open), (e) => e.child(spinner(11, t.dim)))
+      .child(copyButton(`code:${key}`, code, c))
+    : null;
   const rendered = shown.map((l) => codeLine(l, t, t.foreground));
   // A finished block (codeview.js) scrolls sideways and selects; a streaming one is clipped.
   const body = (c.codeBody ? c.codeBody(rendered, code.replace(/\n$/, "").split("\n").slice(0, shown.length))
@@ -128,8 +134,8 @@ export function codeCard(key, lang, code, lines, open, c) {
       .child(icon(full ? "chevron-up" : "chevron-down", 12))
       .child(full ? (more > 0 ? `Showing ${shown.length} of ${n} lines · copy for the rest` : "Show less") : `Show all ${n} lines`)
     : null;
-  return v_flex().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
-    .child(head).child(body).children(foot ? [foot] : []);
+  return v_flex().relative().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
+    .child(body).children(foot ? [foot] : []).children(corner ? [corner] : []);
 }
 
 // A mermaid block: the host's SVG (click to enlarge, "Show source"), its
