@@ -52,7 +52,7 @@ export default class ChatSwitch extends View {
 
   render() {
     const t = theme();
-    const bar = h_flex().id("chat-switch").size_full().pr(10).items_center().justify_end().bg(t.chrome).border_b(1).border_color(t.border);
+    const bar = h_flex().id("chat-switch").size_full().pl(2).pr(10).items_center().justify_start().bg(t.chrome).border_b(1).border_color(t.border);
     const it = this.target();
     if (!it) return bar;
     const live = it.term.state === "live";

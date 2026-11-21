@@ -20,6 +20,8 @@
 // right end: the tabs block (id `tabs`, Herdr's tabs or a copy such as
 // OmaRelay's) goes into a row with it, the row taking the block's size;
 // uninstall puts the block back as it was (its keys' order in the record).
+// The switch's block is as wide as its widest pill (with "needs you"); one an
+// earlier release made wider (OLD_SWITCH_PX) is narrowed, a width set by hand kept.
 //
 //   node install/layout.ts install <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands] [--no-switch]
 //                                  [--take-agents-slot] [--take-menu] [--record <file>]
@@ -35,7 +37,10 @@ export const COMMANDS = { id: "new-chat-commands", edge: "bottom", align: "start
 const isCommands = (f: Json) => f?.id === COMMANDS.id && f?.content?.mod === "new-chat" && f?.content?.props?.role === "commands";
 export const SWITCH_MOD = "chat-switch";
 export const SWITCH_ROW = "chat-switch-row";
-const SWITCH = { id: "chat-switch", type: "block", size: { px: 236 }, window_drag: true, content: { mod: SWITCH_MOD } };
+export const SWITCH_PX = 224;
+/** The switch block's widths in earlier releases: an install narrows them to SWITCH_PX. */
+const OLD_SWITCH_PX = [236];
+const SWITCH = { id: "chat-switch", type: "block", size: { px: SWITCH_PX }, window_drag: true, content: { mod: SWITCH_MOD } };
 const isSwitch = (n: Json) => n?.content?.mod === SWITCH_MOD;
 /** A block's own size, which the row takes while the block is in it. */
 const SIZING = ["size", "min", "max"];
@@ -47,7 +52,7 @@ export type Patched = {
   agentsHolder?: string;
   menuHolder?: string;
   commands: "changed" | "already" | "skipped";
-  switch: "changed" | "already" | "noslot" | "skipped";
+  switch: "changed" | "resized" | "already" | "noslot" | "skipped";
   menuWas?: string | null;
   /** The tabs block's keys in their order, to put it back exactly. */
   tabsKeys?: string[];
@@ -132,10 +137,13 @@ export function patchLayout(layout: Json, want: { agents: boolean; menu: boolean
     }
   }
   if (want.switch) {
-    let ours = false;
-    walk(layout, (n) => { if (isSwitch(n)) ours = true; });
+    let ours: Json = null;
+    walk(layout, (n) => { if (isSwitch(n) && !ours) ours = n; });
     const slot = ours ? null : tabsSlot(layout);
-    if (ours) out.switch = "already";
+    if (ours && OLD_SWITCH_PX.includes(ours.size?.px)) {
+      ours.size = { ...ours.size, px: SWITCH_PX };
+      out.switch = "resized";
+    } else if (ours) out.switch = "already";
     // A top bar across a column: a row of the bar and the switch takes its place there.
     else if (!slot || slot.parent?.type !== "column" || !Array.isArray(slot.parent.children)) out.switch = "noslot";
     else {
@@ -263,7 +271,7 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
   let r: Patched = { agents: "skipped", menu: "skipped", commands: "skipped", switch: "skipped" };
   editJson(join(home, "layouts", `${name}.json`), (l) => {
     r = patchLayout(l, { agents: o.agents, menu: o.menu, commands: o.commands ?? true, switch: o.switch ?? true, take: o.take });
-    return r.agents === "changed" || r.menu === "changed" || r.commands === "changed" || r.switch === "changed";
+    return r.agents === "changed" || r.menu === "changed" || r.commands === "changed" || r.switch === "changed" || r.switch === "resized";
   });
   if (r.menu === "changed" || r.commands === "changed" || r.switch === "changed") {
     const rec = readRecord(o.record);
@@ -293,6 +301,7 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
   const commands = { changed: "new-chat's keys work (a new-chat copy in its floating list)", already: "new-chat's keys already work", skipped: "" }[r.commands];
   const sw = {
     changed: "the top bar has the chat view's Chat/Terminal switch",
+    resized: `the top bar's Chat/Terminal switch is narrower (${SWITCH_PX} px), beside the tabs`,
     already: "the top bar already has the Chat/Terminal switch",
     noslot: "no top bar block (id tabs) in a column: the chat view keeps its own Chat/Terminal switch",
     skipped: "",
