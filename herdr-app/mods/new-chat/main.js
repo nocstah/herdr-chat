@@ -18,8 +18,9 @@
 //   `new-chat.continue`: the same on the focused terminal (the "continue" key);
 // - `new-chat.flip`: a Claude Code terminal ⇄ its chat view, in place (the "flip" key,
 //   Ctrl+Shift+J as in Ovis; faces.js); `new-chat.flip:<terminal>`: that terminal's;
-// - `new-chat.first-face:chat|terminal`: the face a terminal shows when Claude Code starts
-//   in it (settings.json `claude.face`; first-face.js): with chat, its chat view, flipped
+// - `new-chat.first-face:chat|terminal`, `new-chat.first-face:codex:chat|terminal`: the face a
+//   terminal shows when Claude Code (or Codex) starts in it (settings.json `claude.face`,
+//   `codex.face`; first-face.js): with chat, its chat view, flipped
 //   as the flip key does (FirstFace);
 // - `new-chat.update-check`: the update questions now, the release lookup too (update.js;
 //   they also run a few seconds after this block starts, an install reloads it, and
@@ -33,7 +34,7 @@ import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
 import { appHas, bare, flip, viewProps, viewTerminal } from "./faces.js";
-import { faceOf, started, withFace } from "./first-face.js";
+import { VIEW_AGENTS, faceOf, started, withFace } from "./first-face.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -240,7 +241,7 @@ export async function continueInPlace(t, agent, pid, cwd, found, cx, on = null) 
 
 // The floating block: commands only, nothing drawn.
 /**
- * The flip key on a terminal (faces.js): a Claude Code terminal shows its chat
+ * The flip key on a terminal (faces.js): a Claude Code or Codex terminal shows its chat
  * view in its place (made the first time; the view's host reads the session
  * the TUI has open and types into it, so nothing restarts), and a terminal
  * whose view shows goes back. In the view itself the chat mod takes the key.
@@ -251,17 +252,18 @@ async function flipFace(addr, cx) {
   const f = focused();
   // A chat view's pane whose keyboard isn't in the chat (its own key didn't take it): its terminal.
   const terminal = addr || f?.terminal || (f?.pane ? await viewTerminal(f.pane) : null);
-  if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code terminal to its chat view: focus one first.");
+  if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code or Codex terminal to its chat view: focus one first.");
   const t = term(terminal);
   if (!t || t.state !== "live") throw new Error(`Terminal ${terminal} isn't running.`);
-  const claude = agentOf(t) === "claude";
-  const props = claude ? viewProps(bare(terminal), t.foreground?.cwd ?? t.cwd ?? null) : null;
+  const agent = agentOf(t);
+  const viewable = VIEW_AGENTS.includes(agent);
+  const props = viewable ? viewProps(bare(terminal), t.foreground?.cwd ?? t.cwd ?? null, agent) : null;
   let r;
   try {
     r = await flip(cx, terminal, "toggle", props);
   } catch (/** @type {any} */ e) {
-    if (!claude && /no chat view yet/.test(String(e?.message))) {
-      throw new Error(agentOf(t) ? `The chat view is for Claude Code terminals for now (this one runs ${NAMES[agentOf(t)] ?? agentOf(t)}).` : "No agent runs here: the chat view is for a Claude Code terminal.");
+    if (!viewable && /no chat view yet/.test(String(e?.message))) {
+      throw new Error(agent ? `The chat view is for Claude Code and Codex terminals for now (this one runs ${NAMES[agent] ?? agent}).` : "No agent runs here: the chat view is for a Claude Code or Codex terminal.");
     }
     throw e;
   }
@@ -286,24 +288,26 @@ async function readSettings() {
   }
 }
 
-/** `new-chat.first-face:<face>`: settings.json's claude.face, the rest of the file as it was. */
-async function setFirstFace(face) {
+/** `new-chat.first-face:[<agent>:]<face>`: settings.json's claude.face (or the agent's), the rest of the file as it was. */
+async function setFirstFace(arg) {
+  const [agent, face] = arg.includes(":") ? arg.split(":", 2) : ["claude", arg];
+  if (!VIEW_AGENTS.includes(agent)) throw new Error(`first-face is for ${VIEW_AGENTS.join(" and ")}, not "${agent}".`);
   if (face !== "chat" && face !== "terminal") throw new Error(`first-face takes chat or terminal, not "${face}".`);
   const settings = await readSettings();
-  if (settings?.claude?.face === face) return;
+  if (settings?.[agent]?.face === face) return;
   await fs.mkdir(`${appHome()}/data/herdr-chat`, { recursive: true });
-  await fs.writeFile(SETTINGS(), JSON.stringify(withFace(settings, face), null, 2) + "\n");
+  await fs.writeFile(SETTINGS(), JSON.stringify(withFace(settings, face, agent), null, 2) + "\n");
 }
 
 /**
- * Claude Code's first face (first-face.js): every half second, this computer's terminals where Claude Code started
- * since the last look; unless settings.json's claude.face is "terminal", each shows its chat view, made as the flip key
- * makes it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
+ * Claude Code's and Codex's first face (first-face.js): every half second, this computer's terminals where one started
+ * since the last look; unless settings.json's face for that agent is "terminal", each shows its chat view, made as the
+ * flip key makes it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
  * keyboard follows into the view only from the terminal's own pane.
  */
 class FirstFace {
   constructor(cx) {
-    /** @type {Map<string, boolean> | null} address → ran Claude Code at the last look */
+    /** @type {Map<string, boolean> | null} address → ran Claude Code or Codex at the last look */
     this.was = null;
     /** @type {Map<string, number>} address → until when to try its flip */
     this.pending = new Map();
@@ -318,32 +322,32 @@ class FirstFace {
     try {
       const list = terminals().filter((t) => t?.address && !machineOf(t.address));
       // Not one of herdr-chat's own: a chat's host, or the TUI its /tui opened, which was asked for as a terminal.
-      const runs = (t) => t.state === "live" && agentOf(t) === "claude" && !Object.keys(t.labels ?? {}).some((k) => k.startsWith("herdr-chat."));
+      const runs = (t) => t.state === "live" && VIEW_AGENTS.includes(agentOf(t)) && !Object.keys(t.labels ?? {}).some((k) => k.startsWith("herdr-chat."));
       const now = Date.now();
       for (const a of started(this.was, list, runs, now)) this.pending.set(a, now + 8000);
       this.was = new Map(list.map((t) => [t.address, runs(t)]));
       if (!this.pending.size) return;
-      // A settings.json that isn't JSON: as one without the key (setFirstFace says what's wrong with it).
-      let face = faceOf(null);
+      // A settings.json that isn't JSON: as one without the keys (setFirstFace says what's wrong with it).
+      let settings = null;
       try {
-        face = faceOf(await readSettings());
+        settings = await readSettings();
       } catch {}
       for (const [address, until] of [...this.pending]) {
         const t = list.find((x) => x.address === address);
-        if (face !== "chat" || !t || !runs(t)) {
+        if (!t || !runs(t) || faceOf(settings, agentOf(t)) !== "chat") {
           this.pending.delete(address);
           continue;
         }
         const mine = focused()?.terminal === address;
         try {
-          const r = await flip(cx, address, "chat", viewProps(bare(address), t.foreground?.cwd ?? t.cwd ?? null));
+          const r = await flip(cx, address, "chat", viewProps(bare(address), t.foreground?.cwd ?? t.cwd ?? null, agentOf(t)));
           this.pending.delete(address);
           if (mine && (!r.created || (await appHas(cx, r.pane))) && focused()?.terminal === address) run("pane.focus", { pane: r.pane });
         } catch (e) {
           // A tab just made: its pane reaches the document after this look. Else, or out of time: the terminal stays.
           if (!/has no pane/.test(String(e?.message)) || Date.now() > until) {
             this.pending.delete(address);
-            if (!/has no pane/.test(String(e?.message))) notify({ title: "Chat view", body: `Claude Code started in ${address}; its chat view didn't open: ${e?.message ?? e}`, level: "error" });
+            if (!/has no pane/.test(String(e?.message))) notify({ title: "Chat view", body: `${NAMES[agentOf(t)] ?? "The agent"} started in ${address}; its chat view didn't open: ${e?.message ?? e}`, level: "error" });
           }
         }
       }

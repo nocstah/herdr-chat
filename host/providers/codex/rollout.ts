@@ -35,7 +35,7 @@ function parse(text: string): unknown {
 }
 
 /** update_plan's arguments → the plan event; null when they aren't a plan. */
-function planOf(args: unknown, ts: number | undefined): EventOf<"plan"> | null {
+export function planOf(args: unknown, ts: number | undefined): EventOf<"plan"> | null {
   if (!isObj(args) || !Array.isArray(args.plan)) return null;
   const explanation = str(args.explanation);
   return {
@@ -50,7 +50,7 @@ function planOf(args: unknown, ts: number | undefined): EventOf<"plan"> | null {
 }
 
 /** The update_plan arguments a `response_item` record carries. */
-function planCalls(p: Obj): unknown[] {
+export function planCalls(p: Obj): unknown[] {
   if (p.type === "function_call" && p.name === "update_plan") return [parse(str(p.arguments) ?? "")];
   if (p.type === "custom_tool_call" && p.name === "exec") return literalArgs(str(p.input) ?? "", "tools.update_plan");
   return [];

@@ -1,6 +1,7 @@
-// A Claude Code terminal's two faces, as in Ovis: the terminal itself and
-// its chat view (the terminal view: a chat pane whose host reads the TUI's
-// session and types into it, never runs it; host/providers/claude/terminal.ts).
+// A Claude Code or Codex terminal's two faces, as in Ovis: the terminal itself
+// and its chat view (the terminal view: a chat pane whose host reads the TUI's
+// session and types into it, never runs it; host/providers/claude/terminal.ts,
+// host/providers/codex/terminal.ts).
 // Both are panes of the terminal's tab, in the same place: the view sits
 // right after the terminal in the tree, with its size, and one of the two is
 // marked `hidden: true` in the core's layout document. Herdr doesn't draw a
@@ -165,9 +166,9 @@ export async function viewTerminal(pane) {
   return out ? qualify(machine, bare(out)) : null;
 }
 
-/** The chat view's props for a terminal: a new chat id, Claude Code, the terminal and its folder. */
-export function viewProps(terminal, cwd) {
-  return { chat: `tv-${randomBytes(6).toString("hex")}`, provider: "claude", attach: terminal, ...(cwd ? { cwd } : {}) };
+/** The chat view's props for a terminal: a new chat id, its agent (claude or codex), the terminal and its folder. */
+export function viewProps(terminal, cwd, provider = "claude") {
+  return { chat: `tv-${randomBytes(6).toString("hex")}`, provider, attach: terminal, ...(cwd ? { cwd } : {}) };
 }
 
 /** Until `pane` is in the app (it takes a document change in at its next read): true, or false after `ms`. */
