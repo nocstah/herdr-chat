@@ -189,8 +189,11 @@ export type NormalizedEvent = Common &
     | { type: "notice"; level: NoticeItem["level"]; source: NoticeItem["source"]; text: string; once?: "run" }
 
     // ---- session
-    /** Omitted fields are unchanged. `file` is what the session lock and hand-off use. */
-    | { type: "session"; id?: string | null; file?: string | null; name?: string | null }
+    /**
+     * Omitted fields are unchanged. `file` is what the session lock and hand-off use.
+     * `reload`: the agent is on another session now (not one the core asked for): its history replaces the timeline.
+     */
+    | { type: "session"; id?: string | null; file?: string | null; name?: string | null; reload?: boolean }
     | { type: "model"; model: ModelInfo }
     | { type: "thinking"; level: string }
     | { type: "permission_mode"; mode: string | null }

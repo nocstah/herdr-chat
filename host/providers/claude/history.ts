@@ -158,7 +158,11 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
 
 /** `upTo`: the record the branch ends at (a fork's `--resume-session-at`), else the last one. */
 export function historyEvents(path: string, upTo?: string): NormalizedEvent[] {
-  const records = readTranscript(path);
+  return historyOf(readTranscript(path), path, upTo);
+}
+
+/** The same, from records already read (the terminal view reads the file once for the history and its follower). */
+export function historyOf(records: Rec[], path: string, upTo?: string): NormalizedEvent[] {
   if (!records.length) return [];
   const ctx: Ctx = { names: new Map(), out: [], sessionDir: join(dirname(path), path.replace(/^.*\//, "").replace(/\.jsonl$/, "")) };
   emitRecords(activeBranch(records, upTo), ctx);

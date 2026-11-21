@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/ChmaraX/herdr-chat/main/install.sh 
 ```
 
 It downloads the release, checks it, adds its mods, binds ⌘I
-(Ctrl+Alt+Shift+P on Linux) to the launcher where it's free, and points the agents list and the right-click
+(Ctrl+Alt+N on Linux) to the launcher and ⌘⇧J (Ctrl+Shift+J) to the chat view where they're free, and points the agents list and the right-click
 menu at the chat. No clone, no npm install. Or ask the agent in your Herdr
 window to "add the mod at github.com/ChmaraX/herdr-chat".
 

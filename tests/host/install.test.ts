@@ -164,15 +164,16 @@ function keysHome(o: { keys?: object; mine?: object; record?: object } = {}) {
 const keys = (cmd: string, h: string, ...a: string[]) => execFileSync(process.execPath, [KEYS, cmd, h, "--platform", "darwin", ...a], { encoding: "utf8" });
 const global = (h: string) => JSON.parse(readFileSync(join(h, "keys.json"), "utf8")).global;
 
-test("keys: the default (⌘I opens the launcher), the older install's cmd-j shift-p taken out, a second install changes nothing", () => {
+test("keys: the defaults (⌘I opens the launcher, ⌘⇧J flips the chat view), the older install's cmd-j shift-p taken out, a second install changes nothing", () => {
   const h = keysHome();
   const out = keys("install", h);
-  assert.equal(out.trim().split("\n").at(-1), "New chat: ⌘I", "the last line: the real chord");
+  assert.equal(out.trim().split("\n").at(-1), "New chat: ⌘I · Chat view: ⌘⇧J", "the last line: the real chords");
   const g = global(h);
   assert.equal(g["cmd-i"], "mod.open:new-chat");
+  assert.equal(g["cmd-shift-j"], "new-chat.flip");
   assert.equal(g["cmd-j shift-p"], undefined, "the older install's binding is gone");
   assert.equal(g["cmd-j p"], "mod.open:open-pi", "Pi's TUI key stays");
-  assert.ok(!Object.values(g).some((v) => String(v).startsWith("new-chat.")), "pi, claude, codex unbound by default");
+  assert.ok(!Object.values(g).some((v) => /^new-chat\.(pi|claude|codex|continue)$/.test(String(v))), "pi, claude, codex unbound by default");
   const once = readFileSync(join(h, "keys.json"), "utf8");
   keys("install", h);
   assert.equal(readFileSync(join(h, "keys.json"), "utf8"), once);
@@ -184,7 +185,7 @@ test("keys: chords the person chose replace what had them; uninstall gives back 
   delete (want.global as any)["cmd-j shift-p"];
   const out = keys("install", h);
   assert.match(out, /Pi chat: ⌘J P replaces mod\.open:open-pi \(uninstall puts it back\)/);
-  assert.match(out.trim().split("\n").at(-1)!, /^New chat: ⌘I · Pi chat: ⌘J P$/);
+  assert.match(out.trim().split("\n").at(-1)!, /^New chat: ⌘I · Pi chat: ⌘J P · Chat view: ⌘⇧J$/);
   assert.equal(global(h)["cmd-j p"], "new-chat.pi");
   // The person moves Pi's chat elsewhere: the next install gives cmd-j p back to Pi's TUI.
   writeFileSync(join(h, "data", "herdr-chat", "keys.json"), JSON.stringify({ global: { pi: "cmd-alt-p" } }));
@@ -202,7 +203,7 @@ test("keys: the default ⌘I taken by something else falls back to ⌘J A, and s
   const h = keysHome({ keys: k });
   const out = keys("install", h);
   assert.match(out, /⌘I is taken \(mod\.open:files\): New chat is ⌘J A instead/);
-  assert.equal(out.trim().split("\n").at(-1), "New chat: ⌘J A");
+  assert.equal(out.trim().split("\n").at(-1), "New chat: ⌘J A · Chat view: ⌘⇧J");
   assert.equal(global(h)["cmd-i"], "mod.open:files");
   assert.equal(global(h)["cmd-j a"], "mod.open:new-chat");
   keys("uninstall", h);
@@ -221,6 +222,18 @@ test("keys: without the layout's new-chat copy (--no-direct) only the launcher k
   assert.match(out, /Pi chat: ⌘J P not bound: it needs the layout's new-chat copy/);
   assert.equal(global(h)["cmd-j p"], "mod.open:open-pi");
   assert.equal(global(h)["cmd-i"], "mod.open:new-chat");
+  assert.equal(global(h)["cmd-shift-j"], undefined, "the flip key needs it too");
+});
+
+test("keys: the flip key taken by something else stays theirs, and says so; null unbinds it", () => {
+  const k = herdrKeys();
+  (k.global as any)["cmd-shift-j"] = "mod.open:files";
+  const h = keysHome({ keys: k });
+  assert.match(keys("install", h), /⌘⇧J is taken \(mod\.open:files\): the chat view has no key/);
+  assert.equal(global(h)["cmd-shift-j"], "mod.open:files");
+  const h2 = keysHome({ mine: { global: { flip: null } } });
+  assert.equal(keys("install", h2).trim().split("\n").at(-1), "New chat: ⌘I");
+  assert.equal(global(h2)["cmd-shift-j"], undefined);
 });
 
 // --- the sub-agents note: install/instructions.ts ---------------------------------------
@@ -321,9 +334,10 @@ test("install.sh: --no-subagents writes no templates and no notes; a plain insta
   const before = { layout: read(app, "mine"), keys: readFileSync(join(app, "keys.json"), "utf8") };
 
   const quiet = sh("--no-subagents");
-  // The launcher's default chord on this platform: ⌘I on macOS, Ctrl+Alt+Shift+P elsewhere.
+  // The default chords on this platform: ⌘I and ⌘⇧J on macOS, Ctrl+Alt+N and Ctrl+Shift+J elsewhere.
   const open = pretty(keyDefaults(process.platform).open, process.platform);
-  assert.equal(quiet.trim().split("\n").at(-1), `  keys       New chat: ${open}`, "the summary's last line: the real chord");
+  const flipKey = pretty(keyDefaults(process.platform).flip, process.platform);
+  assert.equal(quiet.trim().split("\n").at(-1), `  keys       New chat: ${open} · Chat view: ${flipKey}`, "the summary's last line: the real chords");
   assert.match(quiet, /^ {2}templates  none \(--no-subagents\)$/m);
   assert.match(quiet, /^herdr-chat: Herdr 9\.0\.0 is newer than the tested .*\n/, "the warning first, then the install");
   assert.ok(!existsSync(join(tpl, "pi-chat.md")), "no templates");

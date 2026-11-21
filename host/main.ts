@@ -12,6 +12,7 @@ import { writeRegistry, readRegistry, pidAlive } from "./registry.ts";
 import type { RegistryEntry } from "./registry.ts";
 import { ChatClient, parseWait } from "./client.ts";
 import { createAdapter, DEFAULT_PROVIDER, providerNames, tuiSession } from "./providers/index.ts";
+import { ClaudeTerminalAdapter } from "./providers/claude/terminal.ts";
 import { parseArgs } from "./args.ts";
 import type { Args } from "./args.ts";
 import { appHomeOf, labelSelf, newChatId, planSubagent } from "./subagent.ts";
@@ -21,9 +22,10 @@ import { hostBuild } from "./build.ts";
 import { clipboardImage } from "./clipboard.ts";
 import { saveLimits } from "./limits.ts";
 
-const USAGE = `herdr-chat-host serve   --chat <id> --cwd <dir> --state-dir <dir> [--provider pi] [--session <file>] [--after-pid <pid> [--model <provider/id>] [--thinking <level>]] [--app-home <dir>] [--<provider> <cmd>] [-- <agent args>]
+const USAGE = `herdr-chat-host serve   --chat <id> --cwd <dir> --state-dir <dir> [--provider pi] [--session <file>] [--after-pid <pid> [--model <provider/id>] [--thinking <level>]] [--attach <terminal>] [--app-home <dir>] [--<provider> <cmd>] [-- <agent args>]
   (--app-home: the Herdr app's home, whose app it asks to close its hidden pane once its chat's pane is gone; default $HERDR_APP_HOME, else ~/.config/herdr-app)
   (--provider defaults to the chat's registered provider, else pi; --pi <cmd> or HERDR_CHAT_PI picks the pi binary)
+  (--attach <terminal>: the terminal view, Claude Code only: the agent is its own TUI in that terminal, which the chat reads and types into, never runs)
 herdr-chat-host run     [--provider pi|claude|codex] [--session <file>] [--cwd <dir>] [-- <agent args>]
   (a sub-agent chat, for \`hc run\`: a fresh chat id, the app's state dir and the chat mod's config.json, labels its own terminal)
 herdr-chat-host tui-session --provider <id> --pid <pid> --cwd <dir> [--label <session>]
@@ -77,8 +79,15 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
       appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`);
     } catch {}
   };
-  const adapter = createAdapter(provider, { cwd, args: a.after, log, ...(agentCommand ? { command: agentCommand } : {}) });
-  log(`serve chat=${chatId} cwd=${cwd} session=${session ?? "-"} provider=${provider} cmd=${agentCommand ?? "(default)"} pid=${process.pid}`);
+  // --attach <terminal>: the terminal view. The agent is the person's own TUI in that terminal;
+  // this host reads its session and types into it (providers/claude/terminal.ts), never runs it.
+  const view = a.flags.get("attach")?.[0] ?? null;
+  if (view && provider !== "claude") die(`--attach works with Claude Code only for now (not ${provider})`);
+  const hcBin = process.env.HERDR_CHAT_HC || "hc";
+  const adapter = view
+    ? new ClaudeTerminalAdapter({ cwd, args: [], log, command: "claude", terminal: view, hc: hcBin })
+    : createAdapter(provider, { cwd, args: a.after, log, ...(agentCommand ? { command: agentCommand } : {}) });
+  log(`serve chat=${chatId} cwd=${cwd} session=${session ?? "-"} provider=${provider} cmd=${agentCommand ?? "(default)"}${view ? ` view=${view}` : ""} pid=${process.pid}`);
 
   // Images saved by an earlier run of this chat belong to items that no longer exist.
   rmSync(join(stateDir, "images", chatId), { recursive: true, force: true });
@@ -103,7 +112,7 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   const attachments = new Attachments(join(stateDir, "attachments", chatId));
   const term = new Terminal(process.stdout, process.stdin, provider);
   const chat = new Chat({
-    chat: chatId, cwd, session, adapter, terminal: terminalId, log,
+    chat: chatId, cwd, session, adapter, terminal: terminalId, log, view,
     afterPid: handOver ? afterPid : null,
     imageDir: join(stateDir, "images", chatId),
     attachments,
@@ -125,7 +134,8 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
     onShutdown: () => void exit(0),
   });
   const server = new ChatServer(chat, token, log);
-  chat.onTerminalState = (s, m) => term.status(s, m);
+  // The terminal view's host reports no status: the agent's own terminal does (one agent, listed once).
+  if (!view) chat.onTerminalState = (s, m) => term.status(s, m);
   chat.sinks.push({
     patch: (p) => {
       term.observe(p.upsert);
@@ -149,7 +159,7 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   // that still holds the attachments.
   const watch = terminalId
     ? new PaneWatch({ chat: chatId, terminal: terminalId, appHome: resolve(a.flags.get("app-home")?.[0] ?? appHomeOf(process.env, homedir())),
-        hc: process.env.HERDR_CHAT_HC || "hc", log, onGone: () => {
+        hc: process.env.HERDR_CHAT_HC || "hc", attached: view, log, onGone: () => {
           attachments.clear();
           void exit(0);
         } })
@@ -164,7 +174,7 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
     } catch {}
     chat.releaseLock();
     save({ pid: null, port: null, wsPort: null });
-    term.status("idle");
+    if (!view) term.status("idle");
     term.close();
     await server.close().catch(() => {});
     process.exit(code);
@@ -182,7 +192,7 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   term.line(`herdr-chat-host · chat ${chatId} · ${cwd}`);
   if (extra.hint) term.line(extra.hint);
   if (extra.warning) term.line(`! ${extra.warning}`);
-  term.status("idle");
+  if (!view) term.status("idle");
   term.title(chat.chatTitle());
   term.start();
   watch?.start();

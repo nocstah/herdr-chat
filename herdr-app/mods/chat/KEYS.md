@@ -10,7 +10,7 @@ The defaults below are macOS's (`keys.default.json`). On Linux they come from
 `keys.default.linux.json`: Ctrl where macOS has ⌘, on chords Herdr's own Linux
 keys leave free (`model` Ctrl+Shift+M, `effort` Ctrl+Shift+I, `mode`
 Ctrl+Shift+A, `tui` Ctrl+Alt+T, `resume` Ctrl+Shift+R, `top` Ctrl+Home, `latest` Ctrl+End,
-`find` Ctrl+F, `focusComposer` Ctrl+L, `newChat` Ctrl+Alt+N). There Ctrl+C is a text field's
+`find` Ctrl+F, `focusComposer` Ctrl+L, `newChat` Ctrl+Alt+N, `flip` Ctrl+Shift+J). There Ctrl+C is a text field's
 copy, so `stop` on Ctrl+C works only outside the composer and the pickers'
 fields; Esc stops the run anywhere.
 
@@ -33,6 +33,7 @@ fields; Esc stops the run anywhere.
 | `find` | ⌘F (`cmd-f`) | Opens find in the chat (Linux: Ctrl+F). It looks through the whole conversation, older messages too: your messages, the answers, notices and a tool's title. It starts at the latest match and marks its row; Enter or ↑ goes to the match before, Shift+Enter or ↓ to the one after, and Esc closes it. A match in folded work opens its group. On macOS ⌘F is also Herdr's terminal find, which a chat pane has no terminal for. |
 | `focusComposer` | ⌘L (`cmd-l`) | Puts the keyboard back in the composer and closes an open picker. |
 | `newChat` | ⇧⌘N (`cmd-shift-n`) | Opens a new chat tab with the same agent in the same folder. |
+| `flip` | ⇧⌘J (`cmd-shift-j`) | In a terminal's chat view: shows the Claude Code terminal in its place (as Ovis's Mod+Shift+J). The same chord in that terminal, Herdr's global `flip` key, shows the chat again. |
 
 `steer` and `followUp` work in the composer only. In a menu Enter picks, and
 on an approval card with nothing typed it answers. Shift+Enter is always a new
@@ -83,9 +84,23 @@ part of the same file, then run `./install.sh` again (it puts them in Herdr's
 ```
 
 `open` is the launcher (`mod.open:new-chat`), `pi`/`claude`/`codex` open that
-agent's chat at once (`new-chat.pi`…). Left out: the default (⌘I for `open`,
-⌘J A when ⌘I is taken; the others unbound). A chord you choose replaces what
+agent's chat at once (`new-chat.pi`…), `flip` shows a Claude Code terminal's chat
+view in its place, or the terminal again (`new-chat.flip`). Left out: the default
+(⌘I for `open`, ⌘J A when ⌘I is taken; on Linux Ctrl+Alt+N, else Ctrl+Alt+Shift+P;
+`flip` ⌘⇧J, on Linux Ctrl+Shift+J; the others unbound). A chord you choose replaces what
 had it, and uninstall puts that back. In the launcher, P, C and X pick.
+
+## The terminal view
+
+A Claude Code terminal can show as a chat, in the same place, the way Ovis
+flips between a pane's terminal and its chat. Ctrl+Shift+J (⌘⇧J) in the terminal
+shows its chat view; the same key in the view, or its Chat | Terminal switch,
+shows the terminal again. Nothing restarts: the Claude Code you started stays
+the one agent, and the view reads its session as it writes it and types what
+you send into it. A slash command that opens a screen in Claude Code (`/model`,
+`/resume`, `/config`) shows the terminal for it. Claude Code's questions and
+permission prompts stay in the terminal for now: the view's bar says when it
+needs you there.
 
 macOS turns ⌘. into Esc before an app sees it, so `stop` uses ⌃C.
 

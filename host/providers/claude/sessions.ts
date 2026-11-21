@@ -15,7 +15,7 @@ export function configDir(): string {
 }
 
 /** The CLI resolves the cwd (macOS /tmp → /private/tmp), then replaces every non-alphanumeric with '-'. */
-export function projectDir(cwd: string): string {
+export function projectDir(cwd: string, dir: string = configDir()): string {
   let real = cwd;
   try {
     real = realpathSync(cwd);
@@ -23,11 +23,12 @@ export function projectDir(cwd: string): string {
   let enc = real.replace(/[^A-Za-z0-9]/g, "-");
   // Long names are cut and given a hash (sessions docs); 200 is the CLI's limit.
   if (enc.length > 200) enc = enc.slice(0, 200) + "-" + createHash("sha256").update(real).digest("hex").slice(0, 8);
-  return join(configDir(), "projects", enc);
+  return join(dir, "projects", enc);
 }
 
-export function sessionPath(cwd: string, id: string): string {
-  return join(projectDir(cwd), `${id}.jsonl`);
+/** `dir`: the Claude config folder (another process's CLAUDE_CONFIG_DIR), else this one's. */
+export function sessionPath(cwd: string, id: string, dir?: string): string {
+  return join(projectDir(cwd, dir), `${id}.jsonl`);
 }
 
 export function sessionIdOf(path: string): string {

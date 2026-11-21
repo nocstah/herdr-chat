@@ -139,6 +139,12 @@ export type ChatOptions = {
    * for it to exit before the first start.
    */
   afterPid?: number | null;
+  /**
+   * The terminal view: the agent is the person's own TUI in this terminal
+   * (providers/claude/terminal.ts), so the chat offers only what works beside
+   * it (no built-ins that drive the agent; those are typed in the terminal).
+   */
+  view?: string | null;
   log: (msg: string) => void;
   onSessionFile?: (file: string | null) => void;
   onVersion?: (v: string | null) => void;
@@ -244,7 +250,7 @@ export class Chat {
       utility: (n) => a.utilityCommand?.(n) ?? null,
       tuiInput: (n) => a.tuiInput?.(n) ?? null,
     });
-    return mergeCommands(builtin, this.agentCommands);
+    return mergeCommands(this.opts.view ? builtin.filter((c) => c.name === "copy") : builtin, this.agentCommands);
   }
 
   /** The agent's display name, for messages ("Pi", "Claude Code"). */
@@ -717,6 +723,8 @@ export class Chat {
         if (ev.file !== undefined) patch.sessionFile = ev.file;
         this.set(patch);
         if (ev.file !== undefined) this.setLock(ev.file);
+        // The agent moved to another session by itself (the terminal view: /clear or /resume typed in its TUI).
+        if (ev.reload) void this.afterSessionChange();
         return;
       }
       case "model":
