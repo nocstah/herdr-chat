@@ -981,22 +981,41 @@ export default class HerdrChat extends View {
     return changed;
   }
 
-  viewBar(t) {
+  // The terminal view's status, in words: only when it wants the person (the
+  // dot says the rest; its tooltip has the word).
+  viewWord(all = false) {
     const st = this.viewStatus;
     // Waiting on a dialog the chat shows as a card: answered here; one it doesn't know: in the terminal.
     const words = { working: "working", blocked: this.store.state.dialog ? "needs you" : "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
+    return all || st === "blocked" || st === "ended" ? words[st] ?? "" : "";
+  }
+
+  // The switch floats at the top right when the pane's margin beside the
+  // column has room for it (no bar across the top, as in Ovis); a narrow
+  // pane gets it in a slim row of its own, so it never covers a message.
+  viewFloats() {
+    if (!this.width) return true;
+    const word = this.viewWord();
+    const pill = 150 + (word ? 8 + word.length * 6.5 : 0);
+    const margin = (this.width - Math.min(COL_MAX, this.width)) / 2 + this.pad();
+    return margin >= pill + 22;
+  }
+
+  viewBar(t) {
+    const st = this.viewStatus;
     const color = st === "blocked" ? t.blocked : st === "ended" ? t.dim : t[st] ?? t.dim;
+    const word = this.viewWord();
     const seg = (id, label, on, what) => div().id(id).flex_none().px(10).py(2).rounded(5).text_size(11.5)
       .when(on, (e) => e.bg(t.background).text_color(t.foreground).font_semibold())
       .when(!on, (e) => e.text_color(t.muted).cursor_pointer().hover((x) => x.text_color(t.foreground)).on_click((_e, cx) => this.control(what, cx)))
       .child(label);
     const tip = keyHint("flip") ?? "Ctrl+Shift+J";
-    return h_flex().id("view-bar").flex_none().h(32).w_full().px(12).gap(8).items_center().bg(t.surface).border_b_1().border_color(t.border).text_size(12)
-      .child(st === "working" ? spinner(11) : div().w(12).flex_none().text_color(color).child(st === "idle" || !st ? "○" : st === "ended" ? "·" : "●"))
-      .child(div().flex_none().font_semibold().text_color(t.foreground).child(this.providerName()))
-      .child(div().truncate().text_color(color).child(words[st] ?? ""))
-      .child(div().flex_1())
-      .child(h_flex().id("view-switch").flex_none().p(2).gap(2).rounded(7).bg(t.hover).tooltip(`Switch · ${tip}`)
+    return h_flex().id("view-bar").flex_none().h(28).pl(10).pr(2).gap(8).items_center().rounded(8)
+      .bg(t.surface).border_1().border_color(t.border).text_size(12)
+      .child(h_flex().id("view-status").flex_none().gap(6).items_center().tooltip(`${this.providerName()} · ${this.viewWord(true)}`)
+        .child(st === "working" ? spinner(11) : div().w(10).flex_none().text_color(color).child(st === "idle" || !st ? "○" : st === "ended" ? "·" : "●"))
+        .when(Boolean(word), (e) => e.child(div().text_color(color).child(word))))
+      .child(h_flex().id("view-switch").flex_none().p(2).gap(2).rounded(6).bg(t.hover).tooltip(`Switch · ${tip}`)
         .child(seg("view-chat", "Chat", true, null))
         .child(seg("view-terminal", "Terminal", false, "view:terminal")));
   }
@@ -2681,7 +2700,7 @@ export default class HerdrChat extends View {
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_size_change((sz, cx) => { if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); } })
       .on_drop((e, cx) => this.drop(e.paths ?? [], cx))
-      .children(this.sub ? [this.subBar(t)] : this.view ? [this.viewBar(t)] : [])
+      .children(this.sub ? [this.subBar(t)] : this.view && !this.viewFloats() ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
 
@@ -2690,7 +2709,7 @@ export default class HerdrChat extends View {
       const notes = rows.filter((r) => r.kind === "item" && r.item.kind === "notice").slice(-3);
       return this.hud(root.child(v_flex().flex_1().min_h(0).justify_center().pb(40)
         .child(this.column(v_flex().gap(18).child(emptyState(this, t)).child(bottom)
-          .when(notes.length > 0, (e) => e.child(v_flex().gap(2).children(notes.map((r) => row(r, c)))))))));
+          .when(notes.length > 0, (e) => e.child(v_flex().gap(2).children(notes.map((r) => row(r, c)))))))), t);
     }
     // Find's match: its row, or in a work group, its own step (cards.js, c.findItem).
     const mark = this.find?.rowId?.startsWith("g-") ? null : this.find?.rowId ?? null;
@@ -2713,11 +2732,13 @@ export default class HerdrChat extends View {
           .child(h_flex().id("latest").h(26).px(11).gap(6).items_center()
             .rounded(13).bg(t.popover).border_1().border_color(t.input).text_size(12).text_color(t.foreground).cursor_pointer().shadow_md()
             .hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.control("latest", cx))
-            .child(icon("arrow-down", 12)).child("Latest"))))));
+            .child(icon("arrow-down", 12)).child("Latest"))))), t);
   }
 
-  // The FPS HUD (debug/fps): on top of the chat, last child of the root.
-  hud(el) {
+  // The terminal view's floating switch and the FPS HUD (debug/fps): on top
+  // of the chat, last children of the root.
+  hud(el, t) {
+    if (this.view && !this.sub && this.viewFloats()) el = el.relative().child(div().absolute().top(8).right(14).child(this.viewBar(t)));
     return this.debug?.fps ? el.relative().child(fps_monitor()) : el;
   }
 
