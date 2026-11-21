@@ -139,7 +139,7 @@ test("layout: tabs already in a row (OmaRelay's, its recap line beside them) get
   const h = home("bar", { bar });
   const before = read(h, "bar");
   assert.match(run("install", h), /the top bar has the chat view's Chat\/Terminal switch/);
-  assert.deepEqual(find(JSON.parse(read(h, "bar")), "inapse-recap-row").children.map((c) => c.id), ["tabs", "inapse-recap", "chat-switch"]);
+  assert.deepEqual(find(JSON.parse(read(h, "bar")), "inapse-recap-row").children.map((c: { id: string }) => c.id), ["tabs", "inapse-recap", "chat-switch"]);
   assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
   assert.match(run("uninstall", h), /the top bar as it was/);
   assert.equal(read(h, "bar"), before);

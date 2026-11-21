@@ -22,7 +22,7 @@
 // uninstall puts the block back as it was (its keys' order in the record).
 // Tabs already in a row (OmaRelay's, with its recap line beside them) get the
 // switch at that row's end, and uninstall takes only the switch out.
-// The switch's block is as wide as its widest pill (with "needs you"); one an
+// The switch's block is as wide as the switch at its widest (with "needs you"); one an
 // earlier release made wider (OLD_SWITCH_PX) is narrowed, a width set by hand kept.
 //
 //   node install/layout.ts install <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands] [--no-switch]
