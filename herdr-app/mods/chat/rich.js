@@ -159,13 +159,16 @@ function mermaid(key, b, c) {
     .child(copyButton(`code:${key}`, b.source ?? "", c));
   let body;
   if (rel) {
-    // Fit the column: the SVG's own aspect ratio once known (else a guess).
-    const w = Math.min(c.colW - 26, size?.w ?? 600);
-    const h = size ? Math.round((w * size.h) / size.w) : 260;
+    // Fit the column, up to 1.4× the drawing's own size so its 13 px labels read like
+    // the prose (a diagram drawn as large as it can be, not left small in a wide card),
+    // and at most 640 px tall; the SVG's own aspect ratio once known (else a guess).
+    let w = Math.min(c.colW - 26, Math.round((size?.w ?? 600) * 1.4));
+    let h = size ? Math.round((w * size.h) / size.w) : 260;
+    if (h > 640) { w = Math.round((w * 640) / h); h = 640; }
     // On hover a ⤢ at the top right says a click opens the zoomable viewer (the click is the body's).
     body = div().id(`svg-${key}`).relative().p(12).flex().justify_center().cursor_pointer().on_click((_e, cx) => c.enlarge(b.svg, size, cx))
       .on_hover((on, cx) => c.setSvgHover(key, on, cx))
-      .child(image(rel).w(w).h(Math.min(h, 640)))
+      .child(image(rel).w(w).h(h))
       .when(c.svgHover === key, (e) => e.child(div().absolute().top(8).right(8).w(26).h(26).flex().items_center().justify_center()
         .rounded(6).bg(alpha(t.popover, 0.92)).border_1().border_color(t.input).text_size(14).text_color(t.foreground).child("⤢")));
   } else {

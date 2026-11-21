@@ -19,6 +19,15 @@ export const DEFAULT_THEME: Theme = {
 
 const MAX_SOURCE = 32 * 1024;
 
+/**
+ * The drawing's own margin, in px (beautiful-mermaid's default is 40): the card
+ * gives the picture its room, so a wide margin only shrinks the diagram when the
+ * column is narrow. Part of the saved file's key (render.ts), so diagrams saved
+ * with another margin are drawn again.
+ */
+export const DIAGRAM_PADDING = 16;
+export const DIAGRAM_STYLE = `padding${DIAGRAM_PADDING}`;
+
 function parseHex(c: string): [number, number, number] | null {
   const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(c.trim());
   if (!m) return null;
@@ -155,7 +164,7 @@ export function renderMermaid(source: string, theme: Theme): MermaidResult {
   let error: string;
   try {
     if (source.length > MAX_SOURCE) throw new Error(`diagram too large (${Math.round(source.length / 1024)} KiB)`);
-    const svg = renderMermaidSVG(source, { ...svgColors(theme), font: "sans-serif" });
+    const svg = renderMermaidSVG(source, { ...svgColors(theme), font: "sans-serif", padding: DIAGRAM_PADDING });
     return { svg: flattenSvg(svg, theme.background) };
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
