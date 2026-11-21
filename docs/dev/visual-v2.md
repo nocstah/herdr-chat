@@ -13,23 +13,28 @@ repo at the commits in [`research/sources/COMMITS.txt`](research/sources/COMMITS
 ## 1. Composer owns the controls
 
 Every major app puts the session controls at the bottom with the input. The
-composer becomes a single rounded card:
+composer is a single rounded card, drawn as the Claude app draws its own
+(OmaRelay build): what goes into the message inside the card, what the chat
+runs with under it.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ Message Pi…                                                        │  textarea (grows 1–10 rows)
+╭──────────────────────────────────────────────────────────────────╮
+│ Message Claude Code…                                               │  textarea (grows 1–10 rows)
 │ [▣ ✕] [▣ ✕]                                                        │  image chips
-├──────────────────────────────────────────────────────────────────┤
-│ ◆ Claude Opus 5.5 ▾   ✦ high ▾   ◔ 23%   $0.42      ⋯ status   ⏎ │  footer row
-└──────────────────────────────────────────────────────────────────┘
+│ +        Enter steers · Alt+Enter after this run · Esc stops   🎙 ⏎ │  + · hint · mic · send
+╰──────────────────────────────────────────────────────────────────╯
+  🗀 shop  ⎇ main  status +2              ◔ 23% $0.42  Opus 5.5 Medium  Manual
 ```
 
-- **Left:** the model chip (picker), the thinking chip (picker), and the context meter: a small ring or bar with the %. The tooltip gives tokens/window and the session cost.
-- **Right:** extension status (see 4), then the primary button: send, or ■ stop while working.
+- **In the card, left:** `+` opens a small menu: Mention a file (types `@`, its menu opens), Commands (types `/`), Paste an image (the clipboard's).
+- **In the card, between:** what the keys do now (while working, or while a card above waits for an answer), or a flash (a copy, a refusal) in the blocked colour. Nothing while idle.
+- **In the card, right:** the mic, where the desktop has a dictation toggle (`omarchy-dictation`, the same toggle Omarchy's dictation keys run; it types into the composer), then the primary button: send, or ■ stop while working.
+- **Under the card, left:** the folder (a click copies its path), its branch (a click copies it), extension status (see 4).
+- **Under the card, right:** the context meter (a small ring; its % and the cost in a wide column; the tooltip gives tokens/window and the session cost), the model as the Claude app names it (`claude-opus-5-5` → Opus 5.5; a click opens its picker, or the TUI's /model in the terminal view), the effort, dimmer (its picker), and the permission mode in the Claude app's words (Manual, Accept edits, Plan, Auto; its picker). The terminal view shows the effort and mode Claude Code's records last said, and changes them in the TUI. Narrow columns drop the effort, then the folder's name and the mode.
 - **The header goes away.** The chat title lives in the Herdr tab. The TUI and Transcript actions move into a small `⋯` menu in the composer footer (or a subtle top-right overlay icon). Herdr already draws a pane header.
 - **Image chips:** a pasted or dropped image shows as a 64×48 thumbnail with a ✕ in its corner. The box is fixed, so the composer keeps its height while the image loads, and a dropped image fills it with an image icon until the host has copied the file. Hovering shows the file name; a click enlarges it in the viewer. The thumbnail is the same as a sent message's (`util.js` `thumbnail`), from the chat's copy of the file (protocol.md "Attachments"). A file the app can't show (an older host) is a chip with an image icon and the file name (`util.js` `fileChip`, as on a sent message). A file the host refuses makes no chip: the hint line shows why.
 - **Queue and steer chips** sit just above the composer card, inside the same column.
-- **The hint line** ("Enter sends…") shows only while the composer is empty and focused. It is dim, 11 px.
+- **The hint** sits in the card's bottom row (see above), dim, 11.5 px: only while working or while a card waits, and "Esc closes" in a peek.
 
 ## 2. A centered content column
 
@@ -75,7 +80,7 @@ We can show only what any extension sends through Pi's standard UI API:
 So the design is **extension-agnostic**: no per-extension code. It is
 keyed, ANSI-to-theme, compact, and never in the way.
 
-- **Statuses** are small dim chips at the right of the composer footer, in key order. Each is truncated to ~28 chars with its full text in a tooltip, and emoji are kept.
+- **Statuses** are small dim chips under the composer, after the folder and branch, in key order. Each is truncated to ~28 chars with its full text in a tooltip, and emoji are kept.
   - When they don't fit, `+N` opens a popover listing every status: key, full text.
   - Empty statuses are hidden.
   - A status can be hidden from its popover row (persisted per key in `localStorage`), with "show hidden" at the bottom.

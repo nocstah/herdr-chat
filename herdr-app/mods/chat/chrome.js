@@ -9,6 +9,7 @@ import { v_flex, h_flex, Popover } from "gpui-base";
 import { MOD, alpha, count, icon, money, providerIcon, spans, spansText, unwrapHc } from "./util.js";
 import { withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
+import { MAC } from "./platform.js";
 
 const STATUS_MAX = 28;
 const STATUS_W = (text) => Math.min(STATUS_MAX, [...text].length) * 6.3 + 18;
@@ -32,51 +33,61 @@ function surface(t) {
   return v_flex().p(4).gap(1).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_md();
 }
 
-// The composer footer's controls, left to right. `v` is the view (main.js).
-// `width`: the room left of the send button. Narrow columns get narrower
-// chips, never an overlap with the button (the row also clips):
-//   xs (< 200 px, a ~240 px column): icons only (labels in the tooltips), every status in "+N";
-//   sm (< 300 px): the model's short name, the level, a mode icon, no chevrons, every status in "+N";
-//   md (< 520 px): shorter names, no cost; statuses as they fit;  full: everything.
+// Under the composer, as the Claude app has it: where the chat works on the left (its folder, the branch,
+// extension statuses), what it runs with on the right (the context, the model with its effort, the
+// permission mode). `v` is the view (main.js); `width` the column's. Narrow columns get less:
+//   xs (< 200 px, a ~240 px column): the folder's icon, the context ring, the model;
+//   sm (< 300 px): and the folder's name, the mode;   md (< 520 px): and the effort, the statuses as they fit;
+//   full: and the context's % and the cost.
 export function footerTier(width) {
   return width < 200 ? "xs" : width < 300 ? "sm" : width < 520 ? "md" : "full";
 }
 
-export function footerControls(v, t, { width }) {
+// The Claude app's words for the permission modes and effort levels: an agent's own labels (its
+// capabilities) win; the terminal view, where the TUI owns them, has only the ids.
+const MODE_LABELS = { default: "Manual", acceptEdits: "Accept edits", plan: "Plan", auto: "Auto", bypassPermissions: "Bypass", dontAsk: "Don't ask" };
+const EFFORT_LABELS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const cap = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+export const effortLabel = (level) => (level && level !== "default" ? EFFORT_LABELS[level] ?? cap(level) : null);
+export const modeLabel = (id, modes) => (id ? modes?.find((m) => m.id === id)?.label ?? MODE_LABELS[id] ?? cap(id) : null);
+
+// "claude-opus-5-5" (a terminal's transcript names the model by its id) → "Opus 5.5"; "Claude Haiku 4.5" →
+// "Haiku 4.5", as the Claude app says them; any other name as it is.
+export function modelLabel(name) {
+  const id = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/i.exec(String(name));
+  return id ? `${cap(id[1].toLowerCase())} ${id[2]}${id[3] ? `.${id[3]}` : ""}` : shortModel(name);
+}
+
+function underChip(id, t, { tip, onClick, color } = {}) {
+  let el = h_flex().id(id).h(24).px(6).gap(5).items_center().rounded(6).text_size(12.5).text_color(color ?? t.muted).flex_none();
+  if (onClick) el = el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(onClick);
+  if (tip) el = el.tooltip(tip);
+  return el;
+}
+
+export function underRow(v, t, { width }) {
   const s = v.store.state;
   const caps = s.capabilities ?? null; // what this agent can do (null until the host says)
   const tier = footerTier(width);
   v.footerTier = tier;
-  const drawn = []; // the chips drawn, by name (the dump: footerChips)
-  const tiny = tier === "xs";
+  const tiny = tier === "xs", small = tiny || tier === "sm";
+  const drawn = []; // what it draws, by name (the dump: footerChips)
+
+  // Left: the folder (a click copies its path), its branch, the statuses.
   const left = [];
-  const name = s.model?.name ?? s.model?.id ?? "Model";
-  const provider = v.providerId();
-  const small = tiny || tier === "sm";
-  const chevron = () => (small ? div() : icon("chevron-down", 11).text_color(t.dim));
-  const modelTip = withKey(`${v.providerName()}${s.model ? ` · ${name} (${s.model.provider}/${s.model.id})` : ""} · /model`, "model");
-  left.push(chipEl("chip-model", t, { tip: modelTip, onClick: (_e, cx) => v.control("chip:model", cx) }).when(tiny, (e) => e.px(6))
-    .child(providerIcon(provider, 13))
-    .when(!tiny, (e) => e.child(div().max_w(tier === "sm" ? 72 : tier === "md" ? 120 : 180).truncate().child(tier === "sm" ? shortModel(name) : name)))
-    .child(chevron()));
-  drawn.push("model");
-  const thinkingChip = caps?.thinkingLevels?.length > 0;
-  const level = s.thinking ?? "default";
-  if (thinkingChip) {
-    left.push(chipEl("chip-thinking", t, { tip: withKey(withKey(`Thinking level: ${level} · /thinking`, "effort"), "cycleEffort"), onClick: (_e, cx) => v.control("chip:thinking", cx) }).when(tiny, (e) => e.px(6))
-      .child(icon("sparkles", 12.5)).when(!tiny, (e) => e.child(level)).child(chevron()));
-    drawn.push("thinking");
+  const cwd = (s.cwd || v.cwd || "").replace(v.homeDir, "~");
+  if (cwd) {
+    const name = cwd === "~" || cwd === "/" ? cwd : cwd.split("/").filter(Boolean).at(-1) ?? cwd;
+    left.push(underChip("folder", t, { tip: `${cwd} · click to copy`, onClick: (_e, cx) => v.control("folder", cx) }).flex_shrink(1).min_w(0)
+      .child(icon("folder", 13))
+      .when(!tiny, (e) => e.child(div().min_w(0).max_w(Math.max(60, Math.round(width * 0.3))).truncate().child(name))));
+    drawn.push("folder");
   }
-  const modes = caps?.permissionModes ?? [];
-  if (modes.length) {
-    const m = modes.find((x) => x.id === s.permissionMode);
-    const label = m?.label ?? s.permissionMode ?? "mode";
-    const iconOnly = tier === "xs" || tier === "sm";
-    left.push(chipEl("chip-permission", t, { tip: withKey(withKey(`${label}: ${m?.description ?? "Permission mode"} · click to change`, "mode"), "cycleMode"), onClick: (_e, cx) => v.control("chip:permission", cx) })
-      .when(iconOnly, (e) => e.px(6))
-      .child(icon("shield", 12.5)).when(!iconOnly, (e) => e.child(div().max_w(tier === "md" ? 80 : 120).truncate().child(label))).child(chevron()));
-    drawn.push("permission");
-  }
+  const branch = tiny ? null : branchChip(v, t, { width: Math.round(width * 0.6) });
+  if (branch) left.push(branch);
+
+  // Right: the context, the model and its effort, the mode.
+  const right = [];
   const u = s.usage;
   const cost = caps?.cost === false || tier !== "full" ? null : u?.cost ?? null;
   if (u && (u.percent != null || cost != null)) {
@@ -86,15 +97,40 @@ export function footerControls(v, t, { width }) {
       u.contextTokens != null ? `${count(u.contextTokens)}${win ? ` / ${count(win)}` : ""} tokens` : null,
       (caps?.cost === false ? null : u?.cost ?? null) != null ? `${money(u.cost)} this session` : null,
     ].filter(Boolean).join(" · ");
-    left.push(chipEl("chip-context", t, { tip }).when(tiny, (e) => e.px(6))
-      .when(u.percent != null, (e) => e.child(ring(u.percent, t)).when(!small, (x) => x.child(div().text_size(11.5).child(`${Math.round(u.percent)}%`))))
+    right.push(underChip("chip-context", t, { tip })
+      .when(u.percent != null, (e) => e.child(ring(u.percent, t)).when(tier === "full", (x) => x.child(div().text_size(11.5).child(`${Math.round(u.percent)}%`))))
       .when(cost != null, (e) => e.child(div().text_size(11.5).text_color(t.dim).child(money(cost)))));
     drawn.push("context", ...(cost != null ? ["cost"] : []));
   }
+  const name = s.model?.name ?? s.model?.id ?? null;
+  const modelTip = withKey(`${v.providerName()}${s.model ? ` · ${name} (${s.model.provider}/${s.model.id})` : ""} · /model`, "model");
+  right.push(underChip("chip-model", t, { tip: modelTip, color: t.foreground, onClick: (_e, cx) => v.control("chip:model", cx) })
+    .child(div().max_w(small ? 90 : 160).truncate().child(name ? modelLabel(name) : "Model")));
+  drawn.push("model");
+  // The effort: the agent's own picker where it has one; in the terminal view, the TUI's /model (where Claude Code sets it).
+  const pickEffort = caps?.thinkingLevels?.length > 0;
+  const effort = effortLabel(s.thinking) ?? (pickEffort ? "Effort" : null);
+  if (effort && !small) {
+    right.push(underChip("chip-thinking", t, { color: t.dim,
+      tip: pickEffort ? withKey(withKey(`Effort: ${effort} · /thinking`, "effort"), "cycleEffort") : `Effort: ${effort} · /model in ${v.providerName()} changes it`,
+      onClick: (_e, cx) => v.control(pickEffort ? "chip:thinking" : "chip:model", cx) }).child(effort));
+    drawn.push("thinking");
+  }
+  const modes = caps?.permissionModes ?? [];
+  const mode = modeLabel(s.permissionMode, modes);
+  if (mode && !tiny) {
+    const m = modes.find((x) => x.id === s.permissionMode);
+    right.push(underChip("chip-permission", t, modes.length
+      ? { tip: withKey(withKey(`${mode}: ${m?.description ?? "Permission mode"} · click to change`, "mode"), "cycleMode"), onClick: (_e, cx) => v.control("chip:permission", cx) }
+      : { tip: `Permission mode: ${mode} · Shift+Tab in ${v.providerName()} changes it` })
+      .ml(4).child(div().max_w(small ? 70 : 110).truncate().child(mode)));
+    drawn.push("permission");
+  }
   v.footerChips = drawn;
-  // Statuses: as many chips as fit, then "+N".
-  const leftW = 20 + Math.min(name.length * 6.8, tier === "md" ? 120 : 180) + 46 + (thinkingChip ? 80 : 0) + (modes.length ? (tier === "md" ? 80 : 100) : 0) + (u ? (cost != null ? 90 : 50) : 0);
-  let room = tier === "xs" || tier === "sm" ? 0 : Math.max(0, width - leftW - 40);
+
+  // Statuses: as many chips as fit between the two sides, then "+N".
+  const rightW = right.length * 70 + (name ? Math.min(modelLabel(name).length * 7, 160) : 40);
+  let room = small ? 0 : Math.max(0, width - rightW - 120 - (branch ? 100 : 0));
   const list = caps?.extensionUi === false ? [] : v.visibleStatuses();
   const shown = [];
   for (const x of list) {
@@ -105,25 +141,51 @@ export function footerControls(v, t, { width }) {
   }
   const extra = list.length - shown.length + (caps?.extensionUi === false ? 0 : v.hiddenStatuses().length);
   v.footerStatuses = { shown: shown.map((x) => x.key), extra }; // (the dump)
-  const right = [];
   const chips = shown.map((x) => {
     const short = [...x.text].length > STATUS_MAX ? [...x.text].slice(0, STATUS_MAX - 1).join("") + "…" : x.text;
-    return chipEl(`status-${x.key}`, t, { tip: `${x.key}: ${x.text}` }).px(6).text_size(11.5).cursor_pointer().hover((st) => st.bg(t.hover))
+    return chipEl(`status-${x.key}`, t, { tip: `${x.key}: ${x.text}` }).h(24).px(6).text_size(11.5).cursor_pointer().hover((st) => st.bg(t.hover))
       .child(spans(short === x.text ? x.spans : [{ text: short }], t, t.dim));
   });
-  if (extra > 0) chips.push(chipEl("status-more", t, { tip: "All extension statuses", active: v.statusesOpen }).px(6).text_size(11.5)
+  if (extra > 0) chips.push(chipEl("status-more", t, { tip: "All extension statuses", active: v.statusesOpen }).h(24).px(6).text_size(11.5)
     .cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground)).child(`+${extra}`));
   // The chips are the popover's trigger: a click on any lists them all (and hides some).
   if (chips.length) {
-    right.push(Popover.new("statuses").anchor("bottom_right").open(Boolean(v.statusesOpen))
+    left.push(Popover.new("statuses").anchor("bottom_left").open(Boolean(v.statusesOpen))
       .on_open_change((open, cx) => v.setStatusesOpen(open, cx))
       .trigger(h_flex().id("statuses").gap(2).items_center().children(chips))
       .content(statusesPopover(v, t)));
   }
-  return h_flex().flex_1().min_w(0).gap(2).items_center().overflow_hidden()
-    .children(left)
-    .child(div().flex_1().min_w(tiny ? 2 : 8))
-    .children(right);
+  return h_flex().id("under-row").w_full().h(26).gap(8).items_center().overflow_hidden()
+    .child(h_flex().flex_1().min_w(0).gap(2).items_center().overflow_hidden().children(left))
+    .child(h_flex().flex_none().gap(0).items_center().children(right));
+}
+
+// The composer's + (bottom left, as the Claude app has it): what can go into a message: a file (@ and its
+// menu), a command (/ and its menu), an image from the clipboard.
+export function plusButton(v, t) {
+  const item = (id, name, label, hint) => h_flex().id(`plus-${id}`).h(30).px(8).gap(10).items_center().rounded(7).cursor_pointer().text_size(13)
+    .hover((s) => s.bg(t.hover)).on_click((_e, cx) => v.control(`plus:${id}`, cx))
+    .child(icon(name, 14).text_color(t.muted)).child(div().flex_1().child(label))
+    .child(div().text_size(11.5).text_color(t.dim).child(hint));
+  return Popover.new("plus").anchor("bottom_left").open(Boolean(v.plusOpen))
+    .on_open_change((open, cx) => v.setPlusOpen(open, cx))
+    .trigger(h_flex().id("compose-plus").w(30).h(30).flex_none().rounded(8).items_center().justify_center().cursor_pointer()
+      .text_color(v.plusOpen ? t.foreground : t.muted).when(Boolean(v.plusOpen), (e) => e.bg(t.hover))
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Add to the message")
+      .child(icon("plus", 16)))
+    .content(surface(t).w(220)
+      .child(item("file", "at-sign", "Mention a file", "@"))
+      .child(item("command", "square-slash", "Commands", "/"))
+      .child(item("image", "image", "Paste an image", MAC ? "⌘V" : "Ctrl+V")));
+}
+
+// The mic (where the Claude app has it): starts or stops the desktop's dictation, the toggle Omarchy's
+// dictation keys run (omarchy-dictation), which types into the composer. None where there isn't one.
+export function micButton(v, t) {
+  if (!v.dictation) return null;
+  return h_flex().id("compose-mic").w(30).h(30).flex_none().rounded(8).items_center().justify_center().cursor_pointer()
+    .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Dictate (starts or stops dictation)")
+    .on_click((_e, cx) => v.control("dictate", cx)).child(icon("mic", 15));
 }
 
 // "Claude Haiku 4.5" → "Haiku 4.5"; "GPT-5.6 Luna" → "GPT-5.6 Luna" (no vendor word to drop).
@@ -262,15 +324,15 @@ export function planStrip(v, s, t) {
     .child(head);
 }
 
-// The branch of the chat's folder (host git.ts, state.git), right of the hint
-// line under the composer; a detached HEAD shows its commit. A click copies it.
+// The branch of the chat's folder (host git.ts, state.git), beside the folder under the composer; a
+// detached HEAD shows its commit. A click copies it.
 export function branchChip(v, t, { width }) {
   const g = v.store.state.git;
   const name = g?.name ?? null;
   v.branchShown = name;
   if (!name) return null;
-  return h_flex().id("branch").flex_none().max_w(Math.max(60, Math.round(width * 0.45))).min_w(0).h(16).px(4).gap(4).items_center()
-    .rounded(4).text_size(11).text_color(t.dim).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.muted))
+  return h_flex().id("branch").flex_shrink(1).max_w(Math.max(60, Math.round(width * 0.45))).min_w(0).h(24).px(6).gap(5).items_center()
+    .rounded(6).text_size(12.5).text_color(t.dim).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
     .on_click((_e, cx) => v.control("branch", cx))
     .child(icon(g.detached ? "git-commit" : "git-branch", 11))
     .child(div().min_w(0).truncate().child(name));
