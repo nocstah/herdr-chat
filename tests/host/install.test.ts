@@ -97,11 +97,30 @@ test("layout: the top bar gets the Chat | Terminal switch in a row with the tabs
   assert.equal(find(l, "work").children[0], row, "the row takes the tabs block's place");
   assert.deepEqual(row, { id: "chat-switch-row", type: "row", size: { px: 42 }, resizable: false, children: [
     { id: "tabs", type: "block", content: { mod: "inapse-tabs", props: { replaces: { mod: "tabs" } } }, window_drag: true },
-    { id: "chat-switch", type: "block", size: { px: 236 }, window_drag: true, content: { mod: "chat-switch" } },
+    { id: "chat-switch", type: "block", size: { px: 224 }, window_drag: true, content: { mod: "chat-switch" } },
   ] });
   const once = read(h, "bar");
   assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
   assert.equal(read(h, "bar"), once);
+  assert.match(run("uninstall", h), /the top bar as it was/);
+  assert.equal(read(h, "bar"), before);
+});
+
+test("layout: an earlier release's wider switch is narrowed, once; a width set by hand stays; uninstall still gives back the same bytes", () => {
+  const h = home("bar", { bar: withBar() });
+  const before = read(h, "bar");
+  run("install", h);
+  const l = JSON.parse(read(h, "bar"));
+  find(l, "chat-switch").size = { px: 236 }; // as 0.5.0's install made it
+  writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(l, null, 2) + "\n");
+  assert.match(run("install", h), /the top bar's Chat\/Terminal switch is narrower \(224 px\)/);
+  assert.deepEqual(find(JSON.parse(read(h, "bar")), "chat-switch").size, { px: 224 });
+  assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
+  const mine = JSON.parse(read(h, "bar"));
+  find(mine, "chat-switch").size = { px: 300 };
+  writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(mine, null, 2) + "\n");
+  assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
+  assert.deepEqual(find(JSON.parse(read(h, "bar")), "chat-switch").size, { px: 300 });
   assert.match(run("uninstall", h), /the top bar as it was/);
   assert.equal(read(h, "bar"), before);
 });

@@ -130,7 +130,7 @@ it; every key is optional):
 {
   "env": { "KEY": "value" },
   "pi":     { "command": "/path/to/pi", "args": ["--model", "anthropic/claude-sonnet-4-5"] },
-  "claude": { "env": { "CLAUDE_CONFIG_DIR": "/path/to/config" } },
+  "claude": { "env": { "CLAUDE_CONFIG_DIR": "/path/to/config" }, "face": "chat" },
   "codex":  { "tui": ["my-wrapper", "codex"] },
   "updates": { "check": false },
   "machines": { "box": { "direct": true } }
@@ -144,6 +144,14 @@ look for a new release (a release install only); `updates.feed` points it at
 another URL with GitHub's release JSON. `machines.<name>.direct: true` is for
 a machine that shares this computer's loopback (a second herdr-core here):
 its chats connect to the host's port as it is, with no ssh forward.
+
+`claude.face: "chat"` opens Claude Code in its chat view: a terminal of
+this computer where Claude Code starts (a new tab, or `claude` typed in a
+shell) shows its chat view at once, as ⌘⇧J (Ctrl+Shift+J) would flip it.
+Once per start: flipping back to the terminal stays until Claude Code starts
+there again, and terminals already running it when the app starts keep their
+face. The `new-chat.first-face:chat` and `new-chat.first-face:terminal`
+commands set it (a key, or another mod's settings).
 
 ### Spaces on another machine
 
