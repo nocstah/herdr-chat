@@ -1540,6 +1540,24 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
+  // Quote an answer in your reply, as a markdown quote after what the draft holds: the
+  // part of it you copied (select, Ctrl+C, Quote; mods can't read a text view's
+  // selection), else all of it.
+  /** @param {any} it @param {import("gpui-kit").Context} cx */
+  quote(it, cx) {
+    const whole = String(it.text ?? "").trim();
+    if (!whole) return;
+    let clip = "";
+    try { clip = (cx.read_from_clipboard() ?? "").trim(); } catch {}
+    const part = plainText(clip).length >= 8 && clip.length < whole.length && plainText(whole).includes(plainText(clip)) ? clip : null;
+    const body = (part ?? whole).split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n");
+    const draft = this.composer.value.trimEnd();
+    this.composer.set(`${draft ? `${draft}\n\n` : ""}${body}\n\n`);
+    this.composer.focus();
+    this.lastQuote = { item: it.id, part: Boolean(part), len: body.length };
+    this.flash(part ? "Quoted the part you copied" : "Quoted the answer", cx);
+  }
+
   // Edit and resend: the message's text back in the composer.
   editResend(it, cx) {
     const env = /^\s*<hc from="[^"]*"[^>]*>([\s\S]*?)<\/hc>\s*$/.exec(it.text ?? "");
@@ -2281,7 +2299,7 @@ export default class HerdrChat extends View {
       rows: space(rows).map((r) => ({ id: r.id, kind: r.kind, gap: r.gap, slot: r.slot, ...(r.kind === "group" ? group(r) : {}),
         ...(r.footer ? { footer: r.footer } : {}), ...(r.kind === "item" ? { item: r.item.kind } : {}) })),
       activity: this.activity(), lastCopy: this.lastCopy ?? null,
-      codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null,
+      codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
       statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null,
       update: { ...this.updater.dump(this.conn.welcome), healing: this.healing ?? null },
@@ -2388,6 +2406,7 @@ export default class HerdrChat extends View {
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
+      quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
       openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null, findItem: this.find?.current?.id ?? null,
       setSvgHover: (key, on, cx) => this.setSvgHover(key, on, cx), groupOpen: (id) => this.groups.get(id),
@@ -2547,6 +2566,14 @@ function pickerDump(pk) {
     items: top.map((x) => x.value), labels: top.map((x) => x.label), metas: top.map((x) => x.meta ?? null),
     scope: pk.scopes?.index ?? null, scopeLabels: pk.scopes?.labels ?? null, loading: pk.loading, stale: pk.stale, progress: pk.progress,
   };
+}
+
+// Text as it reads, for finding a copied passage in a message's markdown: no
+// emphasis, code, heading, quote or table marks, a link as its words, spaces as one.
+/** @param {string} s */
+function plainText(s) {
+  return s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`~#>|•]/g, " ").replace(/^\s*[-+]\s+/gm, " ")
+    .replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 // A message on one line, for a picker row.

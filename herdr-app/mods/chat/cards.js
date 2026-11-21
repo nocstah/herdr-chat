@@ -82,7 +82,9 @@ function actions(it, footer, c, { align = "start", text } = {}) {
   const acts = it ? h_flex().gap(2).items_center().opacity(on ? 1 : 0).transition("opacity", { duration: 120, easing: "ease-out" })
     .child(div().id(`ts-${it.id}`).px(4).text_size(11).text_color(t.dim).tooltip(absTime(it.ts)).child(relTime(it.ts, c.now)))
     .when(on, (e) => e.child(copyButton(`msg:${it.id}`, text ?? it.text ?? "", c, { size: 12.5 }))
-      .when(it.kind === "user", (x) => x.child(btn(`edit-${it.id}`, "pencil", "Edit and resend", (_e, cx) => c.editResend(it, cx)))))
+      .when(it.kind === "user", (x) => x.child(btn(`edit-${it.id}`, "pencil", "Edit and resend", (_e, cx) => c.editResend(it, cx))))
+      .when(it.kind === "assistant", (x) => x.child(btn(`quote-${it.id}`, "quote", "Quote in your reply: the part you copied from it, else all of it",
+        (/** @type {any} */ _e, /** @type {import("gpui-kit").Context} */ cx) => c.quote(it, cx)))))
     : null;
   let foot = null;
   if (footer) {
