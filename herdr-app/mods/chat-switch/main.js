@@ -65,23 +65,25 @@ export default class ChatSwitch extends View {
     const said = { working: "working", blocked: "needs you", done: "finished", idle: "idle", ended: "terminal ended" }[st] ?? "";
     const flip = () => run(`new-chat.flip:${it.address}`);
     const key = flipKey();
-    // A face: its icon, its name in the tooltip; the other one flips to it, with the key.
+    // A face: a button drawn as the tabs bar's Files and Changes (Herdr's
+    // mods/tabs panelButton, OmaRelay's copy too: 26 high, 8 px sides, the
+    // selected colour while it shows), its icon only, its name in the tooltip;
+    // the other one flips to it, with the key.
     const seg = (id, icon, name, on) => {
       const tip = on ? `${name} · showing` : `Switch to ${name.toLowerCase()}${key ? ` · ${key}` : ""}`;
-      return div().id(id).flex_none().w(30).h(22).flex().items_center().justify_center().rounded(5).tooltip(tip).accessibility_label(tip)
-        .when(on, (e) => e.bg(t.background).text_color(t.foreground))
-        .when(!on, (e) => e.text_color(t.muted).cursor_pointer().hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop).on_click(flip))
+      return h_flex().id(id).flex_none().h(26).px(8).items_center().justify_center().rounded(6).tooltip(tip).accessibility_label(tip)
+        .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+        .when(!on, (e) => e.cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click(flip))
         .child(svg(`mods/chat/icons/${icon}.svg`).size(14));
     };
-    return bar.child(h_flex().id("switch-pill").flex_none().h(28).pl(10).pr(2).gap(8).items_center().rounded(8)
-      .bg(t.surface).border_1().border_color(t.border).text_size(12).on_mouse_down("left", stop)
-      .child(h_flex().id("switch-status").flex_none().gap(6).items_center().tooltip(`${it.name}${said ? ` · ${said}` : ""}`)
+    // The agent's state: the dot alone (and "needs you" or "ended" beside it), no box.
+    return bar.child(h_flex().id("switch-pill").flex_none().h(26).gap(3).items_center().text_size(12).on_mouse_down("left", stop)
+      .child(h_flex().id("switch-status").flex_none().h(26).px(8).gap(6).items_center().tooltip(`${it.name}${said ? ` · ${said}` : ""}`)
         .child(st === "working"
           ? svg("mods/chat/icons/spinner.svg").size(11).flex_none().text_color(color).spin(900)
           : div().w(10).flex_none().text_color(color).child(st === "idle" || !st ? "○" : st === "ended" ? "·" : "●"))
         .when(Boolean(word), (e) => e.child(div().text_color(color).child(word))))
-      .child(h_flex().id("switch-faces").flex_none().p(2).gap(2).rounded(6).bg(t.hover)
-        .child(seg("switch-chat", "message-circle", "Chat", it.face === "chat"))
-        .child(seg("switch-terminal", "square-terminal", "Terminal", it.face === "terminal"))));
+      .child(seg("switch-chat", "message-circle", "Chat", it.face === "chat"))
+      .child(seg("switch-terminal", "square-terminal", "Terminal", it.face === "terminal")));
   }
 }
