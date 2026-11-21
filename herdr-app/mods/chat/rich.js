@@ -9,12 +9,24 @@ import { appHome } from "herdr";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { alpha, codeLine, homeRel, icon, plural, spinner } from "./util.js";
 import { SPACE } from "./space.js";
+import { linkPaths } from "./paths.js";
 
 export const CODE_CAP = 30; // lines shown before "Show all N lines"
 const RENDER_MAX = 600; // lines ever built for one block (the rest: copy it)
 export const LINE_H = 19;
 
-export const prose = (id, text) => TextView.markdown(id, text).selectable(true);
+// `onLink` (an answer's prose): its file paths become links (linkPaths), and
+// every link's click goes to it instead of straight to the system.
+/** @typedef {(url: string, cx: import("gpui-kit").Context) => void} OnLink */
+/**
+ * @param {string} id
+ * @param {string} text
+ * @param {OnLink} [onLink]
+ */
+export const prose = (id, text, onLink) => {
+  const view = TextView.markdown(id, onLink ? linkPaths(text) : text).selectable(true);
+  return onLink ? view.on_link_click(onLink) : view;
+};
 
 // Markdown → the chunks drawn one TextView each, so the space between
 // paragraphs, lists, tables and headings is ours (space.js), not the
@@ -56,11 +68,16 @@ export function mdChunks(text) {
 // The space above a piece of an answer, after `prev` (null: the first).
 const above = (heading, prev) => (prev == null ? 0 : heading ? SPACE.headingAbove : prev.heading ? SPACE.headingBelow : SPACE.block);
 
-// Markdown as its chunks, spaced (one TextView when it's one chunk).
-export function markdown(id, text) {
+// Markdown as its chunks, spaced (one TextView when it's one chunk). `onLink`: prose().
+/**
+ * @param {string} id
+ * @param {string} text
+ * @param {OnLink} [onLink]
+ */
+export function markdown(id, text, onLink) {
   const parts = mdChunks(text || " ");
-  if (parts.length === 1) return prose(id, parts[0].text);
-  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(prose(`${id}-${j}`, p.text))));
+  if (parts.length === 1) return prose(id, parts[0].text, onLink);
+  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(prose(`${id}-${j}`, p.text, onLink))));
 }
 
 // Whether a block starts or ends with a heading (for the space around it).
@@ -82,7 +99,7 @@ export function blocks(it, c) {
     let el;
     if (b.type === "code") el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
     else if (b.type === "mermaid") el = mermaid(key, b, c);
-    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text);
+    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink);
     return div().pt(gap).child(el);
   }));
 }

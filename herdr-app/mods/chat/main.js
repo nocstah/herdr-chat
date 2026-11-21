@@ -42,6 +42,7 @@ import { Connection, hostSide, hostTerminal, readConfig, runsHost } from "./conn
 import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { lineOf, planProgress, row, samePlan } from "./cards.js";
+import { fileLink } from "./paths.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { branchChip, emptyState, footerControls, planStrip, queueChips, queueLabels, widgetTray } from "./chrome.js";
@@ -1656,13 +1657,33 @@ export default class HerdrChat extends View {
     });
   }
 
-  // A file a tool touched, in an editor (files.js).
-  openFile(path, line, cx) {
+  // A link in an answer: a file path (rich.js linkPaths) opens in an editor, as
+  // a tool's path does, once it's there; any other link goes to the system.
+  /** @param {string} url @param {import("gpui-kit").Context} cx */
+  onLink(url, cx) {
+    const f = fileLink(url);
+    if (!f) return cx.open_url(url);
+    this.openFile(f.path, f.line, cx, { mustExist: true });
+  }
+
+  // A file a tool touched, in an editor (files.js). `mustExist`: a path an answer
+  // named, checked first (in the chat's folder, on the space's machine).
+  openFile(path, line, cx, { mustExist = false } = {}) {
     const me = this.myPane();
     const abs = path.startsWith("/") ? path : `${this.cwd ?? this.store.state.cwd}/${path}`;
     this.lastOpen = { path: abs, line, at: Date.now(), how: null };
     cx.spawn(async (cx) => {
       try {
+        if (mustExist) {
+          const machine = this.remoteMachine();
+          const r = await exec("/bin/sh", ["-c", 'test -f "$1"', "sh", abs], machine ? { on: machine, timeout: 15000 } : { timeout: 15000 });
+          if (r.code !== 0) {
+            this.lastOpen.how = "missing";
+            this.flash(`No file ${tildePath(abs)}`, cx);
+            this.debug.mark();
+            return;
+          }
+        }
         const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine: this.remoteMachine() });
         this.lastOpen.how = r.how;
         if (r.terminal) {
@@ -2274,7 +2295,7 @@ export default class HerdrChat extends View {
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
-      openFile: (p, line, cx) => this.openFile(p, line, cx), editResend: (it, cx) => this.editResend(it, cx),
+      openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null,
       setSvgHover: (key, on, cx) => this.setSvgHover(key, on, cx), groupOpen: (id) => this.groups.get(id),
       groupAnim: (id) => this.groupAnims.get(id) ?? null, groupMeasured: (id, h, cx) => this.groupMeasured(id, h, cx),
