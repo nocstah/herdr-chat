@@ -141,6 +141,26 @@ export function imageFile(path: string): ImageBlock | null {
   }
 }
 
+/**
+ * A message the person typed while the agent worked, as Claude Code (2.1.3xx) writes it when it hands the message to the
+ * agent between two of its steps: an attachment record, not a user record (the queue's own bookkeeping, the
+ * `queue-operation` records, says when it was typed and when it went in; they are never shown):
+ *   {"type":"attachment","attachment":{"type":"queued_command","prompt":"…","commandMode":"prompt","origin":{"kind":"human"},…}}
+ * Its text (`@path` mentions included, as typed), or null for any other record: a finished task's notification
+ * (`commandMode: "task-notification"`), another session's message (`origin.kind: "peer"`), a subagent's.
+ * A message the agent took only once its turn was over is a user record as before (promptText).
+ */
+export function queuedPrompt(r: Rec): { text: string; content: unknown } | null {
+  if (r.type !== "attachment" || r.isSidechain) return null;
+  const a = r.attachment;
+  if (!a || typeof a !== "object" || a.type !== "queued_command" || a.commandMode !== "prompt") return null;
+  if (a.origin != null && a.origin.kind !== "human") return null;
+  const p = a.prompt;
+  const text = typeof p === "string" ? p : Array.isArray(p) ? p.filter((b: Rec) => b?.type === "text").map((b: Rec) => String(b.text ?? "")).join("\n") : "";
+  if (!text.trim() && !(Array.isArray(p) && p.some((b: Rec) => b?.type === "image"))) return null;
+  return { text, content: p };
+}
+
 export function promptText(r: Rec): string | null {
   if (r.type !== "user" || r.isSidechain || r.isMeta || r.isCompactSummary) return null;
   const c = r.message?.content;

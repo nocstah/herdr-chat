@@ -55,6 +55,41 @@ export type Capabilities = {
   tui: boolean;
 };
 
+// ---------------------------------------------------------------- background work
+
+/**
+ * What the agent runs in the background, as Claude Code's agents panel shows it (claude/background.ts reads it from
+ * the session's files). Times in ms, by the host's clock.
+ */
+export type BackgroundState = "running" | "done" | "failed" | "stopped";
+
+/** A row of the panel. */
+export type BackgroundTask = {
+  /** The agent's id, or the run's. */
+  id: string;
+  kind: "agent" | "workflow";
+  /** An agent's type ("general-purpose"), a run's name. */
+  name: string;
+  /** An agent's task (the description it was given); null for a run. */
+  title: string | null;
+  /** What it does now: an agent's last tool call (its description, command, file…), a run's agents at work (their labels). */
+  activity: string | null;
+  /** The branch of the worktree an agent works in, when it has one of its own. */
+  worktree: string | null;
+  state: BackgroundState;
+  startedAt: number;
+  endedAt: number | null;
+  /** A run's agents that answered, failed, and started; null for an agent. */
+  done: number | null;
+  failed: number | null;
+  total: number | null;
+  /** As the TUI counts them; null before the first model call. */
+  tokens: number | null;
+};
+
+/** `at`: the host's time when it was read (a client works out the elapsed times from it). */
+export type Background = { at: number; tasks: BackgroundTask[]; shells: number; monitors: number };
+
 // ---------------------------------------------------------------- asks
 
 export type PermissionChoice = { id: string; label: string; kind: "allow" | "allow_always" | "deny" | "other"; description?: string };
@@ -169,6 +204,8 @@ export type NormalizedEvent = Common &
         type: "tool_ended"; callId: string; name: string; args?: unknown; isError: boolean; declined?: boolean;
         output: string; images?: ImageBlock[]; result?: unknown; durationMs?: number; lostBytes?: number;
       }
+    /** What the agent runs in the background now (Claude Code's agents panel: claude/background.ts); null: nothing. */
+    | { type: "background"; background: Background | null }
     /** The agent's plan: it replaces the chat's plan. No steps: the plan is gone. */
     | { type: "plan"; parent?: undefined; explanation?: string; steps: PlanStep[] }
     /** A subagent's plan: a card in the group of its `parent`, replaced in place per `key`. */

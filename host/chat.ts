@@ -27,7 +27,7 @@ import { Renderer, diffLines } from "./render.ts";
 import { presentTool, prettyArgs } from "./tools.ts";
 import { AgentError } from "./providers/types.ts";
 import type {
-  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits,
+  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background,
 } from "./providers/types.ts";
 
 export type { ModelInfo, Capabilities };
@@ -88,6 +88,8 @@ export type ChatState = {
   conflict: Conflict | null;
   /** The branch of the folder (git.ts); null outside a repo. */
   git: GitState | null;
+  /** What the agent runs in the background (Claude Code's agents panel); null: nothing. */
+  background: Background | null;
 };
 
 const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "queue", "error", "editorText", "handoff", "conflict"]);
@@ -233,7 +235,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null,
+      handoff: null, conflict: null, git: null, background: null,
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -747,7 +749,11 @@ export class Chat {
       case "limits":
         this.opts.onLimits?.(ev.limits);
         return;
+      case "background":
+        this.set({ background: ev.background });
+        return;
       case "exited":
+        if (this.state.background) this.set({ background: null });
         this.onExit(ev);
         return;
     }

@@ -53,7 +53,8 @@ import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
-import { branchChip, emptyState, footerControls, planStrip, queueChips, queueLabels, widgetTray } from "./chrome.js";
+import { backgroundStrip, branchChip, emptyState, footerControls, planStrip, queueChips, queueLabels, widgetTray } from "./chrome.js";
+import { bgTicking } from "./background.js";
 import { openFile } from "./files.js";
 import { Composer } from "./composer.js";
 import { Picker, menuView, slashItems, wheel as wheelMenu } from "./menus.js";
@@ -378,6 +379,11 @@ export default class HerdrChat extends View {
       if (this.redirectFocus(cx)) changed = true;
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
+    // The background strip's times move on once a second while something runs.
+    if (bgTicking(this.store.state.background)) {
+      const sec = Math.floor(Date.now() / 1000);
+      if (sec !== this.bgSecond) { this.bgSecond = sec; changed = true; }
+    }
     if (me && !this.sub) this.publishShows(me);
     if (me && this.view) this.publishView(me);
     if (shown) this.markSeen(me, cx);
@@ -2117,6 +2123,7 @@ export default class HerdrChat extends View {
       }
       case "status:toggle-hidden": this.showHidden = !this.showHidden; break;
       case "plan": this.planOpen = !this.planOpen; break;
+      case "background": this.bgClosed = !this.bgClosed; break;
       case "latest": this.timeline.toBottom(); break;
       case "send": return this.send(cx);
       case "peek:tab": return this.openAsTab(cx);
@@ -2519,6 +2526,7 @@ export default class HerdrChat extends View {
       phase: s.phase, error: s.error, model: s.model ? `${s.model.provider}/${s.model.id}` : null, thinking: s.thinking,
       sessionFile: s.sessionFile, sessionName: s.sessionName, usage: s.usage, queue: s.queue,
       plan: s.plan?.steps?.length ? { ...planProgress(s.plan), steps: s.plan.steps.map((x) => [x.text, x.status]), open: Boolean(this.planOpen) } : null,
+      background: s.background ? { rows: (this.bgShown ?? []).map((r) => [r.kind, r.name, r.state, r.meta]), shells: s.background.shells, monitors: s.background.monitors, open: !this.bgClosed } : null,
       dialog: s.dialog ? { id: s.dialog.id, method: s.dialog.method, title: s.dialog.title, value: this.dialog.field ? this.dialog.value() : null,
         ...this.dialog.form?.debugState() } : null,
       statuses: s.statuses.map((x) => ({ key: x.key, text: x.spans.map((y) => y.text).join("") })),
@@ -2742,7 +2750,7 @@ export default class HerdrChat extends View {
       .on_size_change((sz, cx) => { if (sz.height !== this.bottomH) { this.bottomH = sz.height; this.debug.mark(); } })
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
-      .children([widgetTray(this, above, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
+      .children([widgetTray(this, above, t), backgroundStrip(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
       // The hint line, and the branch at its right end.
