@@ -30,6 +30,9 @@ import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
+
+// What each chat pane shows, for the agents list (mods/chat-agents/chat-focus.js): pane → agent's terminal.
+const SHOWS = "herdr-chat.panes";
 import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
@@ -365,6 +368,7 @@ export default class HerdrChat extends View {
       if (this.redirectFocus(cx)) changed = true;
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
+    if (me && !this.sub) this.publishShows(me);
     if (shown) this.markSeen(me, cx);
     if (this.sub && this.subKey() !== this.lastSubKey) { this.lastSubKey = this.subKey(); changed = true; } // the header bar
     // The hand-off's terminal (in its dialog): finished, back to the chat (the
@@ -663,6 +667,20 @@ export default class HerdrChat extends View {
     run("pane.focus", { pane: me.pane });
     this.refocus(cx);
     return true;
+  }
+
+  // The agents list marks the agent this chat shows while its pane has the
+  // keyboard (mods/chat-agents/chat-focus.js): the host's terminal, or the
+  // terminal view's. Stale panes go out with the next change.
+  /** @param {any} me */
+  publishShows(me) {
+    const addr = this.view ?? hostTerminal(this.chat)?.address ?? null;
+    const map = /** @type {Record<string, string>} */ (shared(SHOWS) ?? {});
+    if (!addr || map[me.pane] === addr) return;
+    const live = new Set(panes().map((p) => p.pane));
+    const next = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
+    next[me.pane] = addr;
+    setShared(SHOWS, next);
   }
 
   // Herdr marks an agent seen only when its terminal is drawn, and the host

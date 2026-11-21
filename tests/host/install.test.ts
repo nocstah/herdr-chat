@@ -11,7 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFi
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ROOT } from "./harness.ts";
-import { agentsBase, writeBases } from "../../install/mods.ts";
+import { agentsBase, focusAgents, writeBases } from "../../install/mods.ts";
 import { defaults as keyDefaults, pretty } from "../../install/keys.ts";
 
 const LAYOUT = join(ROOT, "install", "layout.ts");
@@ -126,7 +126,14 @@ export default class Agents extends View {
   }
 }
 `;
-  assert.equal(agentsBase(shipped(".on_click(() => this.peek(k.address))")).ok, true);
+  const ok = agentsBase(`import { agents, focused, run } from "herdr";\n` + shipped(".on_click(() => this.peek(k.address))"));
+  assert.equal(ok.ok, true);
+  // A chat's agent shows focused while the chat has the keyboard: the list's agents() is chat-focus.js's.
+  const base = (ok as { base: string }).base;
+  assert.match(base, /^import \{ focused, run \} from "herdr";\nimport \{ agents \} from "\.\/chat-focus\.js";$/m);
+  assert.doesNotMatch(base, /import \{[^}]*\bagents\b[^}]*\} from "herdr"/);
+  assert.equal(focusAgents(`import { agents } from "herdr";\nx();`), `import { agents } from "./chat-focus.js";\nx();`);
+  assert.equal(focusAgents(`import { run } from "herdr";\n`), `import { run } from "herdr";\n`, "no agents import: left alone");
   assert.equal(agentsBase(shipped(`.on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))`)).ok, true, "0.1.14's row");
   const inline = agentsBase(shipped(`.on_click(() => run("terminal.peek", { terminal: k.address }))`));
   assert.equal(inline.ok, false);

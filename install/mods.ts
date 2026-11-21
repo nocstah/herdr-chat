@@ -36,7 +36,24 @@ export function agentsBase(src: string): Base {
   if (row === null) return { ok: false, why: "mods/agents/main.js has no subRow() (the sub-agent rows)" };
   // Herdr 0.1.14: a row in a pane focuses it, any other still peeks (a chat's sub-agent has no pane).
   if (!/on_click\([^)]*\)\s*=>[^\n]*this\.peek\(/.test(row)) return { ok: false, why: "a sub-agent row's click no longer calls this.peek(): the chat override would never run" };
-  return { ok: true, base: HEADER("mods/agents/main.js") + src };
+  return { ok: true, base: HEADER("mods/agents/main.js") + focusAgents(src) };
+}
+
+const HERDR_IMPORT = /^import \{([^}]*)\} from "herdr";$/m;
+
+/**
+ * The list's `agents` from ./chat-focus.js instead of "herdr": the same list,
+ * with a focused chat's agent marked focused (chat-agents/chat-focus.js). A
+ * list that doesn't import `agents` that way is left as it is.
+ */
+export function focusAgents(src: string): string {
+  const m = HERDR_IMPORT.exec(src);
+  if (!m) return src;
+  const names = m[1].split(",").map((n) => n.trim()).filter(Boolean);
+  if (!names.includes("agents")) return src;
+  const rest = names.filter((n) => n !== "agents");
+  const line = (rest.length ? `import { ${rest.join(", ")} } from "herdr";\n` : "") + `import { agents } from "./chat-focus.js";`;
+  return src.slice(0, m.index) + line + src.slice(m.index + m[0].length);
 }
 
 /** The right-click menu: chat-menu draws its items above the base view's render(). */
