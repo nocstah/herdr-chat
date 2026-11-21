@@ -29,7 +29,7 @@ import { appHome, closeOverlay, exec, focused, hc, knownAgents, nextCommand, not
 import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
-import { appHas, flip, viewProps, viewTerminal } from "./faces.js";
+import { appHas, bare, flip, viewProps, viewTerminal } from "./faces.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -240,17 +240,18 @@ export async function continueInPlace(t, agent, pid, cwd, found, cx, on = null) 
  * view in its place (made the first time; the view's host reads the session
  * the TUI has open and types into it, so nothing restarts), and a terminal
  * whose view shows goes back. In the view itself the chat mod takes the key.
+ * Another machine's terminal flips in that machine's document and its view's
+ * host runs there (herdr-chat installed there too).
  */
 async function flipFace(addr, cx) {
   const f = focused();
   // A chat view's pane whose keyboard isn't in the chat (its own key didn't take it): its terminal.
   const terminal = addr || f?.terminal || (f?.pane ? await viewTerminal(f.pane) : null);
   if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code terminal to its chat view: focus one first.");
-  if (terminal.includes("/")) throw new Error("The chat view works with this computer's terminals for now.");
   const t = term(terminal);
   if (!t || t.state !== "live") throw new Error(`Terminal ${terminal} isn't running.`);
   const claude = agentOf(t) === "claude";
-  const props = claude ? viewProps(terminal, t.foreground?.cwd ?? t.cwd ?? null) : null;
+  const props = claude ? viewProps(bare(terminal), t.foreground?.cwd ?? t.cwd ?? null) : null;
   let r;
   try {
     r = await flip(cx, terminal, "toggle", props);
@@ -261,8 +262,10 @@ async function flipFace(addr, cx) {
     throw e;
   }
   if (r.face === "terminal") return run("pane.focus", { pane: r.term });
-  // A new view is in the app once it has read the document (within half a second).
-  if (r.created && !(await appHas(cx, r.pane))) throw new Error("The chat view didn't appear: try again.");
+  // A new view is in the app once it has read the document (within half a second; another machine's
+  // after its core's event and a read over its link).
+  const machine = machineOf(terminal);
+  if (r.created && !(await appHas(cx, r.pane, machine ? 8000 : 2000))) throw new Error(`The chat view didn't appear${machine ? ` (${machine} answered slowly)` : ""}: try again.`);
   run("pane.focus", { pane: r.pane });
 }
 

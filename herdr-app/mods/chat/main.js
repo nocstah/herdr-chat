@@ -100,7 +100,8 @@ export default class HerdrChat extends View {
     this.peekMode = Boolean(p.peek);
     // The terminal view (faces.js): this chat is the chat face of a Claude Code terminal. Its host
     // reads the TUI's session and types into it; it has no pane of its own, and the tab is the terminal's.
-    this.view = !this.sub && typeof p.attach === "string" ? p.attach : null;
+    // The props name the terminal as its machine's document does ("t5"): `view` is the app's name for it.
+    this.viewAttach = !this.sub && typeof p.attach === "string" ? bare(p.attach) : null;
     this.provider = p.provider ?? null; // an id of PROVIDERS; null: the registry's, else DEFAULT_PROVIDER
     this.cwd = p.cwd || null;
     this.store = new Store();
@@ -167,7 +168,7 @@ export default class HerdrChat extends View {
       // Continue as chat on a top-level Pi TUI (new-chat's continueInPlace): its pid, model and thinking.
       handOver: p.afterPid ? { pid: p.afterPid, model: p.model ?? null, thinking: p.thinking ?? null } : null,
       attachOnly: Boolean(this.sub),
-      attach: this.view,
+      attach: this.viewAttach, // the host runs on the terminal's machine: its own name for it
       place: () => this.findPlace(),
       // A chat in another machine's space: its host runs there (machines.js).
       machine: () => (this.place ? machineOf(this.place.pane) : null),
@@ -308,6 +309,12 @@ export default class HerdrChat extends View {
 
   myPane() {
     return this.place ? panes().find((p) => p.pane === this.place.pane) ?? null : null;
+  }
+
+  // The terminal view's terminal as this app names it: "t5", or "cypherpunk/t5" in that machine's
+  // space (faces.js). Its machine is the pane's, known once the place is.
+  get view() {
+    return this.viewAttach ? qualify(this.place ? machineOf(this.place.pane) : null, this.viewAttach) : null;
   }
 
   hostPane() {
@@ -971,23 +978,34 @@ export default class HerdrChat extends View {
     });
   }
 
-  // Each tick: which face shows (the last flip's, else the layout document's), the keyboard on the
-  // face that shows (a route to the hidden one, such as the agents list, lands on the other), the
-  // composer's focus when this face comes up, and the agent's status for the bar.
+  // Each tick: which face shows (this app's last flip until a read of the document made after it, then
+  // the document's: another app showing the tab, such as the terminal's machine's own, may flip it),
+  // the keyboard on the face that shows (a route to the hidden one, such as the agents list, lands on
+  // the other), the composer's focus when this face comes up, and the agent's status for the bar.
   viewTick(me, cx) {
     let changed = false;
-    const face = sharedFace(this.view);
-    if (face && face !== this.face) { this.face = face; changed = true; }
-    if (!face && !this.faceReading && Date.now() - (this.faceReadAt ?? 0) > 5000) {
+    const flipped = sharedFace(this.view);
+    if (flipped && flipped.at >= (this.faceDocAt ?? 0) && flipped.face !== this.face) { this.face = flipped.face; changed = true; }
+    const machine = machineOf(this.view);
+    // Often while the keyboard is in this tab (another app's flip that hides this view reaches it only so:
+    // a shown view learns it at once, on_size_change), else now and then.
+    const here = Boolean(me) && focused()?.tab === me.tab;
+    if (!this.faceReading && Date.now() - (this.faceReadAt ?? 0) > (here ? 2000 : machine ? 8000 : 5000)) {
       this.faceReading = true;
-      this.faceReadAt = Date.now();
+      const started = (this.faceReadAt = Date.now());
       cx.spawn(async (cx) => {
         try {
-          const f = facesOf(await readDoc(), this.view);
+          const f = facesOf(await readDoc(machine), bare(this.view));
+          // A flip here since the read began is newer than what it read.
+          if ((sharedFace(this.view)?.at ?? 0) > started) return;
+          this.faceDocAt = started;
           const was = this.face;
           this.face = f ? faceOf(f) : null;
           if (this.face !== was) { this.debug.mark(); cx.notify(); }
-        } catch {} finally { this.faceReading = false; }
+        } catch {} finally {
+          this.faceReading = false;
+          if (this.faceAgain) { this.faceAgain = false; this.faceReadAt = 0; }
+        }
       });
     }
     const term = terminals().find((t) => t.address === this.view);
@@ -997,7 +1015,13 @@ export default class HerdrChat extends View {
     const tp = panes().find((p) => p.terminal === this.view);
     if (me && f && f.tab === me.tab && Date.now() - (this.faceFocusAt ?? 0) > 250) {
       const to = this.face === "chat" && tp && f.pane === tp.pane ? me.pane : this.face === "terminal" && tp && f.pane === me.pane ? tp.pane : null;
-      if (to) {
+      // The face may be another app's flip this one hasn't read yet (the keyboard then went to the face
+      // that shows now): unless this app flipped as the keyboard moved, or read the document since, the
+      // document first.
+      if (f.pane !== this.keyPane) { this.keyPane = f.pane; this.keyPaneAt = Date.now(); }
+      const sure = (sharedFace(this.view)?.at ?? 0) >= this.keyPaneAt - 1000 || (this.faceDocAt ?? 0) >= this.keyPaneAt;
+      if (to && !sure) this.faceReadAt = 0;
+      else if (to) {
         this.faceFocusAt = Date.now();
         run("pane.focus", { pane: to });
       }
@@ -2729,7 +2753,11 @@ export default class HerdrChat extends View {
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_size_change((sz, cx) => { if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); } })
+      .on_size_change((sz, cx) => {
+        if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); }
+        // A hidden pane gets no room: shown or hidden, by this app's flip or another's, the face is read again now.
+        if (this.view) { this.faceReadAt = 0; this.faceAgain = this.faceReading; }
+      })
       .on_drop((e, cx) => this.drop(e.paths ?? [], cx))
       .children(this.sub ? [this.subBar(t)] : pill && !floats ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);

@@ -1,5 +1,5 @@
-// The chat registry (<stateDir>/chats/<chat>.json) and the session lock
-// (<sessionFile>.herdr-chat.lock).
+// The chat registry (<stateDir>/chats/<chat>.json), the chat's claim
+// (<stateDir>/chats/<chat>.host) and the session lock (<sessionFile>.herdr-chat.lock).
 import { mkdirSync, writeFileSync, renameSync, readFileSync, unlinkSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -79,6 +79,60 @@ export function takeLock(sessionFile: string, info: LockInfo): LockInfo | null {
     atomicWrite(lockPath(sessionFile), JSON.stringify(info) + "\n", 0o644);
   } catch {}
   return other;
+}
+
+/**
+ * The chat's one host. Every app showing the chat's tab runs its own copy of
+ * the chat (its machine's own app, and one on another computer showing that
+ * machine's spaces), and each starts a host when none answers: two may start
+ * at the same moment. The first to claim the chat serves it; another finds
+ * the claim of a live host for the same chat (`isHost`) and steps aside, and
+ * its chat connects to the one the registry names. A claim whose pid is gone
+ * or isn't such a host is stale and taken over. Returns the serving host's
+ * pid when that's another, else null (claimed, or the claim can't be made:
+ * then it serves anyway, as before claims).
+ */
+export function claimChat(stateDir: string, chat: string, isHost: (pid: number) => boolean, pid = process.pid): number | null {
+  const path = join(stateDir, "chats", `${chat}.host`);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  } catch {}
+  for (let i = 0; i < 3; i++) {
+    try {
+      writeFileSync(path, `${pid}\n`, { flag: "wx", mode: 0o600 });
+      return null;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") return null;
+    }
+    let other = 0;
+    try {
+      other = Number(readFileSync(path, "utf8").trim());
+    } catch {}
+    if (other && other !== pid && pidAlive(other) && isHost(other)) return other;
+    try {
+      unlinkSync(path);
+    } catch {}
+  }
+  return null;
+}
+
+/** Gives the chat's claim back, if this process holds it. */
+export function releaseChat(stateDir: string, chat: string, pid = process.pid): void {
+  const path = join(stateDir, "chats", `${chat}.host`);
+  try {
+    if (Number(readFileSync(path, "utf8").trim()) === pid) unlinkSync(path);
+  } catch {}
+}
+
+/** Whether `pid` is a herdr-chat host serving `chat` (its command line: `serve … --chat <chat>`). Linux's /proc; elsewhere, false. */
+export function servesChat(pid: number, chat: string): boolean {
+  try {
+    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    const at = argv.indexOf("--chat");
+    return argv.includes("serve") && at >= 0 && argv[at + 1] === chat;
+  } catch {
+    return false;
+  }
 }
 
 /** Removes the lock only if this process holds it. */

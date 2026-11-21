@@ -41,9 +41,9 @@ export default class ChatSwitch extends View {
   target() {
     const f = focused();
     if (!f?.pane) return null;
+    // Another machine's ("cypherpunk/t5") too: its view flips in that machine's document (faces.js).
     const address = f.terminal ?? shared(VIEWS)?.[f.pane] ?? null;
-    // The chat view is for this computer's terminals (faces.js reads this computer's document).
-    if (!address || address.includes("/")) return null;
+    if (!address) return null;
     const term = terminals().find((x) => x.address === address);
     if (!term) return null;
     if (f.terminal && (term.state !== "live" || !isClaude(term))) return null;

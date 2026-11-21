@@ -162,6 +162,13 @@ Images and diagrams the host saves are copied here when the chat shows them
 up to 8 MB). Continue as chat and `/tui` work on that machine's agents as on
 this computer's, except for sub-agents, which still open their TUI.
 
+A Claude Code terminal there flips to its chat view too (⌘⇧J, or the top
+bar's Chat/Terminal switch): the view's host runs on that machine and types
+into the terminal there. Which face shows is the tab's, kept in that
+machine's layout, so a flip shows on every window that shows the tab,
+that machine's own included. Each window that shows a chat starts its host
+when none answers; the first to start serves, and the others connect to it.
+
 ### Plan limits for other tools
 
 Claude Code tells a chat its plan limits as it runs (it hands them to a status

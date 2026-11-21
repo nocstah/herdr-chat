@@ -11,13 +11,30 @@
 // read; a conflict reads again. The app takes the change in at its next read
 // of the document (within half a second).
 //
+// Another machine's terminal (the app shows that machine's spaces: "box/t7")
+// flips in that machine's document, through this computer's core (doc.get and
+// doc.set with `on`), where its ids are bare ("t7"): the view's props name
+// the terminal so (`attach: "t7"`), as that machine's own app reads them, and
+// its host runs there (connection.js). Every app showing the tab draws the
+// change: the face is the tab's, not one screen's.
+//
 // The same file is in mods/chat and mods/new-chat (a mod can't import
-// another's): keep the two equal (tests/host/faces.test.ts checks).
+// another's): keep the two equal (tests/host/terminal-view.test.ts checks).
 
 import { exec, panes, setShared, shared, spaces } from "herdr";
 import { randomBytes } from "crypto";
 
 export const VIEW_MOD = "chat";
+
+// Ids: another machine's carry its name in the app ("box/t7"), bare in its own document (as machines.js).
+/** @param {any} id */
+export const machineOf = (id) => { const s = String(id ?? ""), at = s.indexOf("/"); return at > 0 ? s.slice(0, at) : null; };
+/** @param {any} id */
+export const bare = (id) => { const s = String(id ?? ""), at = s.indexOf("/"); return at > 0 ? s.slice(at + 1) : s; };
+/** @param {string | null} machine @param {any} id */
+export const qualify = (machine, id) => (machine && id != null && !String(id).includes("/") ? `${machine}/${id}` : id);
+/** @param {string | null} machine */
+const on = (machine) => (machine ? { on: machine } : {});
 
 const HELLO = '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1}}';
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
@@ -42,7 +59,7 @@ function walk(n, f, parent = null) {
 /**
  * A terminal's faces in the document: {space, tab, term, parent, view} (the
  * terminal's node, its parent, the view's node or null), or null when the
- * terminal has no pane. This computer's document only.
+ * terminal has no pane. `terminal`: as the document names it (bare).
  */
 export function facesOf(doc, terminal) {
   for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) {
@@ -65,25 +82,28 @@ export function faceOf(f) {
 
 // The app writes the document after its own changes; ours waits until the
 // app's latest is in it, or it would undo that change (hostpane.js inStep).
-function inStep(doc) {
+// `machine`: the document's (null: this computer's).
+function inStep(doc, machine) {
   const docTabs = new Set();
   const docPanes = new Set();
   for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) {
     docTabs.add(t.id);
     walk(t.root, (n) => { if (!n.children?.length) docPanes.add(n.id); });
   }
-  const local = (id) => !String(id).includes("/");
-  const appTabs = spaces().flatMap((s) => s.tabs.map((t) => t.id)).filter(local);
-  const appPanes = panes().map((p) => p.pane).filter(local);
+  const mine = (id) => machineOf(id) === machine;
+  const appTabs = spaces().flatMap((s) => s.tabs.map((t) => t.id)).filter(mine).map(bare);
+  const appPanes = panes().map((p) => p.pane).filter(mine).map(bare);
   return appTabs.length === docTabs.size && appTabs.every((t) => docTabs.has(t))
     && appPanes.length === docPanes.size && appPanes.every((p) => docPanes.has(p));
 }
 
-/** The face each terminal shows, as the last flip left it (shared by the mods: a hidden view never takes the keyboard). */
+/** The face each terminal shows as this app's last flip left it, and when (shared by the mods: a hidden view never takes the keyboard). */
 export const FACES = "herdr-chat.faces";
 
+/** {face, at} for `terminal` (the app's address), else null. Another app showing the tab may have flipped it since: the document has the last word. */
 export function sharedFace(terminal) {
-  return shared(FACES)?.[terminal] ?? null;
+  const v = shared(FACES)?.[terminal] ?? null;
+  return typeof v === "string" ? { face: v, at: 0 } : v?.face ? v : null;
 }
 
 /**
@@ -93,17 +113,19 @@ export function sharedFace(terminal) {
  * terminal's pane), tab, created}; throws why not. `cx`: the calling view's
  * context (its sleep, between tries).
  */
-/** @param {any} cx @param {string} terminal @param {"chat" | "terminal" | "toggle"} face @param {object | null} [props] */
+/** @param {any} cx @param {string} terminal the app's address ("t5", "box/t5") @param {"chat" | "terminal" | "toggle"} face @param {object | null} [props] */
 export async function flip(cx, terminal, face, props = null) {
+  const machine = machineOf(terminal), id = bare(terminal);
   for (let i = 0; ; i++) {
-    const { value, version } = await rpc("doc.get", { name: "herdr-app" });
-    if (!value?.spaces) throw new Error("no layout document");
-    if (!inStep(value) && i < 8) {
+    const { value, version } = await rpc("doc.get", { name: "herdr-app", ...on(machine) });
+    if (!value?.spaces) throw new Error(machine ? `no layout document on ${machine}` : "no layout document");
+    // Another machine's document reaches this app later (its core's event, then a read over its link).
+    if (!inStep(value, machine) && i < (machine ? 16 : 8)) {
       await cx.sleep(150);
       continue;
     }
-    const f = facesOf(value, terminal);
-    if (!f) throw new Error(`terminal ${terminal} has no pane here`);
+    const f = facesOf(value, id);
+    if (!f) throw new Error(`terminal ${terminal} has no pane ${machine ? `on ${machine}` : "here"}`);
     /** @type {any} */ let view = f.view;
     let created = false;
     const want = face === "toggle" ? (faceOf(f) === "chat" ? "terminal" : "chat") : face;
@@ -112,7 +134,7 @@ export async function flip(cx, terminal, face, props = null) {
         if (!props) throw new Error("this terminal has no chat view yet");
         const sibs = f.parent?.children;
         if (!sibs) throw new Error("the terminal's pane has no place in its tab");
-        view = { id: `p${randomBytes(16).toString("hex")}`, type: "block", content: { mod: VIEW_MOD, props }, ...(f.term.size ? { size: f.term.size } : {}) };
+        view = { id: `p${randomBytes(16).toString("hex")}`, type: "block", content: { mod: VIEW_MOD, props: { ...props, attach: id } }, ...(f.term.size ? { size: f.term.size } : {}) };
         sibs.splice(sibs.indexOf(f.term) + 1, 0, view);
         created = true;
       }
@@ -123,23 +145,24 @@ export async function flip(cx, terminal, face, props = null) {
       if (view) view.hidden = true;
     }
     try {
-      await rpc("doc.set", { name: "herdr-app", value, version });
-      setShared(FACES, { ...(shared(FACES) ?? {}), [terminal]: want });
-      return { face: want, pane: view?.id ?? null, term: f.term.id, tab: f.tab, created };
+      await rpc("doc.set", { name: "herdr-app", value, version, ...on(machine) });
+      setShared(FACES, { ...(shared(FACES) ?? {}), [terminal]: { face: want, at: Date.now() } });
+      return { face: want, pane: qualify(machine, view?.id ?? null), term: qualify(machine, f.term.id), tab: qualify(machine, f.tab), created };
     } catch (/** @type {any} */ e) {
       if (e?.kind !== "conflict" || i >= 10) throw e;
     }
   }
 }
 
-/** The terminal a chat view pane (by its pane id) is the face of, else null. */
+/** The terminal (the app's address) a chat view pane (the app's id) is the face of, else null. */
 export async function viewTerminal(pane) {
-  const { value } = await rpc("doc.get", { name: "herdr-app" });
+  const machine = machineOf(pane), id = bare(pane);
+  const { value } = await rpc("doc.get", { name: "herdr-app", ...on(machine) });
   /** @type {string | null} */ let out = null;
   for (const s of value?.spaces ?? []) for (const t of s.tabs ?? []) walk(t.root, (n) => {
-    if (!out && n.id === pane && n.content?.mod === VIEW_MOD && typeof n.content?.props?.attach === "string") out = n.content.props.attach;
+    if (!out && n.id === id && n.content?.mod === VIEW_MOD && typeof n.content?.props?.attach === "string") out = n.content.props.attach;
   });
-  return out;
+  return out ? qualify(machine, bare(out)) : null;
 }
 
 /** The chat view's props for a terminal: a new chat id, Claude Code, the terminal and its folder. */

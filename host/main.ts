@@ -8,7 +8,7 @@ import { Chat } from "./chat.ts";
 import { Attachments } from "./attachments.ts";
 import { ChatServer } from "./server.ts";
 import { Terminal } from "./terminal.ts";
-import { writeRegistry, readRegistry, pidAlive } from "./registry.ts";
+import { writeRegistry, readRegistry, pidAlive, claimChat, releaseChat, servesChat } from "./registry.ts";
 import type { RegistryEntry } from "./registry.ts";
 import { ChatClient, parseWait } from "./client.ts";
 import { createAdapter, DEFAULT_PROVIDER, providerNames, tuiSession } from "./providers/index.ts";
@@ -79,6 +79,14 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
       appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`);
     } catch {}
   };
+  // Another app showing this chat started its host a moment before this one (claimChat): that one
+  // serves it, and this one leaves before touching the chat's files (its chat connects to the other).
+  const serving = claimChat(stateDir, chatId, (pid) => servesChat(pid, chatId));
+  if (serving) {
+    log(`another host (pid ${serving}) serves chat=${chatId}: this one (pid ${process.pid}) steps aside`);
+    process.exit(0);
+  }
+  process.on("exit", () => releaseChat(stateDir, chatId));
   // --attach <terminal>: the terminal view. The agent is the person's own TUI in that terminal;
   // this host reads its session and types into it (providers/claude/terminal.ts), never runs it.
   const view = a.flags.get("attach")?.[0] ?? null;
