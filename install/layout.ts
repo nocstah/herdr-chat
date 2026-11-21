@@ -20,6 +20,8 @@
 // right end: the tabs block (id `tabs`, Herdr's tabs or a copy such as
 // OmaRelay's) goes into a row with it, the row taking the block's size;
 // uninstall puts the block back as it was (its keys' order in the record).
+// Tabs already in a row (OmaRelay's, with its recap line beside them) get the
+// switch at that row's end, and uninstall takes only the switch out.
 // The switch's block is as wide as its widest pill (with "needs you"); one an
 // earlier release made wider (OLD_SWITCH_PX) is narrowed, a width set by hand kept.
 //
@@ -37,9 +39,9 @@ export const COMMANDS = { id: "new-chat-commands", edge: "bottom", align: "start
 const isCommands = (f: Json) => f?.id === COMMANDS.id && f?.content?.mod === "new-chat" && f?.content?.props?.role === "commands";
 export const SWITCH_MOD = "chat-switch";
 export const SWITCH_ROW = "chat-switch-row";
-export const SWITCH_PX = 224;
+export const SWITCH_PX = 176;
 /** The switch block's widths in earlier releases: an install narrows them to SWITCH_PX. */
-const OLD_SWITCH_PX = [236];
+const OLD_SWITCH_PX = [236, 224];
 const SWITCH = { id: "chat-switch", type: "block", size: { px: SWITCH_PX }, window_drag: true, content: { mod: SWITCH_MOD } };
 const isSwitch = (n: Json) => n?.content?.mod === SWITCH_MOD;
 /** A block's own size, which the row takes while the block is in it. */
@@ -145,7 +147,12 @@ export function patchLayout(layout: Json, want: { agents: boolean; menu: boolean
       out.switch = "resized";
     } else if (ours) out.switch = "already";
     // A top bar across a column: a row of the bar and the switch takes its place there.
-    else if (!slot || slot.parent?.type !== "column" || !Array.isArray(slot.parent.children)) out.switch = "noslot";
+    else if (!slot || !Array.isArray(slot.parent?.children) || !["column", "row"].includes(slot.parent.type)) out.switch = "noslot";
+    // Tabs already in a row (another plugin's, such as Inapse Spaces' recap line beside them): the switch joins its end.
+    else if (slot.parent.type === "row") {
+      slot.parent.children.push(structuredClone(SWITCH));
+      out.switch = "changed";
+    }
     else {
       const tabs = slot.node;
       out.tabsKeys = Object.keys(tabs);
@@ -303,7 +310,7 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
     changed: "the top bar has the chat view's Chat/Terminal switch",
     resized: `the top bar's Chat/Terminal switch is narrower (${SWITCH_PX} px), beside the tabs`,
     already: "the top bar already has the Chat/Terminal switch",
-    noslot: "no top bar block (id tabs) in a column: the chat view keeps its own Chat/Terminal switch",
+    noslot: "no top bar block (id tabs) in a column or a row: the chat view keeps its own Chat/Terminal switch",
     skipped: "",
   }[r.switch];
   say.push(`layout ${name}: ${agents}; ${menu}${commands ? `; ${commands}` : ""}${sw ? `; ${sw}` : ""}`);
