@@ -8,6 +8,9 @@ import { historyOf } from "../../host/providers/claude/history.ts";
 import { Timeline } from "../../host/timeline.ts";
 import { CLAUDE_TOOLS } from "../../host/providers/claude/tools.ts";
 import type { NormalizedEvent } from "../../host/providers/types.ts";
+import { isNarration } from "../../host/providers/claude/mapper.ts";
+// @ts-expect-error a plain JS module of the mod's
+import { buildRows } from "../../herdr-app/mods/chat/rows.js";
 
 type Rec = Record<string, any>;
 const FILE = "/tmp/follow-test/-tmp-demo/5e1f0c2a-0000-4000-8000-000000000001.jsonl";
@@ -94,4 +97,64 @@ test("compaction and a local command's output, as the history shows them", () =>
   assert.match((evs[0] as any).text, /150k tokens before/);
   assert.equal(evs[1]!.type, "assistant_end");
   assert.equal(evs.length, 2);
+});
+
+// Code Mode (thinking display "updates"): the words Claude Code shows between tool calls come as a thinking block
+// whose signature names it a narration. A made-up signature envelope: field 2 { field 1 { field 8: kind } }.
+function sig(kind: string): string {
+  const k = [...Buffer.from(kind)], inner = [0x08, 0x14, 0x42, k.length, ...k], mid = [0x0a, inner.length, ...inner];
+  return Buffer.from([0x08, 0x04, 0x12, mid.length, ...mid]).toString("base64");
+}
+
+/** A made-up Code Mode turn as Claude Code 2.1.330 writes it: each record carries its message's stop reason and usage. */
+function updatesSession(): Rec[] {
+  let n = 0;
+  const base = () => ({ parentUuid: n ? `u${n}` : null, uuid: `u${++n}`, timestamp: `2026-11-21T09:00:${String(n).padStart(2, "0")}.000Z`, sessionId: "s", cwd: "/tmp/demo" });
+  const asst = (id: string, block: Rec, stop = "tool_use") => ({ ...base(), type: "assistant", thinkingDisplay: "updates", message: { id, model: "claude-opus-5-5", role: "assistant", content: [block], stop_reason: stop, usage: { input_tokens: 7, output_tokens: 3 } } });
+  return [
+    { ...base(), type: "user", message: { role: "user", content: "Merge the branch" } },
+    asst("m1", { type: "thinking", thinking: "", signature: sig("thinking") }),
+    asst("m1", { type: "thinking", thinking: "Step one is merged.", signature: sig("narration") }),
+    asst("m1", { type: "tool_use", id: "toolu_1", name: "REPL", input: { code: "1" } }),
+    { ...base(), type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] } },
+    asst("m2", { type: "thinking", thinking: "Compare the two lists.", signature: sig("thinking") }),
+    asst("m2", { type: "text", text: "Done." }, "end_turn"),
+  ];
+}
+
+test("words Claude Code sends as a narration show as the agent's text, mid-turn, after it and in history", () => {
+  const recs = updatesSession();
+  const live = new Timeline("/tmp/demo", null, CLAUDE_TOOLS), f = new TranscriptFollower(FILE);
+  live.apply({ type: "run_started" });
+  for (const ev of feedAll(f, recs.slice(0, 5))) live.apply(ev);
+  // mid-turn: its own row in the chat, not a Thought folded in the work group
+  const rows: any[] = buildRows(live.items, { phase: "working" });
+  assert.ok(rows.some((r) => r.kind === "item" && r.item.kind === "assistant" && r.item.text === "Step one is merged."));
+  for (const ev of [...feedAll(f, recs.slice(5)), ...f.close()]) live.apply(ev);
+  const hist = new Timeline("/tmp/demo", null, CLAUDE_TOOLS);
+  hist.load(historyOf(recs, FILE));
+  const want = ["user|Merge the branch|", "assistant|Step one is merged.|", "tool|REPL|done", "thinking|Compare the two lists.|", "assistant|Done.|"];
+  assert.deepEqual(shape(live.items), want);
+  assert.deepEqual(shape(hist.items), want);
+});
+
+test("only a signature that names a narration makes thinking text: reasoning, and signatures it can't read, stay thinking", () => {
+  const think = (signature: unknown, thinking = "Read the file first.") => ({ type: "thinking", thinking, signature });
+  assert.equal(isNarration(think(sig("narration"))), true);
+  assert.equal(isNarration(think(sig("thinking"))), false);
+  assert.equal(isNarration(think(sig("narration"), "  ")), false);
+  for (const odd of ["x", "", undefined, 42, Buffer.from([0x12, 0x05, 0x0a]).toString("base64"), Buffer.from([0x12, 0xff]).toString("base64")]) {
+    assert.equal(isNarration(think(odd)), false, String(odd));
+  }
+  assert.equal(isNarration({ type: "text", text: "Done.", signature: sig("narration") }), false);
+});
+
+test("a message whose every record carries its stop reason counts its usage once", () => {
+  const f = new TranscriptFollower(FILE);
+  const ends = feedAll(f, updatesSession()).filter((e): e is Extract<NormalizedEvent, { type: "assistant_end" }> => e.type === "assistant_end");
+  // m1 ends after each of its three records, m2 after each of its two: one usage each
+  assert.equal(ends.length, 5);
+  assert.deepEqual(ends.map((e) => Boolean(e.usage)), [true, false, false, true, false]);
+  const hist = historyOf(updatesSession(), FILE).filter((e) => e.type === "assistant_end" && e.usage);
+  assert.equal(hist.length, 2);
 });

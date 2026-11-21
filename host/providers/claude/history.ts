@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { bashEvents, imageFile, readTranscript, promptText, sentImages } from "./sessions.ts";
-import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
+import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
 import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason } from "../types.ts";
 
 type Rec = Record<string, any>;
@@ -54,8 +54,7 @@ function emitAssistant(group: Rec[], ctx: Ctx, parent?: string): void {
   const ts = tsOf(first);
   const p = parent ? { parent } : {};
   const content: (AssistantBlock | null)[] = blocks.map((b) => {
-    if (b.type === "text") return b.text ? { type: "text", text: String(b.text) } : null;
-    if (b.type === "thinking") return b.thinking ? { type: "thinking", text: String(b.thinking) } : null;
+    if (b.type === "text" || b.type === "thinking") return shownBlock(b);
     if (b.type === "tool_use") {
       ctx.names.set(String(b.id), String(b.name ?? "tool"));
       return { type: "toolCall", callId: String(b.id), name: String(b.name ?? "tool"), args: b.input };
@@ -66,7 +65,7 @@ function emitAssistant(group: Rec[], ctx: Ctx, parent?: string): void {
     // Live, a subagent's messages arrive one record at a time with no stop reason.
     for (const r of group) {
       const c: Rec[] = Array.isArray(r.message?.content) ? r.message.content : [];
-      const texts = c.map((b) => (b.type === "text" && b.text ? { type: "text" as const, text: String(b.text) } : b.type === "thinking" && b.thinking ? { type: "thinking" as const, text: String(b.thinking) } : null));
+      const texts = c.map(shownBlock);
       if (texts.some(Boolean)) ctx.out.push({ type: "assistant_end", content: texts, ...p, ...(tsOf(r) ? { ts: tsOf(r) } : {}) });
       for (const b of c) {
         if (b.type !== "tool_use") continue;

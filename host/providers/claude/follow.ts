@@ -7,17 +7,21 @@
 // stream would: an assistant message opens with its first record, each block
 // shows whole as it lands, and the message closes when another message, a
 // user record or the run's end comes. No I/O, so tests feed it records.
+// Claude Code 2.1.330 writes the message's stop reason and usage on each of its
+// records (older versions on its last, when at all): a message ends at its
+// stop reason, and a record of it that comes after opens it again, its usage
+// already counted.
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason } from "../types.ts";
-import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
+import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
 import { bashEvents, imageFile, promptText, readTranscript, sentImages } from "./sessions.ts";
 
 type Rec = Record<string, any>;
 
 const STOP: Record<string, StopReason> = { end_turn: "stop", stop_sequence: "stop", pause_turn: "stop", tool_use: "toolUse", max_tokens: "length", refusal: "error" };
 
-type Open = { id: string | null; content: (AssistantBlock | null)[]; model?: string; usage?: Rec; stop?: string; error?: string; synthetic: boolean };
+type Open = { id: string | null; content: (AssistantBlock | null)[]; model?: string; usage?: Rec; stop?: string; error?: string; synthetic: boolean; again: boolean };
 
 function tsOf(r: Rec): number | undefined {
   const t = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
@@ -32,6 +36,8 @@ function localStdout(text: string): string | null {
 export class TranscriptFollower {
   private names = new Map<string, string>();
   private open: Open | null = null;
+  /** The id of the message that ended last: a record of it after that opens it again (`again`). */
+  private closedId: string | null = null;
   /** Records already shown (the history, or a record written twice), by uuid. */
   private seen = new Set<string>();
   /** A `!` command's card waiting for its output (sessions.ts bashEvents). */
@@ -100,9 +106,10 @@ export class TranscriptFollower {
     const o = this.open;
     if (!o) return [];
     this.open = null;
+    this.closedId = o.id;
     const last = o.content.at(-1);
     const stop: StopReason = o.error ? "error" : o.stop ? STOP[o.stop] ?? "stop" : last?.type === "toolCall" ? "toolUse" : "stop";
-    const usage = o.synthetic ? undefined : usageOf(o.usage);
+    const usage = o.synthetic || o.again ? undefined : usageOf(o.usage);
     return [{
       type: "assistant_end", content: o.content, stopReason: stop, ...(o.error ? { error: o.error } : {}),
       ...(usage ? { usage } : {}), ...(!o.synthetic && o.model ? { model: o.model } : {}),
@@ -116,7 +123,7 @@ export class TranscriptFollower {
     const out: NormalizedEvent[] = [];
     if (this.open && (this.open.id !== id || id === null)) out.push(...this.close());
     if (!this.open) {
-      this.open = { id, content: [], synthetic: m.model === "<synthetic>" };
+      this.open = { id, content: [], synthetic: m.model === "<synthetic>", again: id !== null && id === this.closedId };
       out.push({ type: "assistant_start" });
     }
     const o = this.open;
@@ -127,15 +134,14 @@ export class TranscriptFollower {
     for (const b of blocks) {
       const index = o.content.length;
       if (b?.type === "text" || b?.type === "thinking") {
-        const kind = b.type as "text" | "thinking";
-        const text = String(kind === "text" ? b.text ?? "" : b.thinking ?? "");
+        const shown = shownBlock(b);
         // Redacted thinking: a block with nothing to show.
-        if (!text) {
+        if (!shown) {
           o.content.push(null);
           continue;
         }
-        o.content.push({ type: kind, text });
-        out.push({ type: "assistant_block_start", index, kind }, { type: "assistant_block_end", index, kind, text });
+        o.content.push(shown);
+        out.push({ type: "assistant_block_start", index, kind: shown.type }, { type: "assistant_block_end", index, kind: shown.type, text: shown.text });
       } else if (b?.type === "tool_use") {
         const name = String(b.name ?? "tool");
         this.names.set(String(b.id), name);
@@ -143,7 +149,6 @@ export class TranscriptFollower {
         out.push({ type: "tool_call", index, callId: String(b.id), name, args: b.input });
       } else o.content.push(null);
     }
-    // Claude Code writes the stop reason only on a message's last record, when at all.
     if (o.stop || o.error) out.push(...this.close());
     return out;
   }
@@ -172,7 +177,7 @@ export class TranscriptFollower {
     for (const r of recs) {
       const c: Rec[] = Array.isArray(r.message?.content) ? r.message.content : [];
       if (r.type === "assistant") {
-        const texts = c.map((b) => (b.type === "text" && b.text ? { type: "text" as const, text: String(b.text) } : b.type === "thinking" && b.thinking ? { type: "thinking" as const, text: String(b.thinking) } : null));
+        const texts = c.map(shownBlock);
         if (texts.some(Boolean)) out.push({ type: "assistant_end", content: texts, parent: callId });
         for (const b of c) {
           if (b.type !== "tool_use") continue;
