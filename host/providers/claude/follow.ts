@@ -9,9 +9,9 @@
 // user record or the run's end comes. No I/O, so tests feed it records.
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import type { AssistantBlock, NormalizedEvent, StopReason } from "../types.ts";
+import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason } from "../types.ts";
 import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
-import { bashEvents, promptText, readTranscript } from "./sessions.ts";
+import { bashEvents, imageFile, promptText, readTranscript, sentImages } from "./sessions.ts";
 
 type Rec = Record<string, any>;
 
@@ -85,10 +85,13 @@ export class TranscriptFollower {
     // A `!` command the person ran in the TUI: a Bash card, as in history (sessions.ts bashEvents).
     const bash = bashEvents(r, this.bash, t);
     if (bash) return [...this.close(), ...bash];
-    const text = promptText(r);
+    const typed = promptText(r);
     // A /compact shows as the compaction's notice (the boundary record).
-    if (text === null || /^\/compact(\s|$)/.test(text)) return [];
-    const images = imagesOf(c);
+    if (typed === null || /^\/compact(\s|$)/.test(typed)) return [];
+    // Images the terminal view sent as @ mentions: shown as the message's images, as in history.
+    const sent = sentImages(typed);
+    const text = sent.text;
+    const images = [...imagesOf(c), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
     return [...this.close(), { type: "user_message", text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t }];
   }
 

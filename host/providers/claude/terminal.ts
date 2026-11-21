@@ -17,7 +17,8 @@
 // stays there: the chat has no asks or pickers of its own here.
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { TranscriptFollower } from "./follow.ts";
 import { historyOf } from "./history.ts";
@@ -86,7 +87,15 @@ export type TerminalAdapterOptions = AdapterOptions & {
   /** The terminal the TUI runs in (`t7`, as the host's core names it). */
   terminal: string;
   hc: string;
+  /** Where the images a message sends are saved for Claude Code to read (sendImages); none: no images. */
+  sentDir?: string;
 };
+
+/** How long a sent image's file is kept: Claude Code reads it as the message lands; the chat shows it again from it. */
+const SENT_KEEP_MS = 7 * 24 * 3600_000;
+const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+/** An `@` mention of a file, as Claude Code reads it (quoted when the path has a space). */
+const mention = (p: string) => (/\s/.test(p) ? `@"${p}"` : `@${p}`);
 
 /** A process's CLAUDE_CONFIG_DIR (Linux: its environment), else null. */
 function envOf(pid: number, name: string): string | null {
@@ -105,7 +114,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   readonly tools = CLAUDE_TOOLS;
   readonly capabilities: Capabilities = {
     steer: true, followUp: true, thinkingLevels: [], permissions: false, permissionModes: [], extensionUi: false,
-    compact: false, compactInstructions: false, rename: false, fork: false, images: false, cost: false, tui: false,
+    compact: false, compactInstructions: false, rename: false, fork: false, images: true, cost: false, tui: false,
   };
   readonly sessions: SessionSource = { kind: "files", files: (_current, scope) => sessionFiles(this.opts.cwd, scope), describe: describeSession };
 
@@ -139,6 +148,35 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   constructor(opts: TerminalAdapterOptions) {
     this.opts = opts;
     this.snapshot = new Promise((r) => (this.gotSnapshot = r));
+    if (opts.sentDir) this.pruneSent(opts.sentDir);
+  }
+
+  /** Sent images older than SENT_KEEP_MS go. */
+  private pruneSent(dir: string): void {
+    try {
+      for (const f of readdirSync(dir)) {
+        const p = join(dir, f);
+        if (/^herdr-chat-[0-9a-f]{16}\./.test(f) && Date.now() - statSync(p).mtimeMs > SENT_KEEP_MS) rmSync(p, { force: true });
+      }
+    } catch {}
+  }
+
+  /**
+   * A message's images, for Claude Code: each saved as a file it reads as the
+   * message lands, named in the message as an `@` mention (Claude Code attaches
+   * an image it's pointed at; the chat shows these as the message's images,
+   * sessions.ts sentImages). The mentions go first, so the cursor never ends in
+   * one (Enter there could take a file suggestion instead of sending).
+   */
+  private sendImages(images: ImageBlock[]): string[] {
+    const dir = this.opts.sentDir;
+    if (!dir) throw new Error("Images can't be sent from here: paste them in Claude Code's terminal.");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return images.map((img) => {
+      const p = join(dir, `herdr-chat-${randomBytes(8).toString("hex")}.${EXT[img.mimeType] ?? "png"}`);
+      writeFileSync(p, Buffer.from(img.data, "base64"), { mode: 0o600 });
+      return p;
+    });
   }
 
   get alive(): boolean {
@@ -421,16 +459,18 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Claude Code's terminal has ended.", true);
     if (!this.registry()) throw new Error("Claude Code isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
-    if (p.images.length) throw new Error("Images can't be sent from here: paste them in Claude Code's terminal.");
     // Typing would answer its question (hc send refuses too).
     if (this.status === "blocked") throw new Error(ASKING);
     // `!command`: Claude Code's bash mode runs it in the agent's shell, and the agent sees what it
     // printed; it comes back as a Bash card (sessions.ts bashEvents). Only at rest, as Ctrl+! does.
     const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
     if (bang && this.status === "working") throw new Error(BUSY);
-    const text = bang ? `!${bang[1]!.trim()}` : p.text;
     // A command is the TUI's (its screen, or a run it starts itself): what it writes shows as it comes.
     const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
+    if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
+    const files = p.images.length ? this.sendImages(p.images) : [];
+    const words = p.text.trim() ? p.text : files.length ? "" : p.text;
+    const text = bang ? `!${bang[1]!.trim()}` : files.length ? `${files.map(mention).join(" ")} ${words}`.trimEnd() + (words ? "" : " ") : p.text;
     // Noted before it's typed: the TUI writes its echo as Enter lands, before `hc send` returns.
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);

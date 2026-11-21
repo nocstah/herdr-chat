@@ -86,7 +86,7 @@ function rig() {
   const events: NormalizedEvent[] = [];
   const logs: string[] = [];
   const host = { emit: (ev: NormalizedEvent) => events.push(ev), log: (m: string) => logs.push(m), running: false, working: false };
-  const adapter = new ClaudeTerminalAdapter({ cwd, command: "claude", args: [], log: (m) => logs.push(m), terminal: "t9", hc });
+  const adapter = new ClaudeTerminalAdapter({ cwd, command: "claude", args: [], log: (m) => logs.push(m), terminal: "t9", hc, sentDir: join(d, "sent") });
   const done = () => {
     adapter.kill();
     tui.kill();
@@ -161,6 +161,30 @@ test("the view: the TUI's session as history, a message typed into the terminal,
     // A command is the TUI's: handled (no run of the chat's), still typed.
     assert.equal((await r.adapter.prompt({ id: "u-2", text: "/model", images: [], mode: "steer", busy: false })).disposition, "handled");
     assert.deepEqual(r.calls().at(-1), ["send", "--json", "t9", "/model"]);
+    // Images: saved for Claude Code to read, @ mentions ahead of the words; the echo (mentions and all) confirms the message.
+    const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    assert.equal((await r.adapter.prompt({ id: "u-5", text: "What is this?", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false })).disposition, "started");
+    const typed = r.calls().at(-1)!.at(-1) as string;
+    const m = /^@(\S+\/sent\/herdr-chat-[0-9a-f]{16}\.png) What is this\?$/.exec(typed);
+    assert.ok(m, typed);
+    assert.equal(readFileSync(m![1]!).toString("base64"), PNG);
+    r.events.length = 0;
+    const p5 = prompt(typed, a2.uuid);
+    r.write(S1, [p5]);
+    await until("the image message's echo", () => r.events.some((e) => e.type === "user_message"));
+    const echo5 = r.events.find((e) => e.type === "user_message") as any;
+    assert.equal(echo5.clientId, "u-5");
+    assert.equal(echo5.text, "What is this?");
+    assert.equal(echo5.images, 1);
+    r.status("done");
+    await until("its run settles", () => r.events.some((e) => e.type === "run_settled"));
+    r.status("idle");
+    await new Promise((res) => setTimeout(res, 150));
+    // An image alone: the mentions and a space (the cursor out of the last mention).
+    await r.adapter.prompt({ id: "u-6", text: "", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false });
+    assert.match(r.calls().at(-1)!.at(-1) as string, /^@\S+\.png $/);
+    await assert.rejects(r.adapter.prompt({ id: "u-7", text: "/model", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false }), /Images go with a message/);
+
     // A `!` command: Claude Code's bash mode runs it (its records come back as a Bash card); refused mid-run.
     assert.equal((await r.adapter.prompt({ id: "u-3", text: "! pnpm build", images: [], mode: "steer", busy: false })).disposition, "handled");
     assert.deepEqual(r.calls().at(-1), ["send", "--json", "t9", "!pnpm build"]);

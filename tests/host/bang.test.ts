@@ -86,3 +86,26 @@ test("followed live, a `!` run shows as the history shows it", () => {
   assert.deepEqual(shape(live.items), shape(hist.items));
   assert.ok(shape(live.items).some((s) => s.startsWith("tool|")), shape(live.items).join(", "));
 });
+
+test("images the terminal view sent as @ mentions show as the message's images, in history and live", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { sentImages } = await import("../../host/providers/claude/sessions.ts");
+  const d = mkdtempSync(join(tmpdir(), "herdr-chat-sent-"));
+  const img = join(d, "herdr-chat-0123456789abcdef.png");
+  writeFileSync(img, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+  try {
+    assert.deepEqual(sentImages(`@${img} @"/a b/herdr-chat-fedcba9876543210.jpg" Look at these`), { text: "Look at these", files: [img, "/a b/herdr-chat-fedcba9876543210.jpg"] });
+    assert.deepEqual(sentImages("@src/upload.ts what about this"), { text: "@src/upload.ts what about this", files: [] }, "the person's own mention stays");
+    const recs = [{ uuid: "i1", parentUuid: null, type: "user", timestamp: "2026-11-21T10:00:00.000Z", message: { role: "user", content: `@${img} What is this?` } }];
+    const hist = historyOf(recs, FILE).find((e) => e.type === "user_message") as any;
+    assert.equal(hist.text, "What is this?");
+    assert.equal(hist.images, 1);
+    const live = new TranscriptFollower(FILE).feed(recs[0]!).find((e) => e.type === "user_message") as any;
+    assert.equal(live.text, "What is this?");
+    assert.equal(live.images, 1);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});

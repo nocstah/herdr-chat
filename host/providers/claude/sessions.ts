@@ -5,7 +5,7 @@ import { readdirSync, statSync, readFileSync, realpathSync, openSync, readSync, 
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import type { NormalizedEvent, SessionInfo, SessionScope } from "../types.ts";
+import type { ImageBlock, NormalizedEvent, SessionInfo, SessionScope } from "../types.ts";
 import { jsonlFiles, subdirs } from "../../jsonl.ts";
 
 type Rec = Record<string, any>;
@@ -112,6 +112,33 @@ export function bashEvents(r: Rec, open: { callId: string | null }, t: { ts?: nu
   open.callId = null;
   const output = [b.stdout, b.stderr].filter((s) => s.trim()).join("\n");
   return [{ type: "tool_ended", callId, name: "Bash", isError: Boolean(b.stderr.trim()) && !b.stdout.trim(), output, ...t }];
+}
+
+/**
+ * Images the terminal view sent as `@` mentions ahead of the message
+ * (terminal.ts sendImages: files named herdr-chat-<16 hex>.<ext>): the text
+ * without them, and their files, shown as the message's images.
+ */
+export const SENT_IMAGE = /^@(?:"([^"]*\/herdr-chat-[0-9a-f]{16}\.(?:png|jpe?g|gif|webp))"|(\S*\/herdr-chat-[0-9a-f]{16}\.(?:png|jpe?g|gif|webp)))(?:\s+|$)/;
+export function sentImages(text: string): { text: string; files: string[] } {
+  const files: string[] = [];
+  let rest = text;
+  for (let m = SENT_IMAGE.exec(rest); m; m = SENT_IMAGE.exec(rest)) {
+    files.push((m[1] ?? m[2])!);
+    rest = rest.slice(m[0].length);
+  }
+  return files.length ? { text: rest, files } : { text, files };
+}
+
+/** A sent image's file as an image block, while it's there. */
+export function imageFile(path: string): ImageBlock | null {
+  const ext = path.replace(/^.*\./, "").toLowerCase();
+  const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/png";
+  try {
+    return { data: readFileSync(path).toString("base64"), mimeType };
+  } catch {
+    return null;
+  }
 }
 
 export function promptText(r: Rec): string | null {

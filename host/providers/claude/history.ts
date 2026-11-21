@@ -5,9 +5,9 @@
 // before a compaction stays visible (with a compaction notice), as live.
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { bashEvents, readTranscript, promptText } from "./sessions.ts";
+import { bashEvents, imageFile, readTranscript, promptText, sentImages } from "./sessions.ts";
 import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
-import type { NormalizedEvent, AssistantBlock, StopReason } from "../types.ts";
+import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason } from "../types.ts";
 
 type Rec = Record<string, any>;
 
@@ -150,10 +150,13 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
     // A `!` command the person ran in the TUI: a Bash card (sessions.ts bashEvents).
     const bash = bashEvents(r, ctx.bash, t);
     if (bash) { ctx.out.push(...bash); continue; }
-    const text = promptText(r);
+    const typed = promptText(r);
     // Our /compact isn't a prompt (live it's a compaction, shown by the boundary's notice).
-    if (text === null || /^\/compact(\s|$)/.test(text)) continue;
-    const images = imagesOf(c);
+    if (typed === null || /^\/compact(\s|$)/.test(typed)) continue;
+    // Images the terminal view sent as @ mentions: shown as the message's images.
+    const sent = sentImages(typed);
+    const text = sent.text;
+    const images = [...imagesOf(c), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
     ctx.out.push({ type: "user_message", text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t, ...p });
   }
   flush();
