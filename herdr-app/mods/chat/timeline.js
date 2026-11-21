@@ -32,6 +32,8 @@ export class Timeline {
     this.viewRaw = 0; // the viewport's height as reported (zoomed)
     this.anchor = null; // history went in front: the rows on screen, to keep where they were [{id, dy}]
     this.heightsSeen = null; // debug only (trace()): row id → [[ms, height]…], the heights it was measured at
+    /** @type {{id: string, passes: number, keep: boolean | null} | null} a row to bring into view (reveal) */
+    this.want = null;
   }
 
   h(r) {
@@ -55,6 +57,29 @@ export class Timeline {
 
   toBottom() {
     this.sticky = true;
+  }
+
+  // Page Up (dir 1) and Page Down (-1): most of a screen, keeping a few lines
+  // of the last one in view, as a wheel would scroll it.
+  /** @param {1 | -1} dir */
+  page(dir) {
+    this.scrollBy(dir * Math.max(40, Math.round(this.viewH * 0.85)));
+  }
+
+  // The first loaded row at the top. Near the top, older history loads in front
+  // (onNearTop) and the rows on screen stay put, so pressing it again goes further back.
+  toTop() {
+    if (this.total <= this.viewH) return;
+    this.sticky = false;
+    this.top = 0;
+  }
+
+  // Find's match: its row a quarter down the view, unless it's already in view.
+  // The rows above it may still be estimates: the next few views aim again as
+  // they're measured.
+  /** @param {string} id */
+  reveal(id) {
+    this.want = { id, passes: 0, keep: null };
   }
 
   // Items were put in front (history): keep what's on screen where it is. The
@@ -92,6 +117,17 @@ export class Timeline {
       const a = this.anchor.find((x) => at.has(x.id));
       if (a && !this.sticky) this.top = offs[at.get(a.id)] - a.dy;
       this.anchor = null;
+    }
+    if (this.want) {
+      const i = items.findIndex((/** @type {any} */ x) => x.id === this.want?.id);
+      if (i < 0 || total <= this.viewH) this.want = null;
+      else {
+        const w = this.want;
+        const top = this.sticky ? Math.max(0, total - this.viewH) : this.top;
+        w.keep ??= offs[i] >= top + 24 && offs[i] + Math.min(this.h(items[i]), this.viewH / 2) <= top + this.viewH - 24;
+        if (!w.keep) { this.sticky = false; this.top = offs[i] - Math.round(this.viewH / 4); }
+        if (++w.passes >= 4) this.want = null;
+      }
     }
     const rows = [];
     let place;

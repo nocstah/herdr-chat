@@ -1734,6 +1734,8 @@ export class Chat {
         return this.sweepAttachments(a.open);
       case "history":
         return this.history(a.before, a.limit);
+      case "search":
+        return this.timeline.search(String(a.query ?? ""), typeof a.limit === "number" && a.limit > 0 ? Math.min(a.limit, 5000) : 2000);
       case "tool_output":
         return this.toolOutput(a.item);
       case "handoff":

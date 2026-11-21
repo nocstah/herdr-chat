@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { splitBlocks } from "./blocks.ts";
 import { highlight, langForPath, plainLines, MAX_LINES } from "./highlight.ts";
-import { renderMermaid, DEFAULT_THEME } from "./mermaid.ts";
+import { renderMermaid, DEFAULT_THEME, DIAGRAM_STYLE } from "./mermaid.ts";
 import type { Theme } from "./mermaid.ts";
 import { toSpans } from "./ansi.ts";
 import type { Span } from "./ansi.ts";
@@ -264,7 +264,7 @@ export class Renderer {
   }
 
   private renderMermaid(source: string): { svg?: string; ascii?: Span[][]; error?: string } {
-    const key = hash(source, this.themeKey);
+    const key = hash(source, this.themeKey, DIAGRAM_STYLE);
     const hit = this.mermaid.get(key);
     if (hit && (!hit.svg || existsSync(hit.svg))) return hit;
     const r = renderMermaid(source, this.theme);

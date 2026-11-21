@@ -38,6 +38,7 @@ export class CodeView extends View {
     this.sel = null; // {a, b}: where the press was and where the pointer is, as {r: line, c: column}
     this.dragging = false;
     this.linesW = 0; // the lines' own width (the widest)
+    /** @type {boolean} */ this.hover = false; // the pointer is over the card: its language, Copy and sideways bar show (rich.js codeCard)
     this.viewW = 0;
     owners.get(this.p.owner)?.codeSel?.set(this.p.key, this); // the E2E's chat.codesel command
   }
@@ -135,12 +136,15 @@ export class CodeView extends View {
       .child(v_flex().id(id).w_full().items_start().overflow_scroll()
         .on_size_change((sz, cx) => { if (Math.abs(sz.width - this.viewW) > 0.5) { this.viewW = sz.width; this.changed(cx); } })
         .child(content))
-      .when(wide, (el) => el.pb(10).child(div().absolute().left(0).right(0).bottom(0).h(10).child(Scrollbar.horizontal(id).mode("always"))));
+      // The sideways bar shows while the pointer is over the card, else only while it moves (a drag
+      // that leaves the card keeps it); its room is kept, so nothing moves when it shows.
+      .when(wide, (el) => el.pb(10).child(div().absolute().left(0).right(0).bottom(0).h(10)
+        .child(Scrollbar.horizontal(id).mode(this.hover ? "always" : "scrolling"))));
   }
 
   render() {
     const p = this.p;
-    if (p.markdown != null) return markdown(p.id, p.markdown);
+    if (p.markdown != null) return markdown(p.id, p.markdown, (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => (owners.get(p.owner) ? owners.get(p.owner).onLink(url, cx) : cx.open_url(url)));
     const t = theme();
     const key = p.key;
     const owner = () => owners.get(p.owner);
@@ -151,7 +155,9 @@ export class CodeView extends View {
       copy: (id, text, cx) => owner()?.copy(id, text, cx),
       toggle: (id, cx) => owner()?.toggle(id, cx),
       codeBody: (rendered, texts) => this.body(rendered, texts, t),
+      codeHover: this.hover,
     };
-    return codeCard(key, p.lang, p.code ?? "", p.lines, false, c);
+    return codeCard(key, p.lang, p.code ?? "", p.lines, false, c).id(`codecard-${p.owner}-${key}`)
+      .on_hover((on, cx) => { if (on !== this.hover) { this.hover = on; this.changed(cx); } });
   }
 }

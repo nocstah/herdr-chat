@@ -9,8 +9,8 @@ a model without levels) says so in the hint line under the composer.
 The defaults below are macOS's (`keys.default.json`). On Linux they come from
 `keys.default.linux.json`: Ctrl where macOS has ⌘, on chords Herdr's own Linux
 keys leave free (`model` Ctrl+Shift+M, `effort` Ctrl+Shift+I, `mode`
-Ctrl+Shift+A, `tui` Ctrl+Alt+T, `resume` Ctrl+Shift+R, `latest` Ctrl+End,
-`focusComposer` Ctrl+L, `newChat` Ctrl+Alt+N). There Ctrl+C is a text field's
+Ctrl+Shift+A, `tui` Ctrl+Alt+T, `resume` Ctrl+Shift+R, `top` Ctrl+Home, `latest` Ctrl+End,
+`find` Ctrl+F, `focusComposer` Ctrl+L, `newChat` Ctrl+Alt+N). There Ctrl+C is a text field's
 copy, so `stop` on Ctrl+C works only outside the composer and the pickers'
 fields; Esc stops the run anywhere.
 
@@ -26,7 +26,11 @@ fields; Esc stops the run anywhere.
 | `stop` | ⌃C (`ctrl-c`) | Stops the agent's run. Esc stops it too. |
 | `tui` | ⌥⌘T (`cmd-alt-t`) | Continues the chat in the agent's own terminal UI (`/tui`). |
 | `resume` | ⇧⌘R (`cmd-shift-r`) | Opens the sessions picker (`/resume`). |
+| `pageUp` | ⇞ (`pageup`) | Scrolls the conversation up a page, also from the composer (not in a menu or picker). |
+| `pageDown` | ⇟ (`pagedown`) | Scrolls the conversation down a page; at the end it follows new messages again. |
+| `top` | none (Linux: Ctrl+Home) | Scrolls to the top of the conversation. Older messages load in front as it gets there; press it again to go further back. |
 | `latest` | ⇧⌘B (`cmd-shift-b`) | Scrolls to the latest message. |
+| `find` | ⌘F (`cmd-f`) | Opens find in the chat (Linux: Ctrl+F). It looks through the whole conversation, older messages too: your messages, the answers, notices and a tool's title. It starts at the latest match and marks its row; Enter or ↑ goes to the match before, Shift+Enter or ↓ to the one after, and Esc closes it. A match in folded work opens its group. On macOS ⌘F is also Herdr's terminal find, which a chat pane has no terminal for. |
 | `focusComposer` | ⌘L (`cmd-l`) | Puts the keyboard back in the composer and closes an open picker. |
 | `newChat` | ⇧⌘N (`cmd-shift-n`) | Opens a new chat tab with the same agent in the same folder. |
 

@@ -47,7 +47,7 @@ export function item(it, c, footer, slot = true) {
     case "user": return user(it, c);
     case "assistant": return assistant(it, c, footer, slot);
     case "thinking": return thinking(it, c);
-    case "tool": return tool(it, c);
+    case "tool": return tool(it, c, { flat: true });
     case "notice": return notice(it, c);
     case "custom": return custom(it, c);
     case "plan": return plan(it, c);
@@ -82,7 +82,9 @@ function actions(it, footer, c, { align = "start", text } = {}) {
   const acts = it ? h_flex().gap(2).items_center().opacity(on ? 1 : 0).transition("opacity", { duration: 120, easing: "ease-out" })
     .child(div().id(`ts-${it.id}`).px(4).text_size(11).text_color(t.dim).tooltip(absTime(it.ts)).child(relTime(it.ts, c.now)))
     .when(on, (e) => e.child(copyButton(`msg:${it.id}`, text ?? it.text ?? "", c, { size: 12.5 }))
-      .when(it.kind === "user", (x) => x.child(btn(`edit-${it.id}`, "pencil", "Edit and resend", (_e, cx) => c.editResend(it, cx)))))
+      .when(it.kind === "user", (x) => x.child(btn(`edit-${it.id}`, "pencil", "Edit and resend", (_e, cx) => c.editResend(it, cx))))
+      .when(it.kind === "assistant", (x) => x.child(btn(`quote-${it.id}`, "quote", "Quote in your reply: the part you copied from it, else all of it",
+        (/** @type {any} */ _e, /** @type {import("gpui-kit").Context} */ cx) => c.quote(it, cx)))))
     : null;
   let foot = null;
   if (footer) {
@@ -103,6 +105,9 @@ function hoverable(el, it, c) {
   return el.id(`msg-${it.id}`).on_hover((h, cx) => c.setHover(it.id, h, cx));
 }
 
+// A long message of yours (a pasted log, a spec) folds to its first lines in
+// its bubble, with "Show full message" under them; Copy and Edit take it whole.
+const USER_LINES = 12;
 function user(it, c) {
   const t = c.t;
   const env = unwrapHc(it.text);
@@ -116,8 +121,19 @@ function user(it, c) {
   else if (it.source === "queued") tags.push(div().child("queued"));
   if (it.images) tags.push(h_flex().gap(4).items_center().child(icon("image", 11)).child(plural(it.images, "image")));
   // The actions sit left of the bubble, on its last line: no extra height.
+  // The bubble is the column's own child, aligned right, so it is as wide as
+  // its text up to its max: as an item of a row it was laid out at a fraction
+  // of that (a two-line message took four). The actions are placed against its
+  // left edge, outside the layout.
   const b = SPACE.bubble;
-  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}`, text || " "));
+  const lines = (text ?? "").split("\n");
+  const long = lines.length > USER_LINES + 2 || (text ?? "").length > 1500;
+  const open = !long || c.expanded.has(`user:${it.id}`);
+  const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
+  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, shown || " "));
+  const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
+    .on_click((_e, cx) => c.toggle(`user:${it.id}`, cx))
+    .child(icon(open ? "chevron-up" : "chevron-down", 11)).child(open ? "Show less" : `Show full message · ${plural(lines.length, "line")}`)] : [];
   const skill = it.skill;
   // What the agent got for the skill, under its pill once opened.
   const skillBody = Boolean(skill?.body) && c.expanded.has(`skill:${it.id}`)
@@ -130,11 +146,12 @@ function user(it, c) {
   else if (!text) content = [h_flex().child(skillPill(it, c)), ...skillBody];
   else if (!text.includes("\n") && text.length <= 80) content = [h_flex().gap(8).items_center().child(skillPill(it, c)).child(body("-i").flex_1().min_w(0)), ...skillBody];
   else content = [h_flex().child(skillPill(it, c)), ...skillBody, body("-s")];
-  return hoverable(h_flex().gap(6).items_end().justify_end(), it, c)
-    .child(div().flex_none().pb(2).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
-    .child(v_flex().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised)
+  return hoverable(v_flex().items_end(), it, c)
+    .child(v_flex().relative().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised)
+      .child(div().absolute().right_full().bottom(2).pr(6).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
       .when(tags.length > 0, (e) => e.child(h_flex().gap(8).text_size(11).text_color(t.dim).children(tags)))
       .children(content)
+      .children(more)
       .children([images(it.imagePaths, it.imageSizes, it.id, c)].filter(Boolean)));
 }
 
@@ -257,28 +274,40 @@ export function toolTitle(it, d, c) {
 
 export const toolIcon = (d) => TOOL_ICON[d?.type] ?? "wrench";
 
-export function tool(it, c) {
+// A tool call. `flat` (the timeline's own work, in a group or alone): one line,
+// a chevron and the call, its status only when it isn't plain done; opened, what
+// it did under a thin rule. Else (inside a subagent's card) a card of its own.
+export function tool(it, c, { flat = false } = {}) {
   const t = c.t;
   const d = it.detail ?? { type: "generic", tool: it.name };
   if (d.type === "agent") return agentCard(it, d, c);
   const open = c.expanded.has(it.id);
   const title = toolTitle(it, d, c);
   const added = d.added ?? null, removed = d.removed ?? null;
-  const head = h_flex().id(`tool-${it.id}`).h(34).px(10).gap(8).items_center().cursor_pointer()
-    .hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.toggle(it.id, cx))
-    .child(icon(TOOL_ICON[d.type] ?? "wrench", 13).text_color(t.dim))
+  const head = h_flex().id(`tool-${it.id}`).h(flat ? 28 : 34).px(flat ? 4 : 10).gap(flat ? 6 : 8).items_center().cursor_pointer()
+    .when(flat, (e) => e.rounded(6)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.toggle(it.id, cx))
+    .child(flat ? icon(open ? "chevron-down" : "chevron-right", 12).text_color(t.dim) : icon(TOOL_ICON[d.type] ?? "wrench", 13).text_color(t.dim))
     .child(title)
     .when(d.type === "edit" && (added != null || removed != null), (e) => e.child(h_flex().flex_none().gap(6).font_family(c.mono).text_size(11.5)
       .child(div().text_color(t.ansi2).child(`+${added ?? 0}`)).child(div().text_color(t.ansi1).child(`−${removed ?? 0}`))))
     .when(d.type === "bash" && d.exitCode != null && d.exitCode !== 0, (e) => e.child(chip(`exit ${d.exitCode}`, t.ansi1, t)))
     .when(it.durationMs != null && it.durationMs >= 100, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(it.durationMs))))
-    .child(statusIcon(it.status, t));
+    .when(!flat || it.status !== "done", (e) => e.child(statusIcon(it.status, t)));
   let body = null;
-  if (open) body = toolBody(it, d, c);
+  if (open) body = toolBody(it, d, c, flat);
   else if (it.status === "running" && it.output) {
     // Running: the output's last lines, so a long command shows life.
     const lines = it.outputLines?.length ? it.outputLines.slice(-4) : asLines(it.output).slice(-4);
-    body = div().border_t_1().border_color(c.line).px(10).py(6).child(outputBox(`${it.id}-tail`, lines, c, { color: t.dim }));
+    body = (flat ? div().py(4) : div().border_t_1().border_color(c.line).px(10).py(6)).child(outputBox(`${it.id}-tail`, lines, c, { color: t.dim }));
+  }
+  if (flat) {
+    const under = [
+      ...(body ? [body] : []),
+      ...(open && it.status === "declined" ? [div().py(4).text_size(11.5).text_color(t.blocked).child("Declined: not run")] : []),
+      ...(it.images?.length ? [div().py(4).child(images(it.images, it.imageSizes, it.id, c))] : []),
+    ];
+    return v_flex().child(head)
+      .when(under.length > 0, (e) => e.child(v_flex().ml(9).mt(2).mb(6).pl(14).border_l_1().border_color(t.border).gap(6).children(under)));
   }
   return v_flex().rounded(10).overflow_hidden().border_1()
     .border_color(it.status === "error" ? alpha(t.ansi1, 0.45) : it.status === "declined" ? alpha(t.blocked, 0.45) : t.border).bg(t.surface)
@@ -287,12 +316,12 @@ export function tool(it, c) {
     .children(it.images?.length ? [div().px(10).pb(10).child(images(it.images, it.imageSizes, it.id, c))] : []);
 }
 
-function toolBody(it, d, c) {
+function toolBody(it, d, c, flat = false) {
   const t = c.t;
   const fullText = c.full.get(it.id);
   const out = fullText ?? it.output ?? "";
   const truncated = it.outputTruncated && fullText == null;
-  const box = v_flex().border_t_1().border_color(c.line).px(10).py(8).gap(8).max_w_full();
+  const box = (flat ? v_flex().py(4) : v_flex().border_t_1().border_color(c.line).px(10).py(8)).gap(8).max_w_full();
   const parts = [];
   if (d.type === "bash") {
     parts.push(h_flex().gap(8).font_family(c.mono).text_size(12.5).line_height("19px")
@@ -320,8 +349,17 @@ function toolBody(it, d, c) {
   return box.children(parts);
 }
 
-// A work group: one summary row; open, its cards (6 px apart). The running
-// group shows its live card; a finished one is closed unless it failed.
+// Find's match (main.js findGo, `c.findItem` inside a group): its row on a tint,
+// a little wider than the row and behind it, so the row keeps its clicks and hover.
+/** @param {any} el @param {any} t */
+export function findMark(el, t) {
+  return div().relative().child(div().absolute().top(-4).bottom(-4).left(-8).right(-8).rounded(8).bg(alpha(t.accent, 0.1)))
+    .child(el);
+}
+
+// A work group: one summary row ("· 1 failed" in red when a step failed); open,
+// its steps as rows under it. The running group shows its live step; a finished
+// one is closed until opened.
 function group(r, c) {
   const t = c.t;
   const s = groupSummary(r.items);
@@ -332,6 +370,8 @@ function group(r, c) {
     .on_click((_e, cx) => c.toggle(r.id, cx))
     .child(icon(open ? "chevron-down" : "chevron-right", 12).text_color(t.dim))
     .child(div().flex_none().max_w_full().truncate().child(s.text))
+    .when(s.failed > 0, (e) => e.child(div().flex_none().text_color(t.ansi1).child(`· ${s.failed} failed`)))
+    .when(s.declined > 0, (e) => e.child(div().flex_none().text_color(t.blocked).child(`· ${s.declined} declined`)))
     .when(s.ms != null && s.ms >= 1000 && !s.running, (e) => e.child(div().flex_none().text_size(11.5).text_color(t.dim).child(duration(s.ms))))
     .child(statusIcon(s.failed ? "error" : s.declined ? "declined" : s.running ? "running" : "done", t, 12));
   // Opening and closing animate the cards' height (main.js `groupAnim`):
@@ -339,8 +379,12 @@ function group(r, c) {
   const anim = c.groupAnim(r.id);
   const shownMembers = anim?.target === "close" ? r.items : members;
   let body = shownMembers.length
-    ? v_flex().id(`grp-cards-${r.id}`).flex_none().gap(SPACE.card).pt(SPACE.card).on_size_change((sz, cx) => c.groupMeasured(r.id, sz.height, cx))
-      .children(shownMembers.map((m) => (m.kind === "thinking" ? thinking(m, c) : tool(m, c))))
+    ? v_flex().id(`grp-cards-${r.id}`).flex_none().pl(14).pt(2).on_size_change((sz, cx) => c.groupMeasured(r.id, sz.height, cx))
+      .children(shownMembers.map((m) => {
+        const el = m.kind === "thinking" ? thinking(m, c)
+          : m.kind === "notice" ? div().h(28).px(4).flex().items_center().child(notice(m, c)) : tool(m, c, { flat: true });
+        return m.id === c.findItem ? findMark(el, t) : el;
+      }))
     : null;
   if (body && anim) {
     const h = anim.step === 0 ? (anim.target === "open" ? 0 : anim.h ?? 0) : anim.target === "open" ? anim.h ?? 0 : 0;

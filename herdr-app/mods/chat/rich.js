@@ -9,12 +9,24 @@ import { appHome } from "herdr";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { alpha, codeLine, homeRel, icon, plural, spinner } from "./util.js";
 import { SPACE } from "./space.js";
+import { linkPaths } from "./paths.js";
 
 export const CODE_CAP = 30; // lines shown before "Show all N lines"
 const RENDER_MAX = 600; // lines ever built for one block (the rest: copy it)
 export const LINE_H = 19;
 
-export const prose = (id, text) => TextView.markdown(id, text).selectable(true);
+// `onLink` (an answer's prose): its file paths become links (linkPaths), and
+// every link's click goes to it instead of straight to the system.
+/** @typedef {(url: string, cx: import("gpui-kit").Context) => void} OnLink */
+/**
+ * @param {string} id
+ * @param {string} text
+ * @param {OnLink} [onLink]
+ */
+export const prose = (id, text, onLink) => {
+  const view = TextView.markdown(id, onLink ? linkPaths(text) : text).selectable(true);
+  return onLink ? view.on_link_click(onLink) : view;
+};
 
 // Markdown → the chunks drawn one TextView each, so the space between
 // paragraphs, lists, tables and headings is ours (space.js), not the
@@ -56,11 +68,16 @@ export function mdChunks(text) {
 // The space above a piece of an answer, after `prev` (null: the first).
 const above = (heading, prev) => (prev == null ? 0 : heading ? SPACE.headingAbove : prev.heading ? SPACE.headingBelow : SPACE.block);
 
-// Markdown as its chunks, spaced (one TextView when it's one chunk).
-export function markdown(id, text) {
+// Markdown as its chunks, spaced (one TextView when it's one chunk). `onLink`: prose().
+/**
+ * @param {string} id
+ * @param {string} text
+ * @param {OnLink} [onLink]
+ */
+export function markdown(id, text, onLink) {
   const parts = mdChunks(text || " ");
-  if (parts.length === 1) return prose(id, parts[0].text);
-  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(prose(`${id}-${j}`, p.text))));
+  if (parts.length === 1) return prose(id, parts[0].text, onLink);
+  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(prose(`${id}-${j}`, p.text, onLink))));
 }
 
 // Whether a block starts or ends with a heading (for the space around it).
@@ -82,7 +99,7 @@ export function blocks(it, c) {
     let el;
     if (b.type === "code") el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
     else if (b.type === "mermaid") el = mermaid(key, b, c);
-    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text);
+    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink);
     return div().pt(gap).child(el);
   }));
 }
@@ -101,8 +118,11 @@ export function copyButton(id, text, c, { size = 12, label = null } = {}) {
     .child(icon(done ? "check" : "copy", size)).when(Boolean(label), (e) => e.child(done ? "Copied" : label));
 }
 
-// A code card: language and copy on top, highlighted monospace lines below,
-// capped at CODE_CAP lines until "Show all N lines".
+// A code card: highlighted monospace lines, capped at CODE_CAP lines until
+// "Show all N lines". The language and Copy sit in the card's top right corner.
+// A finished block (codeview.js) shows them while the pointer is over it
+// (c.codeHover) or just after a copy: at rest it is the code alone. A card drawn
+// in place (a fence still streaming, with a spinner; a diagram's source) always does.
 export function codeCard(key, lang, code, lines, open, c) {
   const t = c.t;
   // Streaming (open fence): plain lines, one text run each, far cheaper to
@@ -112,10 +132,13 @@ export function codeCard(key, lang, code, lines, open, c) {
   const full = c.expanded.has(`code:${key}`);
   const shown = full ? all.slice(0, RENDER_MAX) : all.slice(0, CODE_CAP);
   const more = n - shown.length;
-  const head = h_flex().h(30).pl(12).pr(6).gap(8).items_center().border_b_1().border_color(c.line)
-    .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(lang || "text"))
-    .when(Boolean(open), (e) => e.child(spinner(11, t.dim)))
-    .child(copyButton(`code:${key}`, code, c));
+  const corner = open || !c.codeBody || c.codeHover || c.copied(`code:${key}`)
+    ? h_flex().absolute().top(4).right(4).h(26).pl(9).pr(2).gap(6).items_center().rounded(7)
+      .bg(c.codeBg).border_1().border_color(c.line)
+      .child(div().text_size(11.5).text_color(t.dim).child(lang || "text"))
+      .when(Boolean(open), (e) => e.child(spinner(11, t.dim)))
+      .child(copyButton(`code:${key}`, code, c))
+    : null;
   const rendered = shown.map((l) => codeLine(l, t, t.foreground));
   // A finished block (codeview.js) scrolls sideways and selects; a streaming one is clipped.
   const body = (c.codeBody ? c.codeBody(rendered, code.replace(/\n$/, "").split("\n").slice(0, shown.length))
@@ -128,8 +151,8 @@ export function codeCard(key, lang, code, lines, open, c) {
       .child(icon(full ? "chevron-up" : "chevron-down", 12))
       .child(full ? (more > 0 ? `Showing ${shown.length} of ${n} lines · copy for the rest` : "Show less") : `Show all ${n} lines`)
     : null;
-  return v_flex().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
-    .child(head).child(body).children(foot ? [foot] : []);
+  return v_flex().relative().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
+    .child(body).children(foot ? [foot] : []).children(corner ? [corner] : []);
 }
 
 // A mermaid block: the host's SVG (click to enlarge, "Show source"), its
@@ -153,13 +176,16 @@ function mermaid(key, b, c) {
     .child(copyButton(`code:${key}`, b.source ?? "", c));
   let body;
   if (rel) {
-    // Fit the column: the SVG's own aspect ratio once known (else a guess).
-    const w = Math.min(c.colW - 26, size?.w ?? 600);
-    const h = size ? Math.round((w * size.h) / size.w) : 260;
+    // Fit the column, up to 1.4× the drawing's own size so its 13 px labels read like
+    // the prose (a diagram drawn as large as it can be, not left small in a wide card),
+    // and at most 640 px tall; the SVG's own aspect ratio once known (else a guess).
+    let w = Math.min(c.colW - 26, Math.round((size?.w ?? 600) * 1.4));
+    let h = size ? Math.round((w * size.h) / size.w) : 260;
+    if (h > 640) { w = Math.round((w * 640) / h); h = 640; }
     // On hover a ⤢ at the top right says a click opens the zoomable viewer (the click is the body's).
     body = div().id(`svg-${key}`).relative().p(12).flex().justify_center().cursor_pointer().on_click((_e, cx) => c.enlarge(b.svg, size, cx))
       .on_hover((on, cx) => c.setSvgHover(key, on, cx))
-      .child(image(rel).w(w).h(Math.min(h, 640)))
+      .child(image(rel).w(w).h(h))
       .when(c.svgHover === key, (e) => e.child(div().absolute().top(8).right(8).w(26).h(26).flex().items_center().justify_center()
         .rounded(6).bg(alpha(t.popover, 0.92)).border_1().border_color(t.input).text_size(14).text_color(t.foreground).child("⤢")));
   } else {

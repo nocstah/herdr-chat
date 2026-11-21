@@ -26,7 +26,11 @@ export const SHORTCUTS = {
   stop: "Stop the agent",
   tui: "Continue in the agent's terminal UI",
   resume: "Resume another session",
+  pageUp: "Scroll the conversation up a page",
+  pageDown: "Scroll the conversation down a page",
+  top: "Scroll to the top of the conversation (older messages load as it gets there)",
   latest: "Scroll to the latest message",
+  find: "Find in the chat (the whole conversation, older messages too)",
   focusComposer: "Focus the composer",
   newChat: "New chat in this folder, same agent",
 };
@@ -35,13 +39,16 @@ export const actionName = (a) => `herdrchat_k_${a}`;
 
 // The inputs inside the chat (composer.js, menus.js, dialogs.js): a chord
 // must be bound "<ctx> > Input" too, or the input's own keys win.
-const INPUTS = ["HerdrChatMenu", "HerdrChatEmpty", "HerdrChatComposer", "HerdrChatAsk", "HerdrChatQuestions", "HerdrChatDialog", "HerdrChatEditor"];
+const INPUTS = ["HerdrChatMenu", "HerdrChatEmpty", "HerdrChatComposer", "HerdrChatAsk", "HerdrChatQuestions", "HerdrChatDialog", "HerdrChatEditor", "HerdrChatFind"];
 // The cycles (Shift+Tab) work only in the composer, and not while a menu is open.
 const COMPOSER = ["HerdrChatEmpty > Input", "HerdrChatComposer > Input", "HerdrChatAsk > Input", "HerdrChatQuestions > Input"];
 // Sending is the composer's with text in it (or images): in a menu Enter picks,
 // on an empty composer with an approval card it answers (composer.js).
 const SENDING = ["HerdrChatEmpty > Input", "HerdrChatComposer > Input"];
-const ONLY = { cycleMode: COMPOSER, cycleEffort: COMPOSER, steer: SENDING, followUp: SENDING };
+// Scrolling works from the composer too (where you are while reading back), but
+// not in a menu, picker or dialog: their lists and fields keep those keys.
+const READING = ["HerdrChat", ...COMPOSER, "HerdrChatFind > Input"];
+const ONLY = { cycleMode: COMPOSER, cycleEffort: COMPOSER, steer: SENDING, followUp: SENDING, pageUp: READING, pageDown: READING, top: READING };
 // The composer can't send without these: used when keys.default.json can't be read.
 const FALLBACK = { steer: "enter", followUp: "alt-enter" };
 
@@ -121,11 +128,11 @@ export function keyHint(a) {
 
 const GLYPH = { cmd: "⌘", ctrl: "⌃", alt: "⌥", shift: "⇧" };
 const ORDER = ["ctrl", "alt", "shift", "cmd"];
-const NAMES = { tab: "⇥", enter: "↩", escape: "Esc", up: "↑", down: "↓", left: "←", right: "→", space: "Space", backspace: "⌫" };
+const NAMES = { tab: "⇥", enter: "↩", escape: "Esc", up: "↑", down: "↓", left: "←", right: "→", space: "Space", backspace: "⌫", pageup: "⇞", pagedown: "⇟", home: "↖", end: "↘" };
 
 // Off macOS, keys are written out as Herdr writes them there ("Ctrl+Shift+P").
 const WORD = { cmd: "Super", ctrl: "Ctrl", alt: "Alt", shift: "Shift" };
-const KEY_WORDS = { tab: "Tab", enter: "Enter", escape: "Esc", up: "↑", down: "↓", left: "←", right: "→", space: "Space", backspace: "Backspace" };
+const KEY_WORDS = { tab: "Tab", enter: "Enter", escape: "Esc", up: "↑", down: "↓", left: "←", right: "→", space: "Space", backspace: "Backspace", pageup: "Page Up", pagedown: "Page Down", home: "Home", end: "End" };
 
 export function keyLabel(chord, mac = MAC) {
   return chord.split(" ").map((step) => {

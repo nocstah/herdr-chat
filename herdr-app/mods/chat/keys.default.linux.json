@@ -9,7 +9,11 @@
   "stop": "ctrl-c",
   "tui": "ctrl-alt-t",
   "resume": "ctrl-shift-r",
+  "pageUp": "pageup",
+  "pageDown": "pagedown",
+  "top": "ctrl-home",
   "latest": "ctrl-end",
+  "find": "ctrl-f",
   "focusComposer": "ctrl-l",
   "newChat": "ctrl-alt-n"
 }

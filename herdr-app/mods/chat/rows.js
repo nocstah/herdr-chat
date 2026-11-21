@@ -1,6 +1,7 @@
 // Timeline items → the rows the timeline draws (visual-v2.md §5, §6):
 // - consecutive tool and thinking items of one response fold into a work
-//   group (`g-<first id>`); a lone one stays a row of its own;
+//   group (`g-<first id>`), with the plan's marker row ("Plan updated · 3 steps")
+//   among them; a lone one stays a row of its own;
 // - assistant messages that only carried tool calls (no text) are hidden,
 //   and so are info notifies (the toast says it);
 // - the last assistant row of a finished run carries the run's footer
@@ -19,6 +20,9 @@ export function visible(it) {
 }
 
 const WORK = new Set(["tool", "thinking"]);
+// The turn's plan marker (host/timeline.ts): a TodoWrite's row, part of the work
+// around it rather than a break that splits it into two groups.
+const isWork = (/** @type {{kind: string, source?: string}} */ it) => WORK.has(it.kind) || (it.kind === "notice" && it.source === "plan");
 
 // Items a subagent's run produced (`parent`, protocol v3), by parent id, in
 // order. They're drawn inside the parent's agent card, never as rows.
@@ -28,10 +32,12 @@ export function childrenOf(items) {
   return kids;
 }
 
-// A work group's open state when the person hasn't chosen: open while it
-// failed or was declined (the cards say what), else closed.
-export function defaultOpen(r) {
-  return r.items.some((x) => x.status === "error" || x.status === "declined");
+// A work group's open state when the person hasn't chosen: closed. A failed or
+// declined step says so in red in the group's summary ("· 1 failed"); the rows
+// under it are a click away, so a long session isn't a wall of open groups.
+/** @param {unknown} _r the group */
+export function defaultOpen(_r) {
+  return false;
 }
 
 const atWork = (it) => (it.kind === "thinking" ? Boolean(it.streaming) : it.kind === "tool" && (it.status === "running" || it.status === "pending"));
@@ -101,7 +107,7 @@ export function buildRows(items, state) {
     }
     if (it.kind === "assistant") (run ??= { assistants: [] }).assistants.push(it);
     if (!visible(it)) continue;
-    if (WORK.has(it.kind)) {
+    if (isWork(it)) {
       (group ??= []).push(it);
       continue;
     }
@@ -140,11 +146,11 @@ const VERB = {
 };
 
 // A work group's summary: "Ran 3 commands · read 2 files · edited 1 file", its
-// span of time, and its worst status.
+// span of time, its worst status, and how many steps failed or were declined.
 export function groupSummary(items) {
   const n = {};
   const paths = { edit: new Set(), write: new Set(), read: new Set() };
-  let thinking = 0, failed = false, declined = false, running = false, start = Infinity, end = 0;
+  let thinking = 0, failed = 0, declined = 0, running = false, start = Infinity, end = 0;
   for (const it of items) {
     start = Math.min(start, it.ts ?? Infinity);
     end = Math.max(end, (it.ts ?? 0) + (it.durationMs ?? 0));
@@ -153,12 +159,13 @@ export function groupSummary(items) {
       if (it.streaming) running = true;
       continue;
     }
+    if (it.kind !== "tool") continue; // the plan's marker row
     const type = it.detail?.type ?? "generic";
     const k = VERB[type] ? type : "generic";
     if (paths[k] && it.detail?.path) paths[k].add(it.detail.path);
     n[k] = (n[k] ?? 0) + 1;
-    if (it.status === "error") failed = true;
-    if (it.status === "declined") declined = true;
+    if (it.status === "error") failed++;
+    if (it.status === "declined") declined++;
     if (it.status === "running" || it.status === "pending") running = true;
   }
   const parts = [];
