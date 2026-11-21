@@ -15,6 +15,7 @@ import { absTime, alpha, count, duration, fileChip, icon, money, plural, relTime
 import { blocks, copyButton, diffView, outputBox, prose, textDiff } from "./rich.js";
 import { cardLive, defaultOpen, groupCards, groupSummary } from "./rows.js";
 import { SPACE } from "./space.js";
+import { keepBreaks } from "./lines.js";
 
 const MAX_LINES = 400;
 
@@ -130,7 +131,7 @@ function user(it, c) {
   const long = lines.length > USER_LINES + 2 || (text ?? "").length > 1500;
   const open = !long || c.expanded.has(`user:${it.id}`);
   const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
-  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, shown || " "));
+  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, keepBreaks(shown) || " "));
   const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
     .on_click((_e, cx) => c.toggle(`user:${it.id}`, cx))
     .child(icon(open ? "chevron-up" : "chevron-down", 11)).child(open ? "Show less" : `Show full message · ${plural(lines.length, "line")}`)] : [];
@@ -192,7 +193,7 @@ function report(it, from, text, c) {
         .when(long, (e) => e.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.dim)
           .child(open ? "Fold" : plural(lines.length, "line")).child(icon(open ? "chevron-up" : "chevron-down", 11)))))
       .child(div().border_t_1().border_color(c.line).px(12).py(8).text_size(13.5).line_height("20px")
-        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, shown || " ")))
+        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, keepBreaks(shown) || " ")))
       .when(long && !open, (e) => e.child(div().id(`report-more-${it.id}`).px(12).pb(8).text_size(11.5).text_color(t.accent).cursor_pointer()
         .on_click((_e, cx) => c.toggle(`report:${it.id}`, cx)).child("Show all"))));
 }
