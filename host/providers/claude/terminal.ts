@@ -27,9 +27,11 @@ import { homedir } from "node:os";
 import { movesTo, promptKey, readPrompt } from "./screen.ts";
 import type { Row, ScreenPrompt } from "./screen.ts";
 import { TranscriptFollower } from "./follow.ts";
+import { TuiQueue } from "./tui-queue.ts";
+import { BackgroundPoller } from "./background.ts";
 import { historyOf } from "./history.ts";
 import { ClaudePlans } from "./plans.ts";
-import { configDir, describeSession, sessionFiles, sessionIdOf, sessionPath } from "./sessions.ts";
+import { configDir, describeSession, promptText, queuedPrompt, sessionFiles, sessionIdOf, sessionPath } from "./sessions.ts";
 import { processTree } from "../tui.ts";
 import { CLAUDE_TOOLS } from "./tools.ts";
 import { AgentError } from "../types.ts";
@@ -128,6 +130,13 @@ function envOf(pid: number, name: string): string | null {
 /** The text a prompt record and a sent message are compared by. */
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
+/** A model's name as the TUI shows it ("claude-opus-5-5" → "Opus 5.5"); another id as it is. */
+export function modelName(id: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/.exec(id);
+  if (!m) return id;
+  return `${m[1]![0]!.toUpperCase()}${m[1]!.slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}${m[4] ? " (1M context)" : ""}`;
+}
+
 export class ClaudeTerminalAdapter implements ProviderAdapter {
   readonly id = "claude";
   readonly name = "Claude Code";
@@ -159,6 +168,10 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   private awaitingHistory = false;
   private running = false;
   private sent: { id: string; text: string; at: number }[] = [];
+  /** What was typed into the TUI while it worked and waits there: the steering lane (tui-queue.ts). */
+  private queue = new TuiQueue();
+  /** What the session runs in the background (its agents panel): looked at every second. */
+  private background = new BackgroundPoller((b) => this.emit({ type: "background", background: b }));
   private model: string | null = null;
   private lastUsage: Rec | null = null;
   /** The effort and permission mode the TUI runs with, as its records last said (shown, not set: the TUI owns them). */
@@ -514,6 +527,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (!this.running) return;
     this.tail(); // what it wrote last
     for (const ev of this.follower?.close() ?? []) this.emit(ev);
+    if (this.queue.clear()) this.publishQueue();
     this.running = false;
     this.emit({ type: "run_settled", aborted: false });
   }
@@ -521,7 +535,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   // ---------------------------------------------------------------- the session
 
   /** The Claude Code process on the terminal (the foreground or one under it) and the session it has open, from its registry entry. */
-  private registry(): { pid: number; dir: string; id: string; cwd: string } | null {
+  private registry(): { pid: number; dir: string; id: string; cwd: string; startedAt: number } | null {
     const fg = this.fg;
     if (!fg) return null;
     const pids = this.agent ? [this.agent.pid] : processTree(fg.pid);
@@ -533,7 +547,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
         const r = JSON.parse(readFileSync(join(dir, "sessions", `${pid}.json`), "utf8"));
         if (typeof r?.sessionId !== "string") continue;
         this.agent = { pid, dir };
-        return { pid, dir, id: r.sessionId, cwd: typeof r.cwd === "string" ? r.cwd : this.opts.cwd };
+        return { pid, dir, id: r.sessionId, cwd: typeof r.cwd === "string" ? r.cwd : this.opts.cwd, startedAt: typeof r.startedAt === "number" ? r.startedAt : 0 };
       } catch {}
     }
     return null;
@@ -542,6 +556,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   private checkSession(): void {
     const r = this.registry();
     if (!r) {
+      this.background.stop(); // its background work ended with it
       // Back at the shell: say so once; sends are refused until Claude Code runs again.
       if (this.fg && !this.quitSaid && this.file) {
         this.quitSaid = true;
@@ -552,6 +567,8 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     }
     this.quitSaid = false;
     const file = sessionPath(r.cwd, r.id, r.dir);
+    // Background work dies with its process: what started before this one's start isn't running.
+    this.background.follow(file, r.startedAt);
     if (file === this.file) return;
     const first = this.file === null;
     this.log(`session ${r.id} (pid ${r.pid})`);
@@ -621,15 +638,19 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     const { lines, next } = this.read(this.offset);
     this.offset = next;
     let ended = false;
+    let queued = false;
     for (const r of this.parse(lines)) {
       if (r.type === "assistant" && !r.isSidechain) this.noteModel(r.message ?? {});
       this.noteSettings(r);
+      if (this.queue.feed(r)) queued = true;
       for (const ev of this.follower.feed(r)) {
         if (ev.type === "assistant_end" && !ev.parent) ended = ev.stopReason !== "toolUse";
         else if (ev.type === "tool_call" || ev.type === "user_message") ended = false;
+        if (ev.type === "user_message" && !ev.parent && this.queue.shown(ev.text)) queued = true;
         this.emit(this.matchEcho(ev));
       }
     }
+    if (queued) this.publishQueue();
     // A turn that ended while the terminal never showed it working (a quick answer, a local command's output).
     if (ended && this.running && this.status !== "working" && this.status !== "blocked") this.settle();
   }
@@ -652,7 +673,20 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (m.usage && typeof m.usage === "object" && m.model !== "<synthetic>") this.lastUsage = m.usage;
     if (typeof m.model !== "string" || m.model === "<synthetic>" || m.model === this.model) return;
     this.model = m.model;
-    this.emit({ type: "model", model: { provider: "anthropic", id: m.model, name: m.model, reasoning: true, contextWindow: null, input: ["text"] } });
+    this.emit({ type: "model", model: { provider: "anthropic", id: m.model, name: modelName(m.model), reasoning: true, contextWindow: null, input: ["text"] } });
+  }
+
+  /** The steering lane: what waits in the TUI's queue, each with this chat's id for it when the chat sent it. */
+  private publishQueue(): void {
+    const steering = this.queue.waiting;
+    const taken = new Set<string>();
+    const steeringIds = steering.map((t) => {
+      const s = this.sent.find((x) => !taken.has(x.id) && norm(x.text) === norm(t));
+      if (!s) return null;
+      taken.add(s.id);
+      return s.id;
+    });
+    this.emit({ type: "queue_changed", steering, followUp: [], steeringIds, followUpIds: [] });
   }
 
   /** A prompt record that is a message this chat sent: the echo that confirms it. */
@@ -703,6 +737,16 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     this.offset = next;
     this.follower = new TranscriptFollower(file);
     this.follower.prime(records);
+    // What waits in the TUI's queue now: only while it works (a settled run took or returned all of it).
+    this.queue = new TuiQueue();
+    if (this.status === "working") {
+      for (const r of records) {
+        this.queue.feed(r);
+        const typed = r.type === "user" ? promptText(r) : queuedPrompt(r)?.text ?? null;
+        if (typed !== null) this.queue.shown(typed);
+      }
+    }
+    if (this.queue.waiting.length) queueMicrotask(() => this.publishQueue());
     for (const r of records) {
       if (r.type === "assistant" && !r.isSidechain) this.noteModel(r.message ?? {});
       this.noteSettings(r);
@@ -781,6 +825,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   kill(): void {
     this.disposed = true;
+    this.background.stop();
     for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry, this.askTimer]) if (t) clearTimeout(t);
     this.events?.kill();
     this.events = null;

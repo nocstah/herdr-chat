@@ -11,6 +11,7 @@ import { agentEnv } from "../env.ts";
 import type { Priority } from "./mapper.ts";
 import { historyEvents, hasMessages, forkPoints } from "./history.ts";
 import { sessionPath, sessionIdOf, sessionFiles, describeSession, liveHolder, readUserSettings, codeModeSession } from "./sessions.ts";
+import { BackgroundPoller } from "./background.ts";
 import type {
   ProviderAdapter, AdapterHost, AdapterOptions, Capabilities, StartInfo, NormalizedEvent, AskAnswer, ImageBlock, ModelInfo,
   AgentCommand, AgentModel, SessionSource, UsageInfo, PromptMode, Disposition, PermissionMode, PermissionChoice, ForkPoint, Question,
@@ -67,6 +68,7 @@ export class ClaudeAdapter implements ProviderAdapter {
   /** The model alias we launch with (`--model`), once the user picked one. */
   private modelValue: string | null = null;
   private effort: string | null;
+  private background = new BackgroundPoller((b) => this.emit({ type: "background", background: b }));
   private permissionMode: string;
   private costBase = 0;
   private asks = new Map<string, PendingAsk>();
@@ -163,6 +165,8 @@ export class ClaudeAdapter implements ProviderAdapter {
       host.emit({ type: "exited", code: info.code, signal: info.signal, stderrTail: info.stderr, ...(info.spawnError ? { spawnError: info.spawnError } : {}), command: this.opts.command });
     };
     this.emit({ type: "session", id, file: this.file, ...(resume || fork ? {} : { name: null }) });
+    // What it runs in the background (its agents panel): only what this process started.
+    this.background.follow(this.file, Date.now());
     this.startWatchdog();
     // MCP servers can hold up initialize; 30 s as T3 does.
     const init: Rec = await p.control({ subtype: "initialize" }, 30_000);
@@ -219,6 +223,7 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   private stopTimers(): void {
+    this.background.stop();
     for (const t of this.tasks.values()) clearInterval(t.timer);
     this.tasks.clear();
     this.liveOutput.clear();

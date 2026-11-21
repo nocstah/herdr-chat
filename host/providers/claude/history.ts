@@ -5,9 +5,9 @@
 // before a compaction stays visible (with a compaction notice), as live.
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { bashEvents, imageFile, readTranscript, promptText, sentImages } from "./sessions.ts";
+import { bashEvents, imageFile, readTranscript, promptText, queuedPrompt, sentImages } from "./sessions.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
-import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason } from "../types.ts";
+import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason, EventOf } from "../types.ts";
 
 type Rec = Record<string, any>;
 
@@ -42,6 +42,13 @@ function activeBranch(records: Rec[], upTo?: string): Rec[] {
 function localStdout(text: string): string | null {
   const m = /^\s*<local-command-stdout>([\s\S]*?)<\/local-command-stdout>\s*$/.exec(text);
   return m ? m[1]!.trim() : null;
+}
+
+/** A message the person typed: images the terminal view sent as @ mentions are shown as its images. */
+function typedMessage(typed: string, content: unknown, t: { ts?: number }): EventOf<"user_message"> {
+  const sent = sentImages(typed);
+  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
+  return { type: "user_message", text: sent.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t };
 }
 
 type Ctx = { names: Map<string, string>; out: NormalizedEvent[]; sessionDir: string; bash: { callId: string | null } };
@@ -98,6 +105,15 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
       group.push(r);
       continue;
     }
+    // A message typed while the agent worked, handed to it mid-turn (sessions.ts queuedPrompt): shown where it went in.
+    if (r.type === "attachment") {
+      const q = parent ? null : queuedPrompt(r);
+      if (!q) continue;
+      flush();
+      const ts = tsOf(r);
+      ctx.out.push(typedMessage(q.text, q.content, ts ? { ts } : {}));
+      continue;
+    }
     if (r.type !== "user" && r.type !== "system") continue;
     flush();
     const ts = tsOf(r);
@@ -152,11 +168,7 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
     const typed = promptText(r);
     // Our /compact isn't a prompt (live it's a compaction, shown by the boundary's notice).
     if (typed === null || /^\/compact(\s|$)/.test(typed)) continue;
-    // Images the terminal view sent as @ mentions: shown as the message's images.
-    const sent = sentImages(typed);
-    const text = sent.text;
-    const images = [...imagesOf(c), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
-    ctx.out.push({ type: "user_message", text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t, ...p });
+    ctx.out.push({ ...typedMessage(typed, c, t), ...p });
   }
   flush();
 }

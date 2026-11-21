@@ -634,3 +634,41 @@ The mod shows the plan as a strip above the composer (`2/5`, a progress bar, the
 - The mod draws each thumbnail at that aspect ratio from the first frame (`cards.js` `images()`), within 320 × 320 points and 60 % of the column, never enlarged. A row with images then has its final height when it first appears, so the rows above it never jump. The size also goes to the viewer when a thumbnail is enlarged.
 - The composer's images carry theirs too: `clipboard_image` and `attach_image` answer `{path, size}`, the size read from the attachment's bytes. A chip keeps its fixed 64 × 48 box (the composer's height doesn't wait on the host's answer), so its size only goes to the viewer when the chip is enlarged. A message sent with chips gets sizes as any user item does, from the images the host saved for it.
 - The mod can't read raster files itself (the manifest grants no `fs.read`). An image without a size (a `null`, or a host older than v3.7) gets a 16:10 box as wide as a thumbnail may be, and the viewer opens it at a 1600 × 1000 guess. SVGs (mermaid blocks) are still sized by the mod, from the file's `viewBox`.
+
+## v3.8: background work (state, additive)
+
+### ChatState
+
+```ts
+background: {
+  at: number;                    // the host's time when it read this (ms); a client works the elapsed times out from it
+  tasks: {
+    id: string;                  // the agent's id, or the workflow run's
+    kind: "agent" | "workflow";
+    name: string;                // an agent's type ("general-purpose"), a run's name
+    title: string | null;        // an agent's task (its description); null for a run
+    activity: string | null;     // what it does now: an agent's last tool call ("Bash · Run the tests"), a run's agents at work (their labels)
+    worktree: string | null;     // the branch of the worktree an agent works in, when it has one of its own
+    state: "running" | "done" | "failed" | "stopped";
+    startedAt: number; endedAt: number | null;
+    done: number | null; failed: number | null; total: number | null;   // a run's agents: answered, failed, started
+    tokens: number | null;       // as Claude Code's TUI counts them: each agent's last model call (input + cache + output), summed over a run's agents
+  }[];
+  shells: number;                // background shells (a Bash call with run_in_background) still running
+  monitors: number;              // monitors (Monitor calls) still watching
+} | null;                        // null: nothing runs in the background (Pi and Codex: always)
+```
+
+What Claude Code's TUI shows in its agents panel under the prompt (`● main`, then `○ <type> <task> · <time> · ↓ <tokens> tokens` per background agent and `○ <name> <bar> <done>/<total> · <time> · ↓ <tokens> tokens` per workflow run; shells and monitors only counted in its footer). The TUI keeps it in memory, so the host reads the same from the session's files (`host/providers/claude/background.ts`), for a chat's own Claude Code and for the terminal view, Code Mode or not, once a second:
+- A background agent: `<session>/subagents/agent-<id>.meta.json` with `requestShape: "background"` (its `agentType`, `description`, `worktreeBranch`; `finished: true` once it ended), its transcript beside it (the first record's time is its start, the last call's usage its tokens, the last tool call its activity).
+- A workflow run: `<session>/subagents/workflows/<run>/journal.jsonl` (`started` per agent with its id and label, then `result` or `failed`), the agents' transcripts beside it, the script saved as it started (`<session>/workflows/scripts/<name>-<run>.js`: its name and start), and `<session>/workflows/<run>.json` once it ended. Total is the agents started: the TUI also counts those its script queued, which no file names, so its total can be higher for a while.
+- Shells and monitors, and every end: the session transcript (a Bash result's `backgroundTaskId`, a Monitor result's `taskId` and `timeoutMs`, a `<task-notification>` with `<task-id>` and `<status>`, a TaskStop result).
+- Only work that started after the agent process did counts (background work dies with its process: the terminal view takes the start from Claude Code's registry entry). An ended task stays 8 s, marked `done`, `failed` or `stopped`; one that had ended when the host first looked never shows. Of the files only these fields are read: never a prompt, an answer or a result.
+
+The TUI's agent rows show a summary of what the agent does that a model writes as it works; it is kept in the TUI's memory only, so `activity` is the agent's last tool call instead. The TUI's token count for a run adds what an agent used before a retry, which the files don't keep.
+
+The mod shows it as a strip above the composer (`chrome.js` `backgroundStrip`, words in `background.js`): a heading like the TUI's footer ("3 background tasks · 1 shell"), and while open (a click on the heading folds it) `main` (working or idle) and a row per task. The times move on once a second while something runs.
+
+## v3.8: messages typed while the agent works (Claude Code, no wire change)
+
+Claude Code 2.1.3xx hands a message typed while it works to the agent between two steps as an attachment record (`{"type":"attachment","attachment":{"type":"queued_command","prompt":…,"commandMode":"prompt","origin":{"kind":"human"}}}`), not a user record. History and the terminal view show it as the person's message where it went in (`sessions.ts` `queuedPrompt`); its `@` image mentions show as images, as for any message the terminal view sent. A task's notification (`commandMode: "task-notification"`) and another session's message (`origin.kind: "peer"`) are not messages and don't show. In the terminal view, the TUI's queue (its `queue-operation` records: `enqueue` with what was typed, `remove` as the agent takes it) is the steering lane while it waits (`tui-queue.ts`): what the agent queues by itself there (`<task-notification>`, Code Mode's `<event kind=…>`) never shows.

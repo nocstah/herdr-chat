@@ -10,6 +10,7 @@ import { MOD, alpha, count, icon, money, providerIcon, spans, spansText, unwrapH
 import { withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
 import { MAC } from "./platform.js";
+import { bgRows, bgSummary } from "./background.js";
 
 const STATUS_MAX = 28;
 const STATUS_W = (text) => Math.min(STATUS_MAX, [...text].length) * 6.3 + 18;
@@ -321,6 +322,57 @@ export function planStrip(v, s, t) {
   return v_flex().w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
     .when(open, (e) => e.child(div().id("plan-steps").max_h(240).overflow_y_scroll().px(12).py(10).border_b_1().border_color(alpha(t.border, 0.6))
       .child(planSteps(plan, t))))
+    .child(head);
+}
+
+// What the agent runs in the background (protocol v3.8, state.background), right above the composer, as Claude Code's
+// agents panel shows it under its prompt: "main", then a row per background agent (its type, its task, what it does
+// now, the worktree's branch, the time, its tokens) and per workflow run (its name, a bar of the agents that
+// answered, done/total, the time, the tokens); the shells and monitors are counted in the heading, as in the TUI's
+// footer. An ended task stays a moment, marked. A click on the heading folds the rows.
+export function backgroundStrip(v, s, t) {
+  const b = s.background;
+  if (!b?.tasks?.length && !b?.shells && !b?.monitors) return null;
+  // The host's clock: its time when it sent this, moved on by the time since it came.
+  if (v.bgSeen !== b) {
+    v.bgSeen = b;
+    v.bgSkew = Date.now() - b.at;
+  }
+  const now = Date.now() - (v.bgSkew ?? 0);
+  const rows = bgRows(b, now);
+  v.bgShown = rows; // (the dump)
+  const open = !v.bgClosed && rows.length > 0;
+  const BAR = 48;
+  const working = v.store.working();
+  const bullet = (state) => {
+    const color = state === "failed" ? t.ansi1 : state === "stopped" ? t.blocked : state === "done" ? t.ansi2 : t.dim;
+    return state === "done" ? icon("check", 11).text_color(color) : state === "failed" || state === "stopped" ? icon("x", 11).text_color(color)
+      : div().flex_none().size(7).rounded(4).border_1().border_color(t.muted);
+  };
+  const line = (r) => h_flex().id(`bg-${r.id}`).h(22).px(10).gap(7).items_center().text_size(12)
+    .tooltip([r.name, r.title, r.worktree && `worktree ${r.worktree}`, r.activity, r.meta].filter(Boolean).join(" · "))
+    .child(div().flex_none().w(12).flex().justify_center().child(bullet(r.state)))
+    .child(div().flex_none().max_w(180).truncate().text_color(r.state === "running" ? t.muted : t.dim).child(r.name))
+    .when(Boolean(r.title), (e) => e.child(div().min_w(40).max_w(260).truncate().text_color(r.state === "running" ? t.foreground : t.dim).child(r.title)))
+    .when(r.progress !== null, (e) => e.child(div().flex_none().w(BAR).h(4).rounded(2).bg(alpha(t.muted, 0.2))
+      .child(div().h_full().rounded(2).w(Math.round(BAR * r.progress)).bg(r.state === "failed" ? t.ansi1 : r.state === "done" ? t.ansi2 : t.accent))))
+    .when(Boolean(r.worktree), (e) => e.child(h_flex().flex_none().max_w(140).gap(3).items_center().text_size(11).text_color(t.dim)
+      .child(icon("git-branch", 10)).child(div().min_w(0).truncate().child(r.worktree))))
+    .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(r.activity))
+    .child(div().flex_none().text_size(11.5).text_color(r.state === "failed" ? t.ansi1 : t.dim).child(r.meta));
+  const head = h_flex().id("bg-strip").h(26).px(10).gap(8).items_center().text_size(12).cursor_pointer()
+    .hover((st) => st.bg(t.hover)).tooltip(open ? "Fold the background tasks" : "Show the background tasks")
+    .on_click((_e, cx) => v.control("background", cx))
+    .child(icon("bot", 12).text_color(t.dim))
+    .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(bgSummary(b)))
+    .when(rows.length > 0, (e) => e.child(icon(open ? "chevron-down" : "chevron-up", 11).text_color(t.dim)));
+  const main = h_flex().id("bg-main").h(22).px(10).gap(7).items_center().text_size(12)
+    .child(div().flex_none().w(12).flex().justify_center().child(div().size(7).rounded(4).bg(working ? t.accent : t.muted)))
+    .child(div().text_color(t.foreground).child("main"))
+    .child(div().text_size(11.5).text_color(t.dim).child(working ? "working" : "idle"));
+  return v_flex().w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
+    .when(open, (e) => e.child(v_flex().id("bg-rows").py(4).max_h(200).overflow_y_scroll().border_b_1().border_color(alpha(t.border, 0.6))
+      .child(main).children(rows.map(line))))
     .child(head);
 }
 

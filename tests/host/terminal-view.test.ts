@@ -286,6 +286,58 @@ test("the view: a terminal that has ended can't be a chat", async () => {
   }
 });
 
+test("the view: a message typed while the agent works waits in the steering lane, then shows where it went in; its background work on the strip", async () => {
+  const r = rig();
+  try {
+    const S1 = "33333333-3333-4333-8333-333333333333";
+    r.register(S1);
+    const p1 = prompt("Run the made-up suite");
+    r.write(S1, [p1]);
+    r.event({ terminals: [{ address: "t9", state: "live", foreground: { pid: r.pid, name: "claude", argv: ["claude"] }, status: { app: "claude", state: "working" } }] });
+    await r.adapter.start(null, r.host);
+    await r.adapter.history();
+    const call = rec({ type: "assistant", message: { id: "m1", model: "claude-opus-5-5", role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "make test" } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 5 } } }, p1.uuid);
+    const op = (operation: string, content: string) => ({ type: "queue-operation", operation, timestamp: new Date().toISOString(), sessionId: S1, content });
+    // Typed into the TUI itself, then sent from the chat while it works (the TUI queues both).
+    r.write(S1, [call, op("enqueue", "Also check the lint")]);
+    const lane = () => r.events.filter((e) => e.type === "queue_changed").at(-1) as any;
+    await until("the typed message in the lane", () => lane()?.steering.length === 1);
+    assert.deepEqual(lane().steering, ["Also check the lint"]);
+    assert.equal((await r.adapter.prompt({ id: "u-q", text: "And the docs", images: [], mode: "steer", busy: true })).disposition, "queued");
+    r.write(S1, [op("enqueue", '<event kind="repl-eval">made up</event>'), op("enqueue", "And the docs")]);
+    await until("the sent message in the lane", () => lane()?.steering.length === 2);
+    assert.deepEqual([lane().steering, lane().steeringIds], [["Also check the lint", "And the docs"], [null, "u-q"]]);
+    // Handed to the agent mid-turn: attachment records, never user records.
+    const res = rec({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] } }, call.uuid);
+    const qa = rec({ type: "attachment", attachment: { type: "queued_command", prompt: "Also check the lint", commandMode: "prompt", origin: { kind: "human" } } }, res.uuid);
+    const qb = rec({ type: "attachment", attachment: { type: "queued_command", prompt: "And the docs", commandMode: "prompt", origin: { kind: "human" } } }, qa.uuid);
+    r.write(S1, [res, op("remove", "Also check the lint"), op("remove", "And the docs"), qa, qb]);
+    await until("both messages", () => r.events.filter((e) => e.type === "user_message").length === 2);
+    const msgs = r.events.filter((e) => e.type === "user_message") as any[];
+    assert.deepEqual(msgs.map((m) => [m.text, m.source, m.clientId]), [["Also check the lint", "external", undefined], ["And the docs", undefined, "u-q"]]);
+    assert.deepEqual(lane().steering, []);
+
+    // A background agent the session started: on the strip, live.
+    const sub = join(r.transcript(S1).replace(/\.jsonl$/, ""), "subagents");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, "agent-ab12.meta.json"), JSON.stringify({ agentType: "Explore", description: "Map the made-up repo", requestShape: "background" }));
+    writeFileSync(join(sub, "agent-ab12.jsonl"), JSON.stringify({ type: "user", isSidechain: true, timestamp: new Date().toISOString(), message: { role: "user", content: "a made-up task" } }) + "\n");
+    const bg = () => r.events.filter((e) => e.type === "background").at(-1) as any;
+    await until("the background agent", () => bg()?.background?.tasks?.length === 1, 4000);
+    assert.deepEqual(((t) => [t.kind, t.name, t.title, t.state])(bg().background.tasks[0]), ["agent", "Explore", "Map the made-up repo", "running"]);
+    writeFileSync(join(sub, "agent-ab12.meta.json"), JSON.stringify({ agentType: "Explore", description: "Map the made-up repo", requestShape: "background", finished: true }));
+    await until("its end", () => bg()?.background?.tasks?.[0]?.state === "done", 4000);
+
+    // The run settles: nothing waits in the lane.
+    r.write(S1, [op("enqueue", "one more")]);
+    await until("one more in the lane", () => lane()?.steering.length === 1);
+    r.status("idle");
+    await until("the lane empties as the run settles", () => r.events.some((e) => e.type === "run_settled") && lane()?.steering.length === 0);
+  } finally {
+    r.done();
+  }
+});
+
 test("Claude Code's dialogs: a card while it waits, the card's answer pressed as keys, the card gone when it moves on", async () => {
   const { SCREENS } = await import("./screen.test.ts");
   const r = rig();

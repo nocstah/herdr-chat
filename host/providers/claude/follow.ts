@@ -13,9 +13,9 @@
 // already counted.
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason } from "../types.ts";
+import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason, EventOf } from "../types.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
-import { bashEvents, imageFile, promptText, readTranscript, sentImages } from "./sessions.ts";
+import { bashEvents, imageFile, promptText, queuedPrompt, readTranscript, sentImages } from "./sessions.ts";
 
 type Rec = Record<string, any>;
 
@@ -31,6 +31,13 @@ function tsOf(r: Rec): number | undefined {
 function localStdout(text: string): string | null {
   const m = /^\s*<local-command-stdout>([\s\S]*?)<\/local-command-stdout>\s*$/.exec(text);
   return m ? m[1]!.trim() : null;
+}
+
+/** A message the person typed: images the terminal view sent as @ mentions are shown as its images, as in history. */
+function typedMessage(typed: string, content: unknown, t: { ts?: number }): EventOf<"user_message"> {
+  const sent = sentImages(typed);
+  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
+  return { type: "user_message", text: sent.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t };
 }
 
 export class TranscriptFollower {
@@ -73,6 +80,11 @@ export class TranscriptFollower {
     const t = ts ? { ts } : {};
     if (r.type === "assistant") return this.assistant(r);
     if (r.type === "system") return this.system(r, t);
+    // A message typed while the agent worked, handed to it mid-turn (sessions.ts queuedPrompt).
+    if (r.type === "attachment") {
+      const q = queuedPrompt(r);
+      return q ? [...this.close(), typedMessage(q.text, q.content, t)] : [];
+    }
     if (r.type !== "user") return [];
     const c = r.message?.content;
     if (Array.isArray(c) && c.some((b: Rec) => b?.type === "tool_result")) {
@@ -94,11 +106,7 @@ export class TranscriptFollower {
     const typed = promptText(r);
     // A /compact shows as the compaction's notice (the boundary record).
     if (typed === null || /^\/compact(\s|$)/.test(typed)) return [];
-    // Images the terminal view sent as @ mentions: shown as the message's images, as in history.
-    const sent = sentImages(typed);
-    const text = sent.text;
-    const images = [...imagesOf(c), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
-    return [...this.close(), { type: "user_message", text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t }];
+    return [...this.close(), typedMessage(typed, c, t)];
   }
 
   /** The open assistant message ends (the next record isn't part of it, or the run settled). */
