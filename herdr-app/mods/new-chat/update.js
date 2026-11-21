@@ -11,7 +11,9 @@
 //    before it and runs other code (its registry's build and start, against
 //    config.json's build and installedAt). Restart sets the shared RESTART_ALL
 //    key; each chat (mods/chat/update.js) restarts its host on the same
-//    session as soon as it is quiet. Later leaves a bar in each of them.
+//    session as soon as it is quiet. Later leaves a bar in each of them. It
+//    asks about each chat once, whatever the answer (update-rule.js): a later
+//    install leaves those chats to their own bars.
 //
 // The floating block (main.js Commands) checks; the question is an overlay of
 // this mod with props {role: "update", …}: a window, not a dialog. A dialog
@@ -25,10 +27,12 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { appHome, closeOverlay, hc, home, notify, openOverlay, props, readTextFile, run, setShared, shared, terminals, theme } from "herdr";
+import { restartQuestion } from "./update-rule.js";
 
 const REPO = "ChmaraX/herdr-chat";
 const RESTART_ALL = "herdr-chat.update.restart"; // a build every chat restarts on (mods/chat/update.js has the same key)
 const LATER = "herdr-chat.update.later"; // a build the person said Later to: no question, the chats' bars stay
+const ASKED = "herdr-chat.update.asked"; // the chats the restart question was put for, while they run (update-rule.js)
 const CHECKED = "herdr-chat.update.checked"; // ms of the last release lookup (or Later)
 const RUNNING = "herdr-chat.update.running"; // {terminal, version}: an update started from the dialog, until its terminal ends
 const RESULT = "herdr-chat.update.result"; // {version, exit, terminal}: how the last one ended (the dialog shows it)
@@ -62,27 +66,35 @@ export function newer(a, b) {
  */
 const older = (reg, cfg) => Boolean(cfg.build) && reg.build !== cfg.build && !(reg.startedAt > Number(cfg.installedAt ?? 0));
 
-/** Chats on older hosts: live hosts of chats (sub-agents are their parents': not counted). */
-async function olderChats(cfg) {
+/** The chats whose host runs (their ids), and those of them on older hosts (sub-agents are their parents': not counted). */
+async function chatsNow(cfg) {
   const hosts = terminals().filter((t) => t.state === "live" && t.labels?.["herdr-chat.role"] === "host" && t.labels?.["herdr-chat.chat"]);
-  const out = [];
+  const live = [], out = [];
   for (const t of hosts) {
-    const reg = await readJson(`${stateDir()}/chats/${t.labels["herdr-chat.chat"]}.json`);
-    if (reg.pid && older(reg, cfg)) out.push(reg.chat ?? t.labels["herdr-chat.chat"]);
+    const chat = t.labels["herdr-chat.chat"];
+    live.push(chat);
+    const reg = await readJson(`${stateDir()}/chats/${chat}.json`);
+    if (reg.pid && older(reg, cfg)) out.push(chat);
   }
-  return out;
+  return { live, older: out };
 }
 
 /** The overlay key: one question at a time, whichever step. */
 export const QUESTION_KEY = "herdr-chat.update";
 const dialog = (p) => openOverlay({ mod: "new-chat", kind: "window", key: QUESTION_KEY, width: 460, height: 188, props: { role: "update", ...p } });
 
-/** Question 2, after an install (or at start): asked once per build; not while an update runs (its end asks). */
-export async function checkHosts() {
+/**
+ * Question 2, after an install (or at start): asked once about each chat (update-rule.js), whatever the answer; not
+ * while an update runs (its end asks). `always`: the person asked for it (the update-check command, or the
+ * update they started from the question just ended).
+ */
+export async function checkHosts({ always = false } = {}) {
   const cfg = await config();
-  if (!cfg.build || shared(RUNNING) || shared(RESTART_ALL) === cfg.build || shared(LATER) === cfg.build) return null;
-  const chats = await olderChats(cfg);
-  if (!chats.length) return null;
+  if (!cfg.build || shared(RUNNING) || shared(RESTART_ALL) === cfg.build || (!always && shared(LATER) === cfg.build)) return null;
+  const { live, older: chats } = await chatsNow(cfg);
+  const q = restartQuestion(chats, live, shared(ASKED), always, Boolean(shared(LATER) || shared(RESTART_ALL)));
+  setShared(ASKED, q.asked);
+  if (!q.ask) return null;
   dialog({ step: "restart", version: cfg.version ?? null, build: cfg.build, count: chats.length });
   return chats;
 }
