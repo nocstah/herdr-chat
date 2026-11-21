@@ -33,6 +33,7 @@ export const SHORTCUTS = {
   find: "Find in the chat (the whole conversation, older messages too)",
   focusComposer: "Focus the composer",
   newChat: "New chat in this folder, same agent",
+  flip: "Show the Claude Code terminal this chat is the view of (Ctrl+Shift+J in the terminal flips back)",
 };
 
 export const actionName = (a) => `herdrchat_k_${a}`;

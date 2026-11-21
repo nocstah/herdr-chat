@@ -29,6 +29,7 @@ import { View, div } from "gpui-kit";
 import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
+import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
 import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
@@ -63,6 +64,8 @@ const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before t
 let VIEWS = 0;
 
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
+// The terminal view: Claude Code commands whose result shows in the chat (the transcript has it); any other opens a screen in the TUI.
+const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export"]);
 
 // A model provider's name for the model picker's scope tabs: its id with the dashes
 // out. The agent names its providers (two Claude Code logins are two providers, so an
@@ -89,6 +92,9 @@ export default class HerdrChat extends View {
     // layout writes); `subagent`: the chat in a tab of its own (Open as tab), the host left paneless.
     this.sub = p.peek || p.subagent || null;
     this.peekMode = Boolean(p.peek);
+    // The terminal view (faces.js): this chat is the chat face of a Claude Code terminal. Its host
+    // reads the TUI's session and types into it; it has no pane of its own, and the tab is the terminal's.
+    this.view = !this.sub && typeof p.attach === "string" ? p.attach : null;
     this.provider = p.provider ?? null; // an id of PROVIDERS; null: the registry's, else DEFAULT_PROVIDER
     this.cwd = p.cwd || null;
     this.store = new Store();
@@ -155,6 +161,7 @@ export default class HerdrChat extends View {
       // Continue as chat on a top-level Pi TUI (new-chat's continueInPlace): its pid, model and thinking.
       handOver: p.afterPid ? { pid: p.afterPid, model: p.model ?? null, thinking: p.thinking ?? null } : null,
       attachOnly: Boolean(this.sub),
+      attach: this.view,
       place: () => this.findPlace(),
       // A chat in another machine's space: its host runs there (machines.js).
       machine: () => (this.place ? machineOf(this.place.pane) : null),
@@ -343,7 +350,7 @@ export default class HerdrChat extends View {
   tick(cx) {
     if (!this.peekMode && !this.findPlace()) this.lookupPlace(cx);
     this.applyZoom();
-    if (this.store.loaded && !this.sub) this.renameTab();
+    if (this.store.loaded && !this.sub && !this.view) this.renameTab();
     const me = this.myPane();
     let changed = false;
     const zk = `${Boolean(me?.zoomed)}:${panes().find((p) => p.tab === me?.tab && p.zoomed)?.pane ?? ""}`;
@@ -354,9 +361,10 @@ export default class HerdrChat extends View {
     if (!this.sub) {
       if (this.healHost(cx)) changed = true;
       if (this.updateTick(cx)) changed = true;
-      this.keepHostHidden(me, cx);
+      if (!this.view) this.keepHostHidden(me, cx);
       if (this.redirectFocus(cx)) changed = true;
     }
+    if (this.view && this.viewTick(me, cx)) changed = true;
     if (shown) this.markSeen(me, cx);
     if (this.sub && this.subKey() !== this.lastSubKey) { this.lastSubKey = this.subKey(); changed = true; } // the header bar
     // The hand-off's terminal (in its dialog): finished, back to the chat (the
@@ -662,7 +670,8 @@ export default class HerdrChat extends View {
   // shown), the host's turn is labeled seen (herdr.seen, shared by every
   // client), so "done" becomes "idle" as for any agent you look at.
   markSeen(me, cx) {
-    const term = hostTerminal(this.chat);
+    // The terminal view: the agent is the attached terminal, not drawn while its chat face shows.
+    const term = this.view ? terminals().find((t) => t.address === this.view) : hostTerminal(this.chat);
     if (!term || term.turn == null || !appWindow()?.active || focused()?.tab !== me.tab) return;
     const key = `${term.address}:${term.turn}`;
     if (String(term.labels?.["herdr.seen"] ?? "") === String(term.turn) || this.seenSent === key) return;
@@ -883,9 +892,91 @@ export default class HerdrChat extends View {
     }
     this.composer.clear();
     this.timeline.toBottom();
-    this.fire("send", { text, ...(images.length ? { images } : {}), mode }, cx, (d) => {
+    this.fire("send", { text, ...(images.length ? { images } : {}), mode }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
+      // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal).
+      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1])) this.showFace("terminal", cx);
     });
+  }
+
+  // ---- the terminal view (faces.js) -------------------------------------------------
+
+  // A Claude Code command the chat face has no picker for (/model, /resume): typed into the TUI, which shows it.
+  viewCommand(name, cx) {
+    this.fire("send", { text: `/${name}`, mode: "auto" }, cx, (_d, cx) => this.showFace("terminal", cx));
+  }
+
+  // Shows the terminal (or this chat) in this pane's place: the other face hides.
+  showFace(face, cx) {
+    if (!this.view) return;
+    cx.spawn(async (cx) => {
+      try {
+        const r = await flip(cx, this.view, face);
+        this.face = r.face;
+        run("pane.focus", { pane: r.face === "terminal" ? r.term : r.pane });
+      } catch (e) {
+        this.flash(`Couldn't show the terminal: ${message(e)}`, cx);
+      }
+      this.debug.mark();
+      cx.notify();
+    });
+  }
+
+  // Each tick: which face shows (the last flip's, else the layout document's), the keyboard on the
+  // face that shows (a route to the hidden one, such as the agents list, lands on the other), the
+  // composer's focus when this face comes up, and the agent's status for the bar.
+  viewTick(me, cx) {
+    let changed = false;
+    const face = sharedFace(this.view);
+    if (face && face !== this.face) { this.face = face; changed = true; }
+    if (!face && !this.faceReading && Date.now() - (this.faceReadAt ?? 0) > 5000) {
+      this.faceReading = true;
+      this.faceReadAt = Date.now();
+      cx.spawn(async (cx) => {
+        try {
+          const f = facesOf(await readDoc(), this.view);
+          const was = this.face;
+          this.face = f ? faceOf(f) : null;
+          if (this.face !== was) { this.debug.mark(); cx.notify(); }
+        } catch {} finally { this.faceReading = false; }
+      });
+    }
+    const term = terminals().find((t) => t.address === this.view);
+    const status = term?.state === "live" ? term.status ?? null : "ended";
+    if (status !== this.viewStatus) { this.viewStatus = status; changed = true; }
+    const f = focused();
+    const tp = panes().find((p) => p.terminal === this.view);
+    if (me && f && f.tab === me.tab && Date.now() - (this.faceFocusAt ?? 0) > 250) {
+      const to = this.face === "chat" && tp && f.pane === tp.pane ? me.pane : this.face === "terminal" && tp && f.pane === me.pane ? tp.pane : null;
+      if (to) {
+        this.faceFocusAt = Date.now();
+        run("pane.focus", { pane: to });
+      }
+    }
+    // This face just took the pane focus (a flip, a click): the keyboard goes to the composer.
+    const mine = Boolean(me) && f?.pane === me.pane && this.face === "chat";
+    if (mine && !this.hadFocus) this.refocus(cx);
+    this.hadFocus = mine;
+    return changed;
+  }
+
+  viewBar(t) {
+    const st = this.viewStatus;
+    const words = { working: "working", blocked: "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
+    const color = st === "blocked" ? t.blocked : st === "ended" ? t.dim : t[st] ?? t.dim;
+    const seg = (id, label, on, what) => div().id(id).flex_none().px(10).py(2).rounded(5).text_size(11.5)
+      .when(on, (e) => e.bg(t.background).text_color(t.foreground).font_semibold())
+      .when(!on, (e) => e.text_color(t.muted).cursor_pointer().hover((x) => x.text_color(t.foreground)).on_click((_e, cx) => this.control(what, cx)))
+      .child(label);
+    const tip = keyHint("flip") ?? "Ctrl+Shift+J";
+    return h_flex().id("view-bar").flex_none().h(32).w_full().px(12).gap(8).items_center().bg(t.surface).border_b_1().border_color(t.border).text_size(12)
+      .child(st === "working" ? spinner(11) : div().w(12).flex_none().text_color(color).child(st === "idle" || !st ? "○" : st === "ended" ? "·" : "●"))
+      .child(div().flex_none().font_semibold().text_color(t.foreground).child(this.providerName()))
+      .child(div().truncate().text_color(color).child(words[st] ?? ""))
+      .child(div().flex_1())
+      .child(h_flex().id("view-switch").flex_none().p(2).gap(2).rounded(7).bg(t.hover).tooltip(`Switch · ${tip}`)
+        .child(seg("view-chat", "Chat", true, null))
+        .child(seg("view-terminal", "Terminal", false, "view:terminal")));
   }
 
   abort(cx) {
@@ -1134,7 +1225,7 @@ export default class HerdrChat extends View {
     switch (a) {
       case "steer": return this.send(cx);
       case "followUp": return this.send(cx, "followUp");
-      case "model": return toggle("model", () => this.openModelPicker(cx));
+      case "model": return this.view ? this.viewCommand("model", cx) : toggle("model", () => this.openModelPicker(cx));
       case "effort":
         if (!this.hasThinking()) return this.flash(`${this.providerName()} has no thinking levels for this model`, cx);
         return toggle("thinking", () => this.openThinkingPicker(cx));
@@ -1145,9 +1236,13 @@ export default class HerdrChat extends View {
         if (!this.store.working()) return this.flash("Nothing to stop", cx);
         return this.abort(cx);
       case "tui":
+        if (this.view) return this.showFace("terminal", cx);
         if (caps?.tui === false) return this.flash(`${this.providerName()} has no terminal UI to continue in`, cx);
         return this.startHandoff("session", "tui", cx);
-      case "resume": return toggle("sessions", () => this.openSessionsPicker(cx));
+      case "flip":
+        if (this.view) return this.showFace("terminal", cx);
+        return this.flash(`${keyHint("flip") ?? "Ctrl+Shift+J"} flips a Claude Code terminal and its chat view. This chat runs its own agent: ${keyHint("tui") ?? "/tui"} opens it in a terminal`, cx);
+      case "resume": return this.view ? this.viewCommand("resume", cx) : toggle("sessions", () => this.openSessionsPicker(cx));
       case "pageUp": this.timeline.page(1); break;
       case "pageDown": this.timeline.page(-1); break;
       case "top": this.timeline.toTop(); break;
@@ -1837,7 +1932,8 @@ export default class HerdrChat extends View {
     const what = name;
     const d = this.store.state.dialog;
     switch (what) {
-      case "chip:model": return this.openModelPicker(cx);
+      case "chip:model": return this.view ? this.viewCommand("model", cx) : this.openModelPicker(cx);
+      case "view:terminal": return this.showFace("terminal", cx);
       case "chip:thinking": return this.openThinkingPicker(cx);
       case "chip:permission": return this.openModePicker(cx);
       case "handoff:return": return this.returnToChat(cx);
@@ -2491,7 +2587,7 @@ export default class HerdrChat extends View {
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_size_change((sz, cx) => { if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); } })
       .on_drop((e, cx) => this.drop(e.paths ?? [], cx))
-      .children(this.sub ? [this.subBar(t)] : [])
+      .children(this.sub ? [this.subBar(t)] : this.view ? [this.viewBar(t)] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
 

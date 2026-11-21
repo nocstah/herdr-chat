@@ -1,0 +1,180 @@
+// A Claude Code transcript followed as it grows: the terminal view
+// (terminal.ts), where the agent is the person's own TUI in a terminal and
+// the chat only reads what it writes. Claude Code appends one record per
+// finished content block (an assistant message's thinking, text and tool
+// calls arrive as separate records with the same message id), then a user
+// record per tool result. Fed one record at a time, this gives the events a
+// stream would: an assistant message opens with its first record, each block
+// shows whole as it lands, and the message closes when another message, a
+// user record or the run's end comes. No I/O, so tests feed it records.
+import { join } from "node:path";
+import { existsSync } from "node:fs";
+import type { AssistantBlock, NormalizedEvent, StopReason } from "../types.ts";
+import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
+import { promptText, readTranscript } from "./sessions.ts";
+
+type Rec = Record<string, any>;
+
+const STOP: Record<string, StopReason> = { end_turn: "stop", stop_sequence: "stop", pause_turn: "stop", tool_use: "toolUse", max_tokens: "length", refusal: "error" };
+
+type Open = { id: string | null; content: (AssistantBlock | null)[]; model?: string; usage?: Rec; stop?: string; error?: string; synthetic: boolean };
+
+function tsOf(r: Rec): number | undefined {
+  const t = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+  return Number.isFinite(t) ? t : undefined;
+}
+
+function localStdout(text: string): string | null {
+  const m = /^\s*<local-command-stdout>([\s\S]*?)<\/local-command-stdout>\s*$/.exec(text);
+  return m ? m[1]!.trim() : null;
+}
+
+export class TranscriptFollower {
+  private names = new Map<string, string>();
+  private open: Open | null = null;
+  /** Records already shown (the history, or a record written twice), by uuid. */
+  private seen = new Set<string>();
+  /** The session's folder of subagent transcripts (`<id>/subagents/agent-<id>.jsonl`). */
+  private sessionDir: string;
+
+  constructor(file: string) {
+    this.sessionDir = join(file.replace(/\/[^/]*$/, ""), file.replace(/^.*\//, "").replace(/\.jsonl$/, ""));
+  }
+
+  /** The history's records: their uuids (not shown again) and their tool calls' names (for the results still to come). */
+  prime(records: Rec[]): void {
+    for (const r of records) {
+      if (typeof r.uuid === "string") this.seen.add(r.uuid);
+      if (r.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
+      for (const b of r.message.content) if (b?.type === "tool_use") this.names.set(String(b.id), String(b.name ?? "tool"));
+    }
+  }
+
+  /** Whether an assistant message is open (its end not seen yet). */
+  get opened(): boolean {
+    return this.open !== null;
+  }
+
+  /** One record's events. */
+  feed(r: Rec): NormalizedEvent[] {
+    if (!r || typeof r !== "object" || typeof r.uuid !== "string") return [];
+    if (this.seen.has(r.uuid)) return [];
+    this.seen.add(r.uuid);
+    if (r.isSidechain) return [];
+    const ts = tsOf(r);
+    const t = ts ? { ts } : {};
+    if (r.type === "assistant") return this.assistant(r);
+    if (r.type === "system") return this.system(r, t);
+    if (r.type !== "user") return [];
+    const c = r.message?.content;
+    if (Array.isArray(c) && c.some((b: Rec) => b?.type === "tool_result")) {
+      const out = this.close();
+      for (const b of c) {
+        if (b?.type !== "tool_result") continue;
+        const declined = r.permissionDecision?.decision === "reject" || r.toolDenialKind === "permission-rule";
+        const name = this.names.get(String(b.tool_use_id)) ?? "tool";
+        out.push({ ...toolEnded(b, name, r.toolUseResult, declined), ...t });
+        // A subagent's steps are in their own file, written by the time its result is: nested under its card, before it ends.
+        const agentId = r.toolUseResult?.agentId;
+        if ((name === "Agent" || name === "Task") && typeof agentId === "string") out.splice(out.length - 1, 0, ...this.subagent(agentId, String(b.tool_use_id)));
+      }
+      return out;
+    }
+    const text = promptText(r);
+    // A /compact shows as the compaction's notice (the boundary record).
+    if (text === null || /^\/compact(\s|$)/.test(text)) return [];
+    const images = imagesOf(c);
+    return [...this.close(), { type: "user_message", text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t }];
+  }
+
+  /** The open assistant message ends (the next record isn't part of it, or the run settled). */
+  close(): NormalizedEvent[] {
+    const o = this.open;
+    if (!o) return [];
+    this.open = null;
+    const last = o.content.at(-1);
+    const stop: StopReason = o.error ? "error" : o.stop ? STOP[o.stop] ?? "stop" : last?.type === "toolCall" ? "toolUse" : "stop";
+    const usage = o.synthetic ? undefined : usageOf(o.usage);
+    return [{
+      type: "assistant_end", content: o.content, stopReason: stop, ...(o.error ? { error: o.error } : {}),
+      ...(usage ? { usage } : {}), ...(!o.synthetic && o.model ? { model: o.model } : {}),
+    }];
+  }
+
+  private assistant(r: Rec): NormalizedEvent[] {
+    const m: Rec = r.message ?? {};
+    const blocks: Rec[] = Array.isArray(m.content) ? m.content : [];
+    const id = typeof m.id === "string" ? m.id : null;
+    const out: NormalizedEvent[] = [];
+    if (this.open && (this.open.id !== id || id === null)) out.push(...this.close());
+    if (!this.open) {
+      this.open = { id, content: [], synthetic: m.model === "<synthetic>" };
+      out.push({ type: "assistant_start" });
+    }
+    const o = this.open;
+    if (typeof m.model === "string") o.model = m.model;
+    if (m.usage && typeof m.usage === "object") o.usage = m.usage;
+    if (typeof m.stop_reason === "string") o.stop = m.stop_reason;
+    if (typeof r.error === "string" || r.isApiErrorMessage === true) o.error = textOf(blocks) || String(r.error ?? "error");
+    for (const b of blocks) {
+      const index = o.content.length;
+      if (b?.type === "text" || b?.type === "thinking") {
+        const kind = b.type as "text" | "thinking";
+        const text = String(kind === "text" ? b.text ?? "" : b.thinking ?? "");
+        // Redacted thinking: a block with nothing to show.
+        if (!text) {
+          o.content.push(null);
+          continue;
+        }
+        o.content.push({ type: kind, text });
+        out.push({ type: "assistant_block_start", index, kind }, { type: "assistant_block_end", index, kind, text });
+      } else if (b?.type === "tool_use") {
+        const name = String(b.name ?? "tool");
+        this.names.set(String(b.id), name);
+        o.content.push({ type: "toolCall", callId: String(b.id), name, args: b.input });
+        out.push({ type: "tool_call", index, callId: String(b.id), name, args: b.input });
+      } else o.content.push(null);
+    }
+    // Claude Code writes the stop reason only on a message's last record, when at all.
+    if (o.stop || o.error) out.push(...this.close());
+    return out;
+  }
+
+  private system(r: Rec, t: { ts?: number }): NormalizedEvent[] {
+    if (r.subtype === "compact_boundary") {
+      const md: Rec = r.compactMetadata ?? r.compact_metadata ?? {};
+      const before = md.preTokens ?? md.pre_tokens;
+      return [...this.close(), { type: "notice", level: "info", source: "compaction", text: `Compacted the conversation (${Math.round((typeof before === "number" ? before : 0) / 1000)}k tokens before).`, ...t }];
+    }
+    if (r.subtype !== "local_command" || typeof r.content !== "string") return [];
+    const stdout = localStdout(r.content);
+    if (stdout !== null) return stdout ? [...this.close(), { type: "assistant_end", content: [{ type: "text", text: stdout }], stopReason: "stop", ...t }] : [];
+    const cmd = promptText({ type: "user", message: { content: r.content } });
+    return cmd ? [...this.close(), { type: "user_message", text: cmd, images: 0, ...t }] : [];
+  }
+
+  /** A finished subagent's steps (its own transcript), nested under its card, as history shows them. */
+  private subagent(agentId: string, callId: string): NormalizedEvent[] {
+    const file = join(this.sessionDir, "subagents", `agent-${agentId}.jsonl`);
+    if (!existsSync(file)) return [];
+    const recs = readTranscript(file).filter((x) => x.type === "assistant" || (x.type === "user" && Array.isArray(x.message?.content) && x.message.content.some((b: Rec) => b?.type === "tool_result")));
+    // Its final report is the card's output.
+    while (recs.length && recs.at(-1)!.type === "assistant" && !recs.at(-1)!.message?.content?.some((b: Rec) => b?.type === "tool_use")) recs.pop();
+    const out: NormalizedEvent[] = [];
+    for (const r of recs) {
+      const c: Rec[] = Array.isArray(r.message?.content) ? r.message.content : [];
+      if (r.type === "assistant") {
+        const texts = c.map((b) => (b.type === "text" && b.text ? { type: "text" as const, text: String(b.text) } : b.type === "thinking" && b.thinking ? { type: "thinking" as const, text: String(b.thinking) } : null));
+        if (texts.some(Boolean)) out.push({ type: "assistant_end", content: texts, parent: callId });
+        for (const b of c) {
+          if (b.type !== "tool_use") continue;
+          this.names.set(String(b.id), String(b.name ?? "tool"));
+          out.push({ type: "tool_call", callId: String(b.id), name: String(b.name ?? "tool"), args: b.input, parent: callId });
+        }
+      } else {
+        for (const b of c) if (b?.type === "tool_result") out.push(toolEnded(b, this.names.get(String(b.tool_use_id)) ?? "tool", r.toolUseResult, false, callId));
+      }
+    }
+    return out;
+  }
+}

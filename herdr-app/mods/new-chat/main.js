@@ -16,6 +16,8 @@
 // - `new-chat.continue:<terminal>`: chat-menu's Continue as chat (an agent's
 //   TUI handed over to a chat on its session, see continueAsChat);
 //   `new-chat.continue`: the same on the focused terminal (the "continue" key);
+// - `new-chat.flip`: a Claude Code terminal ⇄ its chat view, in place (the "flip" key,
+//   Ctrl+Shift+J as in Ovis; faces.js); `new-chat.flip:<terminal>`: that terminal's;
 // - `new-chat.update-check`: the update questions now, the release lookup too (update.js;
 //   they also run a few seconds after this block starts, an install reloads it, and
 //   once an hour, with the lookup at most once a day).
@@ -27,6 +29,7 @@ import { appHome, closeOverlay, exec, focused, hc, knownAgents, nextCommand, not
 import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
+import { appHas, flip, viewProps, viewTerminal } from "./faces.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -232,6 +235,37 @@ export async function continueInPlace(t, agent, pid, cwd, found, cx, on = null) 
 }
 
 // The floating block: commands only, nothing drawn.
+/**
+ * The flip key on a terminal (faces.js): a Claude Code terminal shows its chat
+ * view in its place (made the first time; the view's host reads the session
+ * the TUI has open and types into it, so nothing restarts), and a terminal
+ * whose view shows goes back. In the view itself the chat mod takes the key.
+ */
+async function flipFace(addr, cx) {
+  const f = focused();
+  // A chat view's pane whose keyboard isn't in the chat (its own key didn't take it): its terminal.
+  const terminal = addr || f?.terminal || (f?.pane ? await viewTerminal(f.pane) : null);
+  if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code terminal to its chat view: focus one first.");
+  if (terminal.includes("/")) throw new Error("The chat view works with this computer's terminals for now.");
+  const t = term(terminal);
+  if (!t || t.state !== "live") throw new Error(`Terminal ${terminal} isn't running.`);
+  const claude = agentOf(t) === "claude";
+  const props = claude ? viewProps(terminal, t.foreground?.cwd ?? t.cwd ?? null) : null;
+  let r;
+  try {
+    r = await flip(cx, terminal, "toggle", props);
+  } catch (/** @type {any} */ e) {
+    if (!claude && /no chat view yet/.test(String(e?.message))) {
+      throw new Error(agentOf(t) ? `The chat view is for Claude Code terminals for now (this one runs ${NAMES[agentOf(t)] ?? agentOf(t)}).` : "No agent runs here: the chat view is for a Claude Code terminal.");
+    }
+    throw e;
+  }
+  if (r.face === "terminal") return run("pane.focus", { pane: r.term });
+  // A new view is in the app once it has read the document (within half a second).
+  if (r.created && !(await appHas(cx, r.pane))) throw new Error("The chat view didn't appear: try again.");
+  run("pane.focus", { pane: r.pane });
+}
+
 class Commands {
   constructor(cx) {
     // After an install (which reloads this mod) or at start: an update that ran, chats on older
@@ -256,9 +290,10 @@ class Commands {
           if (c === "open") run("mod.open", { name: "new-chat" });
           else if (CHOICES.some((x) => x.id === c)) await openChat(c);
           else if (c === "continue" || c.startsWith("continue:")) await continueAsChat(c.slice(9), cx);
+          else if (c === "flip" || c.startsWith("flip:")) await flipFace(c.slice(5), cx);
           else if (c === "update-check") await updates(true);
         } catch (e) {
-          notify({ title: c.startsWith("continue") ? "Continue as chat" : "New chat", body: String(e?.message ?? e), level: "error" });
+          notify({ title: c.startsWith("continue") ? "Continue as chat" : c.startsWith("flip") ? "Chat view" : "New chat", body: String(e?.message ?? e), level: "error" });
         }
       }
     });

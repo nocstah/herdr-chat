@@ -11,14 +11,57 @@
 // Never armed: a sub-agent's host (a parent, or not role=host: it has no pane
 // by design) and a host that never saw its chat's pane (the mod's
 // sweepOrphans covers that one).
+//
+// The terminal view (`attached`: the Claude Code terminal the chat is a face
+// of, mods/chat/faces.js) keeps the two faces whole: its view closed while the
+// terminal is hidden shows the terminal again (or the tab would show
+// nothing), and the terminal's pane gone (its program ended, or it was
+// closed) closes the view with it.
 
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 
-type Node = { id?: string; content?: { mod?: string; terminal?: string; props?: { chat?: string } }; children?: Node[] };
+type Node = { id?: string; hidden?: boolean; content?: { mod?: string; terminal?: string; props?: { chat?: string } }; children?: Node[] };
 type Doc = { spaces?: { id: string; tabs?: { id: string; root?: Node }[] }[] } | null;
+
+/** The terminal view's two faces: the chat's pane and the attached terminal's ({pane, hidden, tab, alone: its tab's only pane}), null when not in the document. */
+export type Faces = { view: { pane: string; hidden: boolean; tab: string; alone: boolean } | null; term: { pane: string; hidden: boolean; tab: string } | null };
+
+export function facesIn(doc: Doc, chat: string, attached: string): Faces {
+  const out: Faces = { view: null, term: null };
+  for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) {
+    let panes = 0;
+    const walk = (n: Node | undefined) => {
+      if (!n) return;
+      const c = n.content;
+      if (c) panes++;
+      if (c?.mod && c.props?.chat === chat && n.id && !out.view) out.view = { pane: n.id, hidden: n.hidden === true, tab: t.id, alone: false };
+      if (c?.terminal === attached && n.id && !out.term) out.term = { pane: n.id, hidden: n.hidden === true, tab: t.id };
+      for (const ch of n.children ?? []) walk(ch);
+    };
+    walk(t.root);
+    if (out.view?.tab === t.id) out.view.alone = panes === 1;
+  }
+  return out;
+}
+
+/** The document with `pane`'s hidden flag dropped (in place), or false when it has no such pane. */
+export function unhide(doc: Doc, pane: string): boolean {
+  let found = false;
+  const walk = (n: Node | undefined) => {
+    if (!n || found) return;
+    if (n.id === pane) {
+      delete n.hidden;
+      found = true;
+      return;
+    }
+    for (const ch of n.children ?? []) walk(ch);
+  };
+  for (const s of doc?.spaces ?? []) for (const t of s.tabs ?? []) walk(t.root);
+  return found;
+}
 
 export type Where = { chat: boolean; host: { pane: string; tab: string; alone: boolean } | null };
 
@@ -78,6 +121,8 @@ type Opts = {
   terminal: string;
   appHome: string;
   hc: string;
+  /** The terminal view's terminal (`--attach`): the faces are kept whole (see the top). */
+  attached?: string | null;
   log: (msg: string) => void;
   /** The chat's pane is gone (its hidden pane already closed, when it had one): exit. */
   onGone: () => void;
@@ -198,7 +243,10 @@ export class PaneWatch {
     }
     this.reading = true;
     this.call("doc.get", { name: "herdr-app" })
-      .then((r) => this.decide((r as { value?: Doc })?.value ?? null))
+      .then((r) => {
+        const d = r as { value?: Doc; version?: unknown };
+        return this.o.attached ? this.decideFaces(d?.value ?? null, d?.version) : this.decide(d?.value ?? null);
+      })
       .catch((e) => this.off || this.o.log(`pane watch: doc.get: ${e instanceof Error ? e.message : e}`))
       .finally(() => {
         this.reading = false;
@@ -208,6 +256,49 @@ export class PaneWatch {
         }
       });
   }
+
+  // The terminal view: the chat's pane gone, the terminal shows again (when hidden), then exit;
+  // the terminal's pane gone, the chat's pane closes (then the next document has it gone: exit).
+  private async decideFaces(doc: Doc, version: unknown): Promise<void> {
+    if (this.off || !doc?.spaces) return;
+    const f = facesIn(doc, this.o.chat, this.o.attached!);
+    if (f.view && !this.armed) {
+      this.o.log("pane watch: the chat view's pane is in the layout document: armed");
+      this.armed = true;
+    }
+    if (!this.armed) return;
+    if (!f.view) {
+      if (this.ending) return;
+      this.ending = true;
+      // Written before the watch stops (stopping ends the connection the write goes on).
+      if (f.term?.hidden && unhide(doc, f.term.pane)) {
+        try {
+          await this.call("doc.set", { name: "herdr-app", value: doc, version });
+          this.o.log(`pane watch: the chat view closed: its terminal's pane ${f.term.pane} shows again`);
+        } catch (e) {
+          // A conflict: the app wrote first. Its next read may show the terminal already; else the person flips it.
+          this.o.log(`pane watch: the chat view closed; showing its terminal: ${e instanceof Error ? e.message : e}`);
+        }
+      } else this.o.log("pane watch: the chat view closed: exiting");
+      this.stop();
+      return this.o.onGone();
+    }
+    if (f.term || this.closing) return;
+    this.closing = true;
+    const [cmd, args] = f.view.alone ? ["tab.close", { id: f.view.tab, confirmed: true }] : ["pane.close", { pane: f.view.pane }];
+    try {
+      await appDo(this.o.appHome, cmd, args);
+      this.o.log(`pane watch: the terminal's pane is gone: ${cmd} ${JSON.stringify(args)}`);
+    } catch (e) {
+      this.closing = false;
+      this.o.log(`pane watch: the terminal's pane is gone; closing the view: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** The terminal's pane is gone: the view's pane is being closed. */
+  private closing = false;
+  /** The view's pane is gone: showing the terminal, then exiting. */
+  private ending = false;
 
   private async decide(doc: Doc): Promise<void> {
     if (this.off || !doc?.spaces) return;

@@ -86,7 +86,8 @@ const BACKOFF = [250, 500, 1000, 2000, 2000];
 export class Connection {
   // opts: {chat, cwd, attachOnly (never start a host), place: () => ({space, tab}) | null (a host starts only once the chat's tab is known),
   // machine: () => the machine of the chat's space, null for this computer's (its host runs there: machines.js),
-  // session, hostEnv, handOver ({pid, model, thinking} | null), onRecord(rec, cx), onChange(cx), log}
+  // session, hostEnv, handOver ({pid, model, thinking} | null), attach (the terminal view's terminal | null),
+  // onRecord(rec, cx), onChange(cx), log}
   constructor(opts) {
     this.o = opts;
     this.status = "connecting"; // connecting | starting | connected | reconnecting | stopped | failed
@@ -185,7 +186,8 @@ export class Connection {
             this.welcome = rec;
             this.connects++;
             this.attempt = 0;
-            this.autoStart = false;
+            // The terminal view's host runs no agent (the TUI is the agent): gone, it just starts again.
+            if (!this.o.attach) this.autoStart = false;
             this.set("connected", null, cx);
           } else if (rec.t === "res") {
             const p = this.pending.get(rec.id);
@@ -280,6 +282,8 @@ export class Connection {
       "--", "/usr/bin/env", ...Object.entries(env).map(([k, v]) => `${k}=${v}`),
       host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", sideState(side), "--app-home", side ? side.home : appHome(), "--provider", provider,
       ...(session ? ["--session", session] : []),
+      // The terminal view (faces.js): the agent is the Claude Code TUI in that terminal.
+      ...(this.o.attach ? ["--attach", this.o.attach] : []),
       // A Pi TUI this chat takes over: the host waits for its pid, then uses its model and
       // thinking (only while that pid lives: a later restart of the chat ignores them).
       ...(session && this.o.handOver?.pid ? ["--after-pid", String(this.o.handOver.pid),

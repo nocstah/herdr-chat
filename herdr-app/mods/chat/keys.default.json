@@ -15,5 +15,6 @@
   "latest": "cmd-shift-b",
   "find": "cmd-f",
   "focusComposer": "cmd-l",
-  "newChat": "cmd-shift-n"
+  "newChat": "cmd-shift-n",
+  "flip": "cmd-shift-j"
 }

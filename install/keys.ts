@@ -8,8 +8,10 @@
 //   pi/claude/codex: a chat with that agent at once (new-chat.<agent>, which
 //   the new-chat copy in the layout's floating list takes: install/layout.ts);
 //   continue: the focused agent TUI continues as a chat (new-chat.continue, the
-//   right-click menu's Continue as chat).
-// - Left out: the default (open: cmd-i, the others unbound); null: unbound.
+//   right-click menu's Continue as chat); flip: a Claude Code terminal and its
+//   chat view, in place (new-chat.flip; in a chat the chat's own `flip` key).
+// - Left out: the default (open: cmd-i, Linux ctrl-alt-n; flip: cmd-shift-j,
+//   Linux ctrl-shift-j, as in Ovis; the others unbound); null: unbound.
 // - A chord the person chose replaces what had it; the old action is kept in
 //   the record (data/herdr-chat/install.json), so uninstall puts it back. The
 //   default cmd-i, when taken, falls back to cmd-j a, and says so.
@@ -24,16 +26,16 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 
 type Json = any;
-export const NAMES = ["open", "pi", "claude", "codex", "continue"] as const;
+export const NAMES = ["open", "pi", "claude", "codex", "continue", "flip"] as const;
 export type Name = (typeof NAMES)[number];
-export const ACTION: Record<Name, string> = { open: "mod.open:new-chat", pi: "new-chat.pi", claude: "new-chat.claude", codex: "new-chat.codex", continue: "new-chat.continue" };
-export const TITLE: Record<Name, string> = { open: "New chat", pi: "Pi chat", claude: "Claude Code chat", codex: "Codex chat", continue: "Continue as chat" };
+export const ACTION: Record<Name, string> = { open: "mod.open:new-chat", pi: "new-chat.pi", claude: "new-chat.claude", codex: "new-chat.codex", continue: "new-chat.continue", flip: "new-chat.flip" };
+export const TITLE: Record<Name, string> = { open: "New chat", pi: "Pi chat", claude: "Claude Code chat", codex: "Codex chat", continue: "Continue as chat", flip: "Chat view" };
 
 export type Own = { [chord: string]: { action: string; was: string | null } };
 export type Record2 = { version: 2; global: Own };
 
-export function defaults(platform: string): { open: string; fallback: string | null } {
-  return platform === "darwin" ? { open: "cmd-i", fallback: "cmd-j a" } : { open: "ctrl-alt-shift-p", fallback: null };
+export function defaults(platform: string): { open: string; fallback: string | null; flip: string } {
+  return platform === "darwin" ? { open: "cmd-i", fallback: "cmd-j a", flip: "cmd-shift-j" } : { open: "ctrl-alt-n", fallback: "ctrl-alt-shift-p", flip: "ctrl-shift-j" };
 }
 
 /** "cmd-j a" → "⌘J A" (macOS), "Ctrl+Alt+Shift+P" elsewhere. */
@@ -110,8 +112,15 @@ export function apply(doc: Json, rec: Json, o: { prefs: Partial<Record<Name, str
     if (n !== "open" && !o.direct && chosen?.length) { lines.push(`${TITLE[n]}: ${chosen.map(p).join(", ")} not bound: it needs the layout's new-chat copy (install without --no-layout)`); continue; }
     if (chosen === null) continue;
     if (chosen !== undefined) { for (const c of chosen) bind(n, c); continue; }
-    if (n !== "open") continue; // unbound by default
     const d = defaults(o.platform);
+    if (n === "flip") {
+      // Bound by default where it's free (it needs the layout's new-chat copy, as the agents' keys do).
+      if (!o.direct) continue;
+      if (g[d.flip] === undefined || g[d.flip] === ACTION.flip) bind(n, d.flip);
+      else lines.push(`${p(d.flip)} is taken (${g[d.flip]}): the chat view has no key. To choose: "global": {"flip": "<chord>"} in data/herdr-chat/keys.json, then install again`);
+      continue;
+    }
+    if (n !== "open") continue; // unbound by default
     const free = (c: string) => g[c] === undefined || g[c] === ACTION.open;
     if (free(d.open)) bind(n, d.open);
     else if (d.fallback && free(d.fallback)) {

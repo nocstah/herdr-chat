@@ -15,5 +15,6 @@
   "latest": "ctrl-end",
   "find": "ctrl-f",
   "focusComposer": "ctrl-l",
-  "newChat": "ctrl-alt-n"
+  "newChat": "ctrl-alt-n",
+  "flip": "ctrl-shift-j"
 }
