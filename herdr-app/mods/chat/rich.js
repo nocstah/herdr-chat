@@ -10,6 +10,7 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { alpha, codeLine, homeRel, icon, plural, spinner } from "./util.js";
 import { SPACE } from "./space.js";
 import { linkPaths } from "./paths.js";
+import { oneLine, runsInCode } from "./bang.js";
 
 export const CODE_CAP = 30; // lines shown before "Show all N lines"
 const RENDER_MAX = 600; // lines ever built for one block (the rest: copy it)
@@ -97,11 +98,39 @@ export function blocks(it, c) {
     const gap = above(e.first, prev && { heading: prev.last });
     prev = e;
     let el;
-    if (b.type === "code") el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
+    if (b.type === "code") {
+      el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
+      // Its `!` commands (bang.js): a bar under it for each run.
+      const runs = c.runBang && !b.open ? runsInCode(b.code ?? "") : [];
+      if (runs.length) el = v_flex().min_w(0).gap(6).child(el).children(runs.map((r, j) => runBar(`${key}:${j}`, r, runs.length > 1, c)));
+    }
     else if (b.type === "mermaid") el = mermaid(key, b, c);
     else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink);
     return div().pt(gap).child(el);
   }));
+}
+
+// A `!` run under its code block: run it in the agent (c.runBang.here names
+// it; the terminal view types `!command` into Claude Code, as Ctrl+! does) or
+// in a new tab of the space. A run of several runs them in order, stopping at
+// the first that fails. `named`: the block has more than one run, so each bar
+// says which.
+/** @param {string} key @param {string[]} run @param {boolean} named @param {any} c */
+function runBar(key, run, named, c) {
+  const t = c.t;
+  const here = c.runBang.here;
+  const line = oneLine(run);
+  const btn = (/** @type {string} */ id, /** @type {string} */ ic, /** @type {string} */ label, /** @type {string} */ tip, /** @type {(cx: any) => void} */ fn) =>
+    h_flex().id(id).h(24).px(8).gap(6).flex_none().items_center().rounded(6).border_1().border_color(c.line).cursor_pointer()
+      .text_size(11.5).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(tip).on_click((_e, cx) => fn(cx)).child(icon(ic, 12)).child(label);
+  const what = run.length > 1 ? `${run.length} commands in order, stopping at the first that fails` : null;
+  return h_flex().min_w(0).gap(6).items_center()
+    .when(Boolean(here) && line !== null, (e) => e.child(btn(`run-here-${key}`, "corner-up-right", `Run in ${here}`,
+      `Types !${run.length > 1 ? "…" : run[0]} into ${here}: it runs there, and ${here} sees what it prints`, (cx) => c.runBang.run(run, "agent", cx))))
+    .child(btn(`run-tab-${key}`, "terminal", "Run in a new tab", "In a terminal of its own, in this space: for a command that asks something", (cx) => c.runBang.run(run, "tab", cx)))
+    .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).when(named, (e) => e.font_family(c.mono))
+      .child(named ? `! ${run[0]}${run.length > 1 ? ` (+${run.length - 1})` : ""}` : what ?? ""));
 }
 
 function plainLines(code) {

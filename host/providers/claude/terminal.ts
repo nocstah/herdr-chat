@@ -43,6 +43,7 @@ const SENT_TTL_MS = 10 * 60_000;
 const AGENT_APPS = new Set(["claude", "claude-code"]);
 
 const NOT_HERE = "Do that in Claude Code's terminal: Ctrl+Shift+J flips to it.";
+const BUSY = "Claude Code is working: run the command when it's done, or in a new tab.";
 const ASKING = "Claude Code is asking something in its terminal: answer it there first (Ctrl+Shift+J shows it), then send.";
 
 /** Why `hc send` refused, in words (it prints {"error": {kind, message, hint}}). */
@@ -423,12 +424,17 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (p.images.length) throw new Error("Images can't be sent from here: paste them in Claude Code's terminal.");
     // Typing would answer its question (hc send refuses too).
     if (this.status === "blocked") throw new Error(ASKING);
+    // `!command`: Claude Code's bash mode runs it in the agent's shell, and the agent sees what it
+    // printed; it comes back as a Bash card (sessions.ts bashEvents). Only at rest, as Ctrl+! does.
+    const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
+    if (bang && this.status === "working") throw new Error(BUSY);
+    const text = bang ? `!${bang[1]!.trim()}` : p.text;
     // A command is the TUI's (its screen, or a run it starts itself): what it writes shows as it comes.
-    const command = /^\/\S/.test(p.text.trim());
+    const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
     // Noted before it's typed: the TUI writes its echo as Enter lands, before `hc send` returns.
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
-    const r = await this.hc(["send", "--json", this.opts.terminal, p.text], 70_000);
+    const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);

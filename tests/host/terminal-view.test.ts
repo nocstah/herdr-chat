@@ -161,6 +161,14 @@ test("the view: the TUI's session as history, a message typed into the terminal,
     // A command is the TUI's: handled (no run of the chat's), still typed.
     assert.equal((await r.adapter.prompt({ id: "u-2", text: "/model", images: [], mode: "steer", busy: false })).disposition, "handled");
     assert.deepEqual(r.calls().at(-1), ["send", "--json", "t9", "/model"]);
+    // A `!` command: Claude Code's bash mode runs it (its records come back as a Bash card); refused mid-run.
+    assert.equal((await r.adapter.prompt({ id: "u-3", text: "! pnpm build", images: [], mode: "steer", busy: false })).disposition, "handled");
+    assert.deepEqual(r.calls().at(-1), ["send", "--json", "t9", "!pnpm build"]);
+    r.status("working");
+    await new Promise((res) => setTimeout(res, 150));
+    await assert.rejects(r.adapter.prompt({ id: "u-4", text: "!ls", images: [], mode: "steer", busy: true }), /working: run the command when it's done/);
+    r.status("idle");
+    await new Promise((res) => setTimeout(res, 150));
 
     // An agent's turn state on the stream isn't the terminal's end.
     r.event({ method: "event", params: { type: "turn", terminal: "t9", data: { state: "done", turn: 3 } } });

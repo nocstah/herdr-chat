@@ -5,7 +5,7 @@
 // before a compaction stays visible (with a compaction notice), as live.
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { readTranscript, promptText } from "./sessions.ts";
+import { bashEvents, readTranscript, promptText } from "./sessions.ts";
 import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
 import type { NormalizedEvent, AssistantBlock, StopReason } from "../types.ts";
 
@@ -44,7 +44,7 @@ function localStdout(text: string): string | null {
   return m ? m[1]!.trim() : null;
 }
 
-type Ctx = { names: Map<string, string>; out: NormalizedEvent[]; sessionDir: string };
+type Ctx = { names: Map<string, string>; out: NormalizedEvent[]; sessionDir: string; bash: { callId: string | null } };
 
 function emitAssistant(group: Rec[], ctx: Ctx, parent?: string): void {
   const first = group[0]!;
@@ -147,6 +147,9 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
       continue;
     }
     if (parent) continue;
+    // A `!` command the person ran in the TUI: a Bash card (sessions.ts bashEvents).
+    const bash = bashEvents(r, ctx.bash, t);
+    if (bash) { ctx.out.push(...bash); continue; }
     const text = promptText(r);
     // Our /compact isn't a prompt (live it's a compaction, shown by the boundary's notice).
     if (text === null || /^\/compact(\s|$)/.test(text)) continue;
@@ -164,7 +167,7 @@ export function historyEvents(path: string, upTo?: string): NormalizedEvent[] {
 /** The same, from records already read (the terminal view reads the file once for the history and its follower). */
 export function historyOf(records: Rec[], path: string, upTo?: string): NormalizedEvent[] {
   if (!records.length) return [];
-  const ctx: Ctx = { names: new Map(), out: [], sessionDir: join(dirname(path), path.replace(/^.*\//, "").replace(/\.jsonl$/, "")) };
+  const ctx: Ctx = { names: new Map(), out: [], sessionDir: join(dirname(path), path.replace(/^.*\//, "").replace(/\.jsonl$/, "")), bash: { callId: null } };
   emitRecords(activeBranch(records, upTo), ctx);
   return ctx.out;
 }

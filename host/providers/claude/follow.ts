@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import type { AssistantBlock, NormalizedEvent, StopReason } from "../types.ts";
 import { imagesOf, textOf, toolEnded, usageOf } from "./mapper.ts";
-import { promptText, readTranscript } from "./sessions.ts";
+import { bashEvents, promptText, readTranscript } from "./sessions.ts";
 
 type Rec = Record<string, any>;
 
@@ -34,6 +34,8 @@ export class TranscriptFollower {
   private open: Open | null = null;
   /** Records already shown (the history, or a record written twice), by uuid. */
   private seen = new Set<string>();
+  /** A `!` command's card waiting for its output (sessions.ts bashEvents). */
+  private bash: { callId: string | null } = { callId: null };
   /** The session's folder of subagent transcripts (`<id>/subagents/agent-<id>.jsonl`). */
   private sessionDir: string;
 
@@ -80,6 +82,9 @@ export class TranscriptFollower {
       }
       return out;
     }
+    // A `!` command the person ran in the TUI: a Bash card, as in history (sessions.ts bashEvents).
+    const bash = bashEvents(r, this.bash, t);
+    if (bash) return [...this.close(), ...bash];
     const text = promptText(r);
     // A /compact shows as the compaction's notice (the boundary record).
     if (text === null || /^\/compact(\s|$)/.test(text)) return [];

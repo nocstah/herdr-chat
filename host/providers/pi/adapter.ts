@@ -123,7 +123,7 @@ export function historyEvents(messages: Rec[]): NormalizedEvent[] {
         if (m.display !== false) out.push({ type: "custom", customType: str(m.customType) ?? "custom", text: contentText(m.content), ts });
         break;
       case "bashExecution": {
-        const callId = newId("bash");
+        const callId = newId("you-bash"); // "you-": the person's run, a card of its own (rows.js)
         const args = { command: m.command };
         const output = String(m.output ?? "");
         out.push({ type: "tool_call", callId, name: "bash", args, ts });
