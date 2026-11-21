@@ -91,7 +91,7 @@ const withBar = () => {
 test("layout: the top bar gets the Chat | Terminal switch in a row with the tabs block; a second install changes nothing; uninstall gives back the same bytes", () => {
   const h = home("bar", { bar: withBar() });
   const before = read(h, "bar");
-  assert.match(run("install", h), /the top bar has the chat view's Chat \| Terminal switch/);
+  assert.match(run("install", h), /the top bar has the chat view's Chat\/Terminal switch/);
   const l = JSON.parse(read(h, "bar"));
   const row = find(l, "chat-switch-row");
   assert.equal(find(l, "work").children[0], row, "the row takes the tabs block's place");
@@ -100,7 +100,7 @@ test("layout: the top bar gets the Chat | Terminal switch in a row with the tabs
     { id: "chat-switch", type: "block", size: { px: 236 }, window_drag: true, content: { mod: "chat-switch" } },
   ] });
   const once = read(h, "bar");
-  assert.match(run("install", h), /the top bar already has the Chat \| Terminal switch/);
+  assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
   assert.equal(read(h, "bar"), once);
   assert.match(run("uninstall", h), /the top bar as it was/);
   assert.equal(read(h, "bar"), before);
@@ -124,7 +124,7 @@ test("layout: the switch's row comes out also without the record, and a tabs blo
 
 test("layout: no top bar block: the chat view keeps its own switch", () => {
   const h = home("main-mods", { "main-mods": personal() });
-  assert.match(run("install", h), /no top bar block \(id tabs\) in a column: the chat view keeps its own Chat \| Terminal switch/);
+  assert.match(run("install", h), /no top bar block \(id tabs\) in a column: the chat view keeps its own Chat\/Terminal switch/);
   assert.ok(!read(h, "main-mods").includes("chat-switch"));
 });
 

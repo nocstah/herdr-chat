@@ -292,9 +292,9 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
   }[r.menu];
   const commands = { changed: "new-chat's keys work (a new-chat copy in its floating list)", already: "new-chat's keys already work", skipped: "" }[r.commands];
   const sw = {
-    changed: "the top bar has the chat view's Chat | Terminal switch",
-    already: "the top bar already has the Chat | Terminal switch",
-    noslot: "no top bar block (id tabs) in a column: the chat view keeps its own Chat | Terminal switch",
+    changed: "the top bar has the chat view's Chat/Terminal switch",
+    already: "the top bar already has the Chat/Terminal switch",
+    noslot: "no top bar block (id tabs) in a column: the chat view keeps its own Chat/Terminal switch",
     skipped: "",
   }[r.switch];
   say.push(`layout ${name}: ${agents}; ${menu}${commands ? `; ${commands}` : ""}${sw ? `; ${sw}` : ""}`);
