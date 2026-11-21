@@ -97,7 +97,7 @@ test("layout: the top bar gets the Chat | Terminal switch in a row with the tabs
   assert.equal(find(l, "work").children[0], row, "the row takes the tabs block's place");
   assert.deepEqual(row, { id: "chat-switch-row", type: "row", size: { px: 42 }, resizable: false, children: [
     { id: "tabs", type: "block", content: { mod: "inapse-tabs", props: { replaces: { mod: "tabs" } } }, window_drag: true },
-    { id: "chat-switch", type: "block", size: { px: 224 }, window_drag: true, content: { mod: "chat-switch" } },
+    { id: "chat-switch", type: "block", size: { px: 176 }, window_drag: true, content: { mod: "chat-switch" } },
   ] });
   const once = read(h, "bar");
   assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
@@ -113,14 +113,34 @@ test("layout: an earlier release's wider switch is narrowed, once; a width set b
   const l = JSON.parse(read(h, "bar"));
   find(l, "chat-switch").size = { px: 236 }; // as 0.5.0's install made it
   writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(l, null, 2) + "\n");
-  assert.match(run("install", h), /the top bar's Chat\/Terminal switch is narrower \(224 px\)/);
-  assert.deepEqual(find(JSON.parse(read(h, "bar")), "chat-switch").size, { px: 224 });
+  assert.match(run("install", h), /the top bar's Chat\/Terminal switch is narrower \(176 px\)/);
+  assert.deepEqual(find(JSON.parse(read(h, "bar")), "chat-switch").size, { px: 176 });
   assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
+  find(l, "chat-switch").size = { px: 224 }; // as the release before the icons made it
+  writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(l, null, 2) + "\n");
+  assert.match(run("install", h), /the top bar's Chat\/Terminal switch is narrower \(176 px\)/);
   const mine = JSON.parse(read(h, "bar"));
   find(mine, "chat-switch").size = { px: 300 };
   writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(mine, null, 2) + "\n");
   assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
   assert.deepEqual(find(JSON.parse(read(h, "bar")), "chat-switch").size, { px: 300 });
+  assert.match(run("uninstall", h), /the top bar as it was/);
+  assert.equal(read(h, "bar"), before);
+});
+
+test("layout: tabs already in a row (OmaRelay's, its recap line beside them) get the switch at the row's end; uninstall takes only the switch out", () => {
+  const bar = withBar();
+  const tabs = find(bar, "tabs");
+  const row = { id: "inapse-recap-row", type: "row", size: tabs.size, resizable: false, children: [
+    { ...tabs, size: undefined }, { id: "inapse-recap", type: "block", size: { weight: 1 }, content: { mod: "inapse-spaces", props: { view: "recap-bar" } } }] };
+  delete row.children[0].size;
+  const work = find(bar, "work");
+  work.children[work.children.indexOf(tabs)] = row;
+  const h = home("bar", { bar });
+  const before = read(h, "bar");
+  assert.match(run("install", h), /the top bar has the chat view's Chat\/Terminal switch/);
+  assert.deepEqual(find(JSON.parse(read(h, "bar")), "inapse-recap-row").children.map((c) => c.id), ["tabs", "inapse-recap", "chat-switch"]);
+  assert.match(run("install", h), /the top bar already has the Chat\/Terminal switch/);
   assert.match(run("uninstall", h), /the top bar as it was/);
   assert.equal(read(h, "bar"), before);
 });
@@ -143,7 +163,7 @@ test("layout: the switch's row comes out also without the record, and a tabs blo
 
 test("layout: no top bar block: the chat view keeps its own switch", () => {
   const h = home("main-mods", { "main-mods": personal() });
-  assert.match(run("install", h), /no top bar block \(id tabs\) in a column: the chat view keeps its own Chat\/Terminal switch/);
+  assert.match(run("install", h), /no top bar block \(id tabs\) in a column or a row: the chat view keeps its own Chat\/Terminal switch/);
   assert.ok(!read(h, "main-mods").includes("chat-switch"));
 });
 
