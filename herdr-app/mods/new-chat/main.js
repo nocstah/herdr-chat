@@ -297,8 +297,8 @@ async function setFirstFace(face) {
 
 /**
  * Claude Code's first face (first-face.js): every half second, this computer's terminals where Claude Code started
- * since the last look; with settings.json's claude.face "chat", each shows its chat view, made as the flip key makes
- * it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
+ * since the last look; unless settings.json's claude.face is "terminal", each shows its chat view, made as the flip key
+ * makes it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
  * keyboard follows into the view only from the terminal's own pane.
  */
 class FirstFace {
@@ -323,7 +323,8 @@ class FirstFace {
       for (const a of started(this.was, list, runs, now)) this.pending.set(a, now + 8000);
       this.was = new Map(list.map((t) => [t.address, runs(t)]));
       if (!this.pending.size) return;
-      let face = "terminal";
+      // A settings.json that isn't JSON: as one without the key (setFirstFace says what's wrong with it).
+      let face = faceOf(null);
       try {
         face = faceOf(await readSettings());
       } catch {}

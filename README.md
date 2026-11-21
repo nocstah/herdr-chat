@@ -145,13 +145,14 @@ another URL with GitHub's release JSON. `machines.<name>.direct: true` is for
 a machine that shares this computer's loopback (a second herdr-core here):
 its chats connect to the host's port as it is, with no ssh forward.
 
-`claude.face: "chat"` opens Claude Code in its chat view: a terminal of
-this computer where Claude Code starts (a new tab, or `claude` typed in a
-shell) shows its chat view at once, as ⌘⇧J (Ctrl+Shift+J) would flip it.
-Once per start: flipping back to the terminal stays until Claude Code starts
-there again, and terminals already running it when the app starts keep their
-face. The `new-chat.first-face:chat` and `new-chat.first-face:terminal`
-commands set it (a key, or another mod's settings).
+Claude Code opens in its chat view: a terminal of this computer where
+Claude Code starts (a new tab, or `claude` typed in a shell) shows its chat
+view at once, as ⌘⇧J (Ctrl+Shift+J) would flip it. `claude.face: "terminal"`
+keeps it in the terminal (`"chat"`, or no `face`, is the chat view). Once per
+start: flipping back to the terminal stays until Claude Code starts there
+again, and terminals already running it when the app starts keep their face.
+The `new-chat.first-face:chat` and `new-chat.first-face:terminal` commands
+set it (a key, or another mod's settings).
 
 ### Spaces on another machine
 
