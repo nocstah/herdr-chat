@@ -1,19 +1,25 @@
 // The face a terminal shows when Claude Code starts in it: settings.json's
-// `claude.face`, "chat" for its chat view (the terminal view, faces.js), else
-// the terminal as always. The commands block (main.js FirstFace) looks at the
-// terminals every half second and flips one where Claude Code just started,
-// as the flip key does: a new terminal, or `claude` typed in a shell. Once
-// per start: flipping back to the terminal stays until Claude Code starts
-// there again. Terminals that already ran it when the app started keep the
-// face the layout document kept, and another machine's are its own app's.
+// `claude.face`, "chat" for its chat view (the terminal view, faces.js) or
+// "terminal" for the terminal as it is; DEFAULT_FACE without one. The
+// commands block (main.js FirstFace) looks at the terminals every half second
+// and flips one where Claude Code just started, as the flip key does: a new
+// terminal, or `claude` typed in a shell. Once per start: flipping back to the
+// terminal stays until Claude Code starts there again. Terminals that already
+// ran it when the app started keep the face the layout document kept, and
+// another machine's are its own app's.
 // No imports, so the tests load it (tests/host/first-face.test.ts).
 
 /** How recent a start is to count: a terminal made, or its agent's first report, within this. */
 export const RECENT_MS = 60_000;
 
-/** @param {any} settings data/herdr-chat/settings.json @returns {"chat" | "terminal"} */
+/** The face without a `claude.face` (or with one that's neither): its chat view. Other mods read this line as it is
+ *  (OmaRelay's Settings window, to show the face a file without one gives): keep it one line. */
+export const DEFAULT_FACE = "chat";
+
+/** @param {any} settings data/herdr-chat/settings.json, null when it can't be read @returns {"chat" | "terminal"} */
 export function faceOf(settings) {
-  return settings?.claude?.face === "chat" ? "chat" : "terminal";
+  const face = settings?.claude?.face;
+  return face === "chat" || face === "terminal" ? face : DEFAULT_FACE;
 }
 
 /** settings.json with `claude.face` set, the rest as it was. @param {any} settings @param {"chat" | "terminal"} face */

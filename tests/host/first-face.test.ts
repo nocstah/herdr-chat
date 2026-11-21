@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error: a mod's plain JavaScript, with no declarations (it loads as is in the app)
-import { RECENT_MS, faceOf, started, withFace } from "../../herdr-app/mods/new-chat/first-face.js";
+import { DEFAULT_FACE, RECENT_MS, faceOf, started, withFace } from "../../herdr-app/mods/new-chat/first-face.js";
 
 const runs = (t: any) => t.claude === true;
 const NOW = 1_800_000_000_000;
@@ -36,11 +36,14 @@ test("started: without the core's times, only a change seen here counts", () => 
   assert.deepEqual(started(new Map([["t1", false]]), [{ address: "t1", claude: true }, { address: "t2", claude: true }], runs, NOW), ["t1"]);
 });
 
-test("faceOf and withFace: chat only when set so; the rest of settings.json kept", () => {
-  assert.equal(faceOf({}), "terminal");
-  assert.equal(faceOf(null), "terminal");
+test("faceOf and withFace: the chat view unless set to the terminal; the rest of settings.json kept", () => {
+  assert.equal(DEFAULT_FACE, "chat");
+  assert.equal(faceOf({}), "chat");
+  assert.equal(faceOf(null), "chat");
+  assert.equal(faceOf({ claude: { env: { A: "1" } } }), "chat");
   assert.equal(faceOf({ claude: { face: "chat" } }), "chat");
-  assert.equal(faceOf({ claude: { face: "Chat" } }), "terminal");
+  assert.equal(faceOf({ claude: { face: "terminal" } }), "terminal");
+  assert.equal(faceOf({ claude: { face: "Terminal" } }), "chat", "neither: the default");
   const s = { updates: { check: false }, claude: { env: { A: "1" } } };
   assert.deepEqual(withFace(s, "chat"), { updates: { check: false }, claude: { env: { A: "1" }, face: "chat" } });
   assert.deepEqual(s, { updates: { check: false }, claude: { env: { A: "1" } } }, "the read settings unchanged");
