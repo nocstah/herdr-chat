@@ -159,6 +159,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   private offset = 0;
   private awaitingHistory = false;
   private running = false;
+  private settling = false;
   private sent: { id: string; text: string; at: number }[] = [];
   private quitSaid = false;
   private unsureSaid = false;
@@ -271,8 +272,14 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   }
 
   private settle(): void {
-    if (!this.running) return;
-    this.tail();
+    if (!this.running || this.settling) return;
+    // What it wrote last; a turn end in it would settle again from tail().
+    this.settling = true;
+    try {
+      this.tail();
+    } finally {
+      this.settling = false;
+    }
     this.running = false;
     this.emit({ type: "run_settled", aborted: false });
   }
@@ -384,6 +391,8 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     }
     const { lines, next } = this.read(this.offset);
     this.offset = next;
+    // Whether these lines end a turn (not an end read before: settle reads too, and would come back here).
+    let ended = false;
     for (const l of lines) {
       if (!l.trim()) continue;
       let r: unknown;
@@ -392,11 +401,13 @@ export class CodexTerminalAdapter implements ProviderAdapter {
       } catch {
         continue;
       }
+      const before = this.follower.turn;
       for (const ev of this.follower.feed(r)) this.emit(this.matchEcho(ev));
+      if (this.follower.turn !== before) ended = this.follower.turn === "ended";
     }
     this.usageNow = this.follower.usage();
     // A turn that ended while the terminal never showed it working (a quick answer).
-    if (this.follower.turn === "ended" && this.running && this.status !== "working" && this.status !== "blocked") this.settle();
+    if (ended && this.running && this.status !== "working" && this.status !== "blocked") this.settle();
   }
 
   /** A user message this chat sent: the echo that confirms it; any other came from the terminal. */
@@ -580,7 +591,14 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     this.offset = this.read(0).next;
     const past = new RolloutFollower({ history: true, readImage: readImageFile });
     const out: NormalizedEvent[] = [];
-    for (const r of records) out.push(...past.feed(r));
+    // The model, effort and limits it had last are the chat's state, not its history: sent as they are now.
+    const now = new Map<string, NormalizedEvent>();
+    for (const r of records) for (const ev of past.feed(r)) {
+      if (ev.type === "model" || ev.type === "thinking") now.set(ev.type, ev);
+      else if (ev.type === "status") now.set(`status:${ev.key}`, ev);
+      else out.push(ev);
+    }
+    for (const ev of now.values()) this.emit(ev);
     // A turn still running stays open for the live follower: its items come as they finish.
     out.push(...past.mapper.turnCompleted(past.thread ?? "", { status: "completed" }).filter((e) => e.type === "assistant_end"));
     this.usageNow = past.usage();

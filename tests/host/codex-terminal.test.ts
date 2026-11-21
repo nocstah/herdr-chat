@@ -140,7 +140,10 @@ test("the view: the TUI's conversation as history, a send typed in, the run with
     const hist = await r.adapter.history();
     assert.deepEqual(hist.filter((e) => e.type === "user_message").map((e: any) => [e.text, e.source]), [["What does upload.ts do?", "composer"]]);
     assert.ok(hist.some((e) => e.type === "assistant_end" && (e as any).content.some((b: any) => b?.text === "It uploads a file.")));
-    assert.ok(hist.some((e) => e.type === "model" && (e as any).model.id === "gpt-5.5"));
+    // The model and effort are the chat's state: sent as events, not in the history the timeline loads.
+    assert.ok(!hist.some((e) => e.type === "model"));
+    assert.ok(r.events.some((e) => e.type === "model" && (e as any).model.id === "gpt-5.5"));
+    assert.ok(r.events.some((e) => e.type === "thinking" && (e as any).level === "medium"));
 
     // A send: typed in; its echo in the rollout confirms it; a command card; the run ends with the status.
     r.events.length = 0;
@@ -164,7 +167,9 @@ test("the view: the TUI's conversation as history, a send typed in, the run with
     r.write(A, [["event_msg", { type: "task_complete", turn_id: "t2" }]]);
     r.status("done");
     await until("run_settled", () => r.events.some((e) => e.type === "run_settled"));
+    await pause();
     const types = r.events.map((e) => e.type);
+    assert.equal(types.filter((t) => t === "run_settled").length, 1, "settled once");
     assert.ok(types.lastIndexOf("assistant_end") < types.indexOf("run_settled"), "the answer closes before the run settles");
 
     // A message typed in the terminal itself: the person's, from outside the chat.
