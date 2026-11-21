@@ -41,8 +41,9 @@ import { keepKeys } from "./keymap.js";
 import { Connection, hostSide, hostTerminal, readConfig, runsHost } from "./connection.js";
 import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
-import { lineOf, planProgress, row, samePlan } from "./cards.js";
+import { findMark, lineOf, planProgress, row, samePlan } from "./cards.js";
 import { fileLink } from "./paths.js";
+import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { branchChip, emptyState, footerControls, planStrip, queueChips, queueLabels, widgetTray } from "./chrome.js";
@@ -106,6 +107,8 @@ export default class HerdrChat extends View {
     this.hover = null; // the message under the pointer (its action row shows)
     this.copiedAt = new Map(); // copy button id → when (✓ for 1.5 s)
     this.groups = new Map(); // work group id → open (the person's choice)
+    /** @type {Find | null} find in the chat, while its bar is open */
+    this.find = null;
     this.groupAnims = new Map(); // work group id → {target, step, h} while it slides
     this.groupH = new Map(); // work group id → its cards' natural height
     this.codeViews = new Map();
@@ -1149,6 +1152,7 @@ export default class HerdrChat extends View {
       case "pageDown": this.timeline.page(-1); break;
       case "top": this.timeline.toTop(); break;
       case "latest": this.timeline.toBottom(); break;
+      case "find": return this.openFind(cx);
       case "focusComposer":
         if (this.picker) this.picker = null;
         this.composer.focus();
@@ -1653,6 +1657,94 @@ export default class HerdrChat extends View {
           if (sz) this.svgSizes.set(p, sz);
         } catch {}
       }
+      cx.notify();
+    });
+  }
+
+  // ---- find in the chat (find.js) ----------------------------------------------
+
+  /** @param {import("gpui-kit").Context} cx */
+  openFind(cx) {
+    if (!this.find) this.find = new Find((cx) => this.findQuery(cx));
+    this.find.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  /** @param {import("gpui-kit").Context} cx */
+  closeFind(cx) {
+    this.find = null;
+    this.composer.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  /** @param {string} a @param {import("gpui-kit").Context} cx */
+  findAction(a, cx) {
+    const f = this.find;
+    if (!f) return;
+    if (a === "herdrchat_find_close") return this.closeFind(cx);
+    if (f.step(a === "herdrchat_find_older" ? -1 : 1)) this.findGo(cx);
+    cx.notify();
+  }
+
+  // The text changed: ask the host (a moment after the last key), and show the latest match.
+  /** @param {import("gpui-kit").Context} cx */
+  findQuery(cx) {
+    const f = this.find;
+    if (!f) return;
+    const seq = ++f.seq;
+    const q = f.query;
+    f.busy = Boolean(q.trim());
+    if (!q.trim()) { f.set([], 0, false); this.debug.mark(); cx.notify(); return; }
+    cx.spawn(async (cx) => {
+      await cx.sleep(150);
+      if (this.find !== f || f.seq !== seq) return;
+      let r;
+      try {
+        r = await this.req("search", { query: q }, cx);
+      } catch {
+        r = searchLoaded(this.store.items, q); // a host from before `search`: what's loaded here
+      }
+      if (this.find !== f || f.seq !== seq) return;
+      f.set(r?.matches ?? [], r?.total ?? 0, Boolean(r?.capped));
+      f.busy = false;
+      this.findGo(cx);
+      this.debug.mark();
+      cx.notify();
+    });
+  }
+
+  // Bring the current match into view: older history paged in until it's here,
+  // the work group holding it opened, its row marked and scrolled to.
+  /** @param {import("gpui-kit").Context} cx */
+  findGo(cx) {
+    const f = this.find;
+    const m = f?.current;
+    if (!f || !m) return;
+    const seq = ++f.goSeq;
+    cx.spawn(async (cx) => {
+      while (!this.store.get(m.id) && this.store.hasOlder && this.store.items.length) {
+        f.busy = true;
+        cx.notify();
+        try {
+          const d = await this.req("history", { before: this.store.items[0].id, limit: 500 }, cx);
+          this.timeline.prepended();
+          this.store.prepend(d?.items ?? [], d?.hasOlder);
+        } catch (e) {
+          this.flash(`history: ${message(e)}`, cx);
+          break;
+        }
+        if (this.find !== f || f.goSeq !== seq) return;
+      }
+      f.busy = false;
+      /** @type {any[]} */
+      const rows = buildRows(this.store.items, this.store.state);
+      const r = rows.find((x) => x.id === m.id || (x.kind === "group" && x.items.some((/** @type {any} */ it) => it.id === m.id)));
+      f.rowId = r?.id ?? null;
+      if (r?.kind === "group" && !(this.groups.get(r.id) ?? defaultOpen(r))) this.groups.set(r.id, true);
+      if (r) this.timeline.reveal(r.id);
+      this.debug.mark();
       cx.notify();
     });
   }
@@ -2190,6 +2282,7 @@ export default class HerdrChat extends View {
         ...(r.footer ? { footer: r.footer } : {}), ...(r.kind === "item" ? { item: r.item.kind } : {}) })),
       activity: this.activity(), lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null,
+      find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
       statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null,
       update: { ...this.updater.dump(this.conn.welcome), healing: this.healing ?? null },
       widgetsOpen: this.prefs.widgetsOpen, themeSent: Boolean(this.themeSent), themeOk: this.themeOk ?? null,
@@ -2296,7 +2389,7 @@ export default class HerdrChat extends View {
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
-      setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null,
+      setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null, findItem: this.find?.current?.id ?? null,
       setSvgHover: (key, on, cx) => this.setSvgHover(key, on, cx), groupOpen: (id) => this.groups.get(id),
       groupAnim: (id) => this.groupAnims.get(id) ?? null, groupMeasured: (id, h, cx) => this.groupMeasured(id, h, cx),
       modelName: (m) => this.modelName(m), showCost: this.caps()?.cost !== false,
@@ -2390,11 +2483,16 @@ export default class HerdrChat extends View {
         .child(this.column(v_flex().gap(18).child(emptyState(this, t)).child(bottom)
           .when(notes.length > 0, (e) => e.child(v_flex().gap(2).children(notes.map((r) => row(r, c)))))))));
     }
-    const timeline = this.timeline.view(rows, (r) => this.column(row(r, c)), {
+    // Find's match: its row, or in a work group, its own step (cards.js, c.findItem).
+    const mark = this.find?.rowId?.startsWith("g-") ? null : this.find?.rowId ?? null;
+    const timeline = this.timeline.view(rows, (r) => this.column(r.id === mark ? findMark(row(r, c), t) : row(r, c)), {
       onNearTop: () => this.wantOlder(),
       thumb: alpha(t.muted, 0.35),
     });
     return this.hud(root
+      // Find's bar: a strip above the timeline (never over a message), at the column's right.
+      .when(Boolean(this.find), (e) => e.child(div().flex_none().pt(8).pb(4)
+        .child(this.column(h_flex().justify_end().child(this.find?.view(t, (a, cx) => this.findAction(a, cx)))))))
       .child(div().relative().flex_1().min_h(0).flex().flex_col()
         .child(timeline)
         // Scrolled up: a band of background at the bottom edge, so ↓ Latest sits on it, never on text.

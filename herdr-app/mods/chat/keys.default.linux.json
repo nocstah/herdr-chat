@@ -13,6 +13,7 @@
   "pageDown": "pagedown",
   "top": "ctrl-home",
   "latest": "ctrl-end",
+  "find": "ctrl-f",
   "focusComposer": "ctrl-l",
   "newChat": "ctrl-alt-n"
 }

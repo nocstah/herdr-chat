@@ -260,6 +260,7 @@ type ToolDetail =
 | `detach_image` | `path` | `{}` | the chip's ✕: removes an attachment, unless a held or queued message lists it. Any path outside the chat's attachments is left alone |
 | `sweep_attachments` | `open: string[]` | `{removed: string[]}` | `open`: the chats with a pane in the app's layout. Removes the attachments of other chats that have no pane and no live host, once two calls in a row agree (see "Attachments") |
 | `history` | `before` (item id), `limit?` | `{items, hasOlder}` | older items |
+| `search` | `query`, `limit?` (2000) | `{matches: [{id, n}], total, capped}` | find in the chat: the chat's own items (not a subagent's) whose shown text (a message, a notice, a tool's title) holds `query` in any case, oldest first, `n` times each; `capped` when it stopped at `limit` |
 | `tool_output` | `item` | `{text}` | full output, up to 1 MiB |
 | `handoff` | | `{sessionFile}` | stops Pi (aborts first if working), releases the lock, phase → `handoff` |
 | `resume` | | `{}` | after a handoff, or to restart Pi: `--session <sessionFile>` (re-reads auth and settings) |

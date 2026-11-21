@@ -49,6 +49,11 @@ export function bindComposerKeys(cx) {
     b.push({ keystroke: "down", action: "herdrchat_down", context: `${ctx} > Input` });
   }
   b.push({ keystroke: "tab", action: "herdrchat_tab", context: "HerdrChatMenu" });
+  // Find's field (find.js): Enter and ↑ the match before, Shift+Enter and ↓ the one after, Esc closes.
+  for (const [k, a] of [["enter", "older"], ["up", "older"], ["shift-enter", "newer"], ["down", "newer"], ["escape", "close"]]) {
+    b.push({ keystroke: k, action: `herdrchat_find_${a}`, context: "HerdrChatFind > Input" });
+  }
+  b.push({ keystroke: "escape", action: "herdrchat_find_close", context: "HerdrChatFind" });
   // The dialog card: Enter submits an input; Esc cancels (an editor keeps Enter).
   b.push({ keystroke: "enter", action: "herdrchat_dialog_enter", context: "HerdrChatDialog > Input" });
   b.push({ keystroke: "escape", action: "herdrchat_dialog_escape", context: "HerdrChatDialog" });

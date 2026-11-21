@@ -30,6 +30,7 @@ export const SHORTCUTS = {
   pageDown: "Scroll the conversation down a page",
   top: "Scroll to the top of the conversation (older messages load as it gets there)",
   latest: "Scroll to the latest message",
+  find: "Find in the chat (the whole conversation, older messages too)",
   focusComposer: "Focus the composer",
   newChat: "New chat in this folder, same agent",
 };
@@ -38,7 +39,7 @@ export const actionName = (a) => `herdrchat_k_${a}`;
 
 // The inputs inside the chat (composer.js, menus.js, dialogs.js): a chord
 // must be bound "<ctx> > Input" too, or the input's own keys win.
-const INPUTS = ["HerdrChatMenu", "HerdrChatEmpty", "HerdrChatComposer", "HerdrChatAsk", "HerdrChatQuestions", "HerdrChatDialog", "HerdrChatEditor"];
+const INPUTS = ["HerdrChatMenu", "HerdrChatEmpty", "HerdrChatComposer", "HerdrChatAsk", "HerdrChatQuestions", "HerdrChatDialog", "HerdrChatEditor", "HerdrChatFind"];
 // The cycles (Shift+Tab) work only in the composer, and not while a menu is open.
 const COMPOSER = ["HerdrChatEmpty > Input", "HerdrChatComposer > Input", "HerdrChatAsk > Input", "HerdrChatQuestions > Input"];
 // Sending is the composer's with text in it (or images): in a menu Enter picks,
@@ -46,7 +47,7 @@ const COMPOSER = ["HerdrChatEmpty > Input", "HerdrChatComposer > Input", "HerdrC
 const SENDING = ["HerdrChatEmpty > Input", "HerdrChatComposer > Input"];
 // Scrolling works from the composer too (where you are while reading back), but
 // not in a menu, picker or dialog: their lists and fields keep those keys.
-const READING = ["HerdrChat", ...COMPOSER];
+const READING = ["HerdrChat", ...COMPOSER, "HerdrChatFind > Input"];
 const ONLY = { cycleMode: COMPOSER, cycleEffort: COMPOSER, steer: SENDING, followUp: SENDING, pageUp: READING, pageDown: READING, top: READING };
 // The composer can't send without these: used when keys.default.json can't be read.
 const FALLBACK = { steer: "enter", followUp: "alt-enter" };

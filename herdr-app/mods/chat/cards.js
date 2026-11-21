@@ -347,6 +347,14 @@ function toolBody(it, d, c, flat = false) {
   return box.children(parts);
 }
 
+// Find's match (main.js findGo, `c.findItem` inside a group): its row on a tint,
+// a little wider than the row and behind it, so the row keeps its clicks and hover.
+/** @param {any} el @param {any} t */
+export function findMark(el, t) {
+  return div().relative().child(div().absolute().top(-4).bottom(-4).left(-8).right(-8).rounded(8).bg(alpha(t.accent, 0.1)))
+    .child(el);
+}
+
 // A work group: one summary row ("· 1 failed" in red when a step failed); open,
 // its steps as rows under it. The running group shows its live step; a finished
 // one is closed until opened.
@@ -370,8 +378,11 @@ function group(r, c) {
   const shownMembers = anim?.target === "close" ? r.items : members;
   let body = shownMembers.length
     ? v_flex().id(`grp-cards-${r.id}`).flex_none().pl(14).pt(2).on_size_change((sz, cx) => c.groupMeasured(r.id, sz.height, cx))
-      .children(shownMembers.map((m) => (m.kind === "thinking" ? thinking(m, c)
-        : m.kind === "notice" ? div().h(28).px(4).flex().items_center().child(notice(m, c)) : tool(m, c, { flat: true }))))
+      .children(shownMembers.map((m) => {
+        const el = m.kind === "thinking" ? thinking(m, c)
+          : m.kind === "notice" ? div().h(28).px(4).flex().items_center().child(notice(m, c)) : tool(m, c, { flat: true });
+        return m.id === c.findItem ? findMark(el, t) : el;
+      }))
     : null;
   if (body && anim) {
     const h = anim.step === 0 ? (anim.target === "open" ? 0 : anim.h ?? 0) : anim.target === "open" ? anim.h ?? 0 : 0;

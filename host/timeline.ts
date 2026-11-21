@@ -86,6 +86,15 @@ export function toWire(item: Item): WireItem {
   return it;
 }
 
+/** What find-in-chat looks through in an item (Timeline.search). */
+function searchText(it: Item): string {
+  switch (it.kind) {
+    case "user": case "assistant": case "notice": return it.text ?? "";
+    case "tool": return it.title ?? "";
+    default: return "";
+  }
+}
+
 let idCounter = 0;
 export function newId(prefix = "i"): string {
   return `${prefix}${(++idCounter).toString(36)}`;
@@ -609,6 +618,31 @@ export class Timeline {
     if (idx <= 0) return { items: [], hasOlder: false };
     const start = Math.max(0, idx - limit);
     return { items: this.items.slice(start, idx), hasOlder: start > 0 };
+  }
+
+  /**
+   * Find in the chat: the items whose shown text holds `query` (any case), oldest
+   * first, with how many times. The chat's own rows only (not a subagent's steps):
+   * your messages, the answers, notices, and a tool call's title.
+   */
+  search(query: string, limit = 2000): { matches: { id: string; n: number }[]; total: number; capped: boolean } {
+    const q = query.trim().toLowerCase();
+    const matches: { id: string; n: number }[] = [];
+    let total = 0;
+    if (!q) return { matches, total, capped: false };
+    for (const it of this.items) {
+      if (it.parent) continue;
+      const text = searchText(it);
+      if (!text) continue;
+      const hay = text.toLowerCase();
+      let n = 0;
+      for (let at = hay.indexOf(q); at >= 0; at = hay.indexOf(q, at + q.length)) n++;
+      if (!n) continue;
+      total += n;
+      matches.push({ id: it.id, n });
+      if (matches.length >= limit) return { matches, total, capped: true };
+    }
+    return { matches, total, capped: false };
   }
 
   lastAssistantText(): string | null {
