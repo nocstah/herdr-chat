@@ -38,6 +38,59 @@ export function textOf(content: unknown): string {
   return content.filter((b: Rec) => b?.type === "text" && typeof b.text === "string").map((b: Rec) => b.text).join("\n");
 }
 
+/** A transcript's text or thinking block as the chat shows it, or null (another block, or nothing to show: redacted
+ * thinking). Words Claude Code writes between tool calls as a thinking block (isNarration) are the agent's text. */
+export function shownBlock(b: Rec): Extract<AssistantBlock, { type: "text" | "thinking" }> | null {
+  if (b?.type === "text") return b.text ? { type: "text", text: String(b.text) } : null;
+  if (b?.type !== "thinking" || !b.thinking) return null;
+  return { type: isNarration(b) ? "text" : "thinking", text: String(b.thinking) };
+}
+
+/** Claude Code's words between tool calls, which it writes as a thinking block when its thinking display is
+ * "updates" (Code Mode; the record says `thinkingDisplay: "updates"`): what the person reads in the terminal as the
+ * agent's own prose, not its reasoning. Its signature (base64 protobuf) names the block's kind at field 2 → field 1
+ * → field 8, "narration" (Claude Code 2.1.330 tells them apart the same way); a signature it can't read is
+ * ordinary thinking. */
+export function isNarration(b: Rec): boolean {
+  if (b?.type !== "thinking" || typeof b.thinking !== "string" || !b.thinking.trim() || typeof b.signature !== "string" || !b.signature) return false;
+  try {
+    const kind = protoField(protoField(protoField(Buffer.from(b.signature, "base64"), 2), 1), 8);
+    return kind?.toString("latin1") === "narration";
+  } catch {
+    return false;
+  }
+}
+
+/** The first length-delimited field `want` of a protobuf message, or undefined. Throws on a cut-off varint. */
+function protoField(buf: Buffer | undefined, want: number): Buffer | undefined {
+  if (!buf) return undefined;
+  const varint = (i: number): [number, number] => {
+    let x = 0, scale = 1;
+    for (;;) {
+      const c = buf[i++];
+      if (c === undefined) throw new Error("cut-off varint");
+      x += (c & 0x7f) * scale;
+      if (!(c & 0x80)) return [x, i];
+      scale *= 128;
+    }
+  };
+  let i = 0;
+  while (i < buf.length) {
+    const [tag, j] = varint(i);
+    const field = Math.floor(tag / 8), wire = tag % 8;
+    i = j;
+    if (wire === 0) i = varint(i)[1];
+    else if (wire === 1) i += 8;
+    else if (wire === 5) i += 4;
+    else if (wire === 2) {
+      const [len, k] = varint(i);
+      if (field === want) return buf.subarray(k, k + len);
+      i = k + len;
+    } else return undefined;
+  }
+  return undefined;
+}
+
 /**
  * One `tool_result` block → `tool_ended`. `tur` is the record's structured
  * tool output (`tool_use_result` live, `toolUseResult` on disk); `declined`
@@ -306,9 +359,7 @@ export class ClaudeMapper {
     if (parent) {
       // A subagent's message (not streamed): its own item, nested under the Agent card.
       const out: NormalizedEvent[] = [];
-      const content: (AssistantBlock | null)[] = blocks.map((b) =>
-        b.type === "text" && b.text ? { type: "text", text: b.text } : b.type === "thinking" && b.thinking ? { type: "thinking", text: b.thinking } : null,
-      );
+      const content: (AssistantBlock | null)[] = blocks.map(shownBlock);
       if (content.some(Boolean)) out.push({ type: "assistant_end", content, parent });
       for (const b of blocks) if (b.type === "tool_use") out.push(...this.toolCall(undefined, b, parent));
       return out;
