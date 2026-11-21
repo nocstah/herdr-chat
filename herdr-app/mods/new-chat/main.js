@@ -18,6 +18,9 @@
 //   `new-chat.continue`: the same on the focused terminal (the "continue" key);
 // - `new-chat.flip`: a Claude Code terminal ⇄ its chat view, in place (the "flip" key,
 //   Ctrl+Shift+J as in Ovis; faces.js); `new-chat.flip:<terminal>`: that terminal's;
+// - `new-chat.first-face:chat|terminal`: the face a terminal shows when Claude Code starts
+//   in it (settings.json `claude.face`; first-face.js): with chat, its chat view, flipped
+//   as the flip key does (FirstFace);
 // - `new-chat.update-check`: the update questions now, the release lookup too (update.js;
 //   they also run a few seconds after this block starts, an install reloads it, and
 //   once an hour, with the lookup at most once a day).
@@ -30,6 +33,7 @@ import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
 import { appHas, bare, flip, viewProps, viewTerminal } from "./faces.js";
+import { faceOf, started, withFace } from "./first-face.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -269,8 +273,88 @@ async function flipFace(addr, cx) {
   run("pane.focus", { pane: r.pane });
 }
 
+const SETTINGS = () => `${appHome()}/data/herdr-chat/settings.json`;
+
+/** settings.json, {} when there's none; throws when it isn't JSON (a person's file: never written over then). */
+async function readSettings() {
+  const text = await readTextFile(SETTINGS());
+  if (text == null || !text.trim()) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${SETTINGS()} isn't valid JSON: fix it, then try again.`);
+  }
+}
+
+/** `new-chat.first-face:<face>`: settings.json's claude.face, the rest of the file as it was. */
+async function setFirstFace(face) {
+  if (face !== "chat" && face !== "terminal") throw new Error(`first-face takes chat or terminal, not "${face}".`);
+  const settings = await readSettings();
+  if (settings?.claude?.face === face) return;
+  await fs.mkdir(`${appHome()}/data/herdr-chat`, { recursive: true });
+  await fs.writeFile(SETTINGS(), JSON.stringify(withFace(settings, face), null, 2) + "\n");
+}
+
+/**
+ * Claude Code's first face (first-face.js): every half second, this computer's terminals where Claude Code started
+ * since the last look; with settings.json's claude.face "chat", each shows its chat view, made as the flip key makes
+ * it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
+ * keyboard follows into the view only from the terminal's own pane.
+ */
+class FirstFace {
+  constructor(cx) {
+    /** @type {Map<string, boolean> | null} address → ran Claude Code at the last look */
+    this.was = null;
+    /** @type {Map<string, number>} address → until when to try its flip */
+    this.pending = new Map();
+    this.busy = false;
+    // The first look after the app has listed its terminals: what runs then keeps its face.
+    cx.timer.after(2000, () => cx.timer.every(500, () => void this.look(cx)));
+  }
+
+  async look(cx) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      const list = terminals().filter((t) => t?.address && !machineOf(t.address));
+      // Not one of herdr-chat's own: a chat's host, or the TUI its /tui opened, which was asked for as a terminal.
+      const runs = (t) => t.state === "live" && agentOf(t) === "claude" && !Object.keys(t.labels ?? {}).some((k) => k.startsWith("herdr-chat."));
+      const now = Date.now();
+      for (const a of started(this.was, list, runs, now)) this.pending.set(a, now + 8000);
+      this.was = new Map(list.map((t) => [t.address, runs(t)]));
+      if (!this.pending.size) return;
+      let face = "terminal";
+      try {
+        face = faceOf(await readSettings());
+      } catch {}
+      for (const [address, until] of [...this.pending]) {
+        const t = list.find((x) => x.address === address);
+        if (face !== "chat" || !t || !runs(t)) {
+          this.pending.delete(address);
+          continue;
+        }
+        const mine = focused()?.terminal === address;
+        try {
+          const r = await flip(cx, address, "chat", viewProps(bare(address), t.foreground?.cwd ?? t.cwd ?? null));
+          this.pending.delete(address);
+          if (mine && (!r.created || (await appHas(cx, r.pane))) && focused()?.terminal === address) run("pane.focus", { pane: r.pane });
+        } catch (e) {
+          // A tab just made: its pane reaches the document after this look. Else, or out of time: the terminal stays.
+          if (!/has no pane/.test(String(e?.message)) || Date.now() > until) {
+            this.pending.delete(address);
+            if (!/has no pane/.test(String(e?.message))) notify({ title: "Chat view", body: `Claude Code started in ${address}; its chat view didn't open: ${e?.message ?? e}`, level: "error" });
+          }
+        }
+      }
+    } finally {
+      this.busy = false;
+    }
+  }
+}
+
 class Commands {
   constructor(cx) {
+    this.firstFace = new FirstFace(cx);
     // After an install (which reloads this mod) or at start: an update that ran, chats on older
     // code (asked first), else a newer release.
     const updates = async (now = false) => {
@@ -295,8 +379,9 @@ class Commands {
           else if (c === "continue" || c.startsWith("continue:")) await continueAsChat(c.slice(9), cx);
           else if (c === "flip" || c.startsWith("flip:")) await flipFace(c.slice(5), cx);
           else if (c === "update-check") await updates(true);
+          else if (c.startsWith("first-face:")) await setFirstFace(c.slice(11));
         } catch (e) {
-          notify({ title: c.startsWith("continue") ? "Continue as chat" : c.startsWith("flip") ? "Chat view" : "New chat", body: String(e?.message ?? e), level: "error" });
+          notify({ title: c.startsWith("continue") ? "Continue as chat" : c.startsWith("flip") || c.startsWith("first-face") ? "Chat view" : "New chat", body: String(e?.message ?? e), level: "error" });
         }
       }
     });
