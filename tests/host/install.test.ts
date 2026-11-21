@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ROOT } from "./harness.ts";
@@ -76,6 +76,56 @@ test("layout: a layout with no floating list gets one for new-chat's copy, and l
   assert.equal(JSON.parse(read(h, "main-mods")).floating.length, 1);
   run("uninstall", h);
   assert.equal(read(h, "main-mods"), before);
+});
+
+// A personal layout with a top bar, as Herdr's `flat` (a work column: the tabs block, then the panes), its tabs block OmaRelay's copy.
+const withBar = () => {
+  const l: any = personal();
+  l.children[1] = { id: "work", type: "column", resizable: false, children: [
+    { id: "tabs", type: "block", content: { mod: "inapse-tabs", props: { replaces: { mod: "tabs" } } }, size: { px: 42 }, window_drag: true },
+    l.children[1],
+  ] };
+  return l;
+};
+
+test("layout: the top bar gets the Chat | Terminal switch in a row with the tabs block; a second install changes nothing; uninstall gives back the same bytes", () => {
+  const h = home("bar", { bar: withBar() });
+  const before = read(h, "bar");
+  assert.match(run("install", h), /the top bar has the chat view's Chat \| Terminal switch/);
+  const l = JSON.parse(read(h, "bar"));
+  const row = find(l, "chat-switch-row");
+  assert.equal(find(l, "work").children[0], row, "the row takes the tabs block's place");
+  assert.deepEqual(row, { id: "chat-switch-row", type: "row", size: { px: 42 }, resizable: false, children: [
+    { id: "tabs", type: "block", content: { mod: "inapse-tabs", props: { replaces: { mod: "tabs" } } }, window_drag: true },
+    { id: "chat-switch", type: "block", size: { px: 236 }, window_drag: true, content: { mod: "chat-switch" } },
+  ] });
+  const once = read(h, "bar");
+  assert.match(run("install", h), /the top bar already has the Chat \| Terminal switch/);
+  assert.equal(read(h, "bar"), once);
+  assert.match(run("uninstall", h), /the top bar as it was/);
+  assert.equal(read(h, "bar"), before);
+});
+
+test("layout: the switch's row comes out also without the record, and a tabs block another installer changed meanwhile keeps that change", () => {
+  const h = home("bar", { bar: withBar() });
+  const before = JSON.parse(read(h, "bar"));
+  run("install", h);
+  rmSync(join(h, "data", "herdr-chat", "install-layout.json"));
+  const l = JSON.parse(read(h, "bar"));
+  find(l, "tabs").content = { mod: "tabs" }; // e.g. OmaRelay's uninstall, its copy gone
+  writeFileSync(join(h, "layouts", "bar.json"), JSON.stringify(l, null, 2) + "\n");
+  run("uninstall", h);
+  find(before, "tabs").content = { mod: "tabs" };
+  before.floating = before.floating.filter((f: any) => f.content.mod !== "new-chat"); // the record had the rest
+  const after = JSON.parse(read(h, "bar"));
+  after.floating = after.floating?.filter((f: any) => f.content.mod !== "new-chat");
+  assert.equal(JSON.stringify(after), JSON.stringify(before), "the tabs block back in its place, its keys in their order");
+});
+
+test("layout: no top bar block: the chat view keeps its own switch", () => {
+  const h = home("main-mods", { "main-mods": personal() });
+  assert.match(run("install", h), /no top bar block \(id tabs\) in a column: the chat view keeps its own Chat \| Terminal switch/);
+  assert.ok(!read(h, "main-mods").includes("chat-switch"));
 });
 
 test("layout: another mod in the agents block (found by its id) and another terminal_menu stay theirs, through install and uninstall", () => {

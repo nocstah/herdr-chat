@@ -38,7 +38,8 @@
 #     a clone): its agents block shows chat-agents (a chat sub-agent's click
 #     opens the chat), its root terminal_menu is chat-menu (Open as chat,
 #     Continue as chat), its floating list gets an empty new-chat block (the
-#     new-chat.* commands); recorded in data/herdr-chat/install-layout.json.
+#     new-chat.* commands), its top bar the Chat | Terminal switch (chat-switch,
+#     in a row with the tabs block); recorded in data/herdr-chat/install-layout.json.
 #     A slot another plugin holds is left to it, with what that costs
 #   - the keys into keys.json's global section (install/keys.ts), the file
 #     rewritten only if unchanged since it was read; recorded in
@@ -198,6 +199,7 @@ if [ "$LAYOUT" = 1 ]; then
   args=()
   has_mod chat-agents || args+=(--no-agents)
   has_mod chat-menu || args+=(--no-menu)
+  has_mod chat-switch || args+=(--no-switch)
   if out=$("$NODE" "$ROOT/install/layout.$EXT" install "$APP_HOME" --app "$APP" "${args[@]+"${args[@]}"}" "${TAKE[@]+"${TAKE[@]}"}"); then
     printf '%s\n' "$out"
     case "$out" in *"new-chat's keys"*) DIRECT=1 ;; esac

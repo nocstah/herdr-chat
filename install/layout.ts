@@ -16,8 +16,12 @@
 // screen at no size (as herdr-nvim's controller): `<mod>.<command>` reaches
 // only shown copies, so it is what takes new-chat.open|pi|claude|codex (the
 // keys) and new-chat.continue:<terminal> (chat-menu's Continue as chat).
+// And the top bar gets the Chat | Terminal switch (mods/chat-switch) at its
+// right end: the tabs block (id `tabs`, Herdr's tabs or a copy such as
+// OmaRelay's) goes into a row with it, the row taking the block's size;
+// uninstall puts the block back as it was (its keys' order in the record).
 //
-//   node install/layout.ts install <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands]
+//   node install/layout.ts install <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands] [--no-switch]
 //                                  [--take-agents-slot] [--take-menu] [--record <file>]
 //   node install/layout.ts uninstall <app home> [--record <file>]
 import { execFileSync } from "node:child_process";
@@ -29,6 +33,12 @@ export const AGENTS_MOD = "chat-agents";
 export const MENU_MOD = "chat-menu";
 export const COMMANDS = { id: "new-chat-commands", edge: "bottom", align: "start", content: { mod: "new-chat", props: { role: "commands" } } };
 const isCommands = (f: Json) => f?.id === COMMANDS.id && f?.content?.mod === "new-chat" && f?.content?.props?.role === "commands";
+export const SWITCH_MOD = "chat-switch";
+export const SWITCH_ROW = "chat-switch-row";
+const SWITCH = { id: "chat-switch", type: "block", size: { px: 236 }, window_drag: true, content: { mod: SWITCH_MOD } };
+const isSwitch = (n: Json) => n?.content?.mod === SWITCH_MOD;
+/** A block's own size, which the row takes while the block is in it. */
+const SIZING = ["size", "min", "max"];
 
 export type Patched = {
   agents: "changed" | "already" | "noslot" | "taken" | "skipped";
@@ -37,20 +47,47 @@ export type Patched = {
   agentsHolder?: string;
   menuHolder?: string;
   commands: "changed" | "already" | "skipped";
+  switch: "changed" | "already" | "noslot" | "skipped";
   menuWas?: string | null;
+  /** The tabs block's keys in their order, to put it back exactly. */
+  tabsKeys?: string[];
   /** The layout had no `floating` list before (uninstall then takes the empty list out). */
   floatingAdded?: boolean;
 };
 
-function walk(n: Json, fn: (n: Json) => void): void {
+function walk(n: Json, fn: (n: Json, parent: Json) => void, parent: Json = null): void {
   if (!n || typeof n !== "object") return;
-  fn(n);
-  for (const c of n.children ?? []) walk(c, fn);
+  fn(n, parent);
+  for (const c of n.children ?? []) walk(c, fn, n);
+}
+
+/** The top bar's block and its column: the block with id `tabs` that shows a mod, else Herdr's `tabs` mod's block. */
+function tabsSlot(layout: Json): { node: Json; parent: Json } | null {
+  let byId: { node: Json; parent: Json } | null = null, byMod: { node: Json; parent: Json } | null = null;
+  walk(layout, (n, parent) => {
+    if (n.type !== "block" || typeof n.content?.mod !== "string") return;
+    if (n.id === "tabs" && !byId) byId = { node: n, parent };
+    else if (n.content.mod === "tabs" && !byMod) byMod = { node: n, parent };
+  });
+  return byId ?? byMod;
+}
+
+/** The tabs block as it was before its row: its own keys, the row's size, in `keys`' order (else size after its content). */
+function unwrapped(block: Json, row: Json, keys?: string[]): Json {
+  const all: Json = {};
+  for (const [k, v] of Object.entries(block)) {
+    all[k] = v;
+    if (!keys && (k === "content" || k === "children")) for (const s of SIZING) if (s in row) all[s] = row[s];
+  }
+  if (keys) for (const s of SIZING) if (s in row) all[s] = row[s];
+  if (!keys) for (const s of SIZING) if (s in row && !(s in all)) all[s] = row[s];
+  const order = keys ? [...keys.filter((k) => k in all), ...Object.keys(all).filter((k) => !keys.includes(k))] : Object.keys(all);
+  return Object.fromEntries(order.map((k) => [k, all[k]]));
 }
 
 /** Pure: point the agents slot and terminal_menu at ours; another plugin's only with `take`. `menuWas`: terminal_menu before (null: unset). */
-export function patchLayout(layout: Json, want: { agents: boolean; menu: boolean; commands?: boolean; take?: { agents?: boolean; menu?: boolean } }): Patched {
-  const out: Patched = { agents: "skipped", menu: "skipped", commands: "skipped" };
+export function patchLayout(layout: Json, want: { agents: boolean; menu: boolean; commands?: boolean; switch?: boolean; take?: { agents?: boolean; menu?: boolean } }): Patched {
+  const out: Patched = { agents: "skipped", menu: "skipped", commands: "skipped", switch: "skipped" };
   if (want.agents) {
     // The agents slot: Herdr's list, else a block another plugin put in its place
     // (what it replaced in props.replaces, gitview's convention, or the shipped id).
@@ -94,12 +131,39 @@ export function patchLayout(layout: Json, want: { agents: boolean; menu: boolean
       out.commands = "changed";
     }
   }
+  if (want.switch) {
+    let ours = false;
+    walk(layout, (n) => { if (isSwitch(n)) ours = true; });
+    const slot = ours ? null : tabsSlot(layout);
+    if (ours) out.switch = "already";
+    // A top bar across a column: a row of the bar and the switch takes its place there.
+    else if (!slot || slot.parent?.type !== "column" || !Array.isArray(slot.parent.children)) out.switch = "noslot";
+    else {
+      const tabs = slot.node;
+      out.tabsKeys = Object.keys(tabs);
+      const row: Json = { id: SWITCH_ROW, type: "row" };
+      for (const k of SIZING) if (k in tabs) { row[k] = tabs[k]; delete tabs[k]; }
+      row.resizable = false;
+      row.children = [tabs, structuredClone(SWITCH)];
+      slot.parent.children[slot.parent.children.indexOf(tabs)] = row;
+      out.switch = "changed";
+    }
+  }
   return out;
 }
 
-/** Pure: undo patchLayout. `menuWas`, `floatingAdded`: from the record (unknown: unset, and an emptied list goes). Returns whether it changed anything. */
-export function restoreLayout(layout: Json, menuWas?: string | null, floatingAdded?: boolean): boolean {
+/** Pure: undo patchLayout. `menuWas`, `floatingAdded`, `tabsKeys`: from the record (unknown: unset, an emptied list goes, the tabs block's keys as they come). Returns whether it changed anything. */
+export function restoreLayout(layout: Json, menuWas?: string | null, floatingAdded?: boolean, tabsKeys?: string[]): boolean {
   let changed = false;
+  // The switch out of its row; the row, with only the tabs block left, gives the block back its place and size.
+  const rows: [Json, Json][] = [];
+  walk(layout, (n, parent) => {
+    if (!Array.isArray(n.children) || !n.children.some(isSwitch)) return;
+    n.children = n.children.filter((c: Json) => !isSwitch(c));
+    changed = true;
+    if (n.id === SWITCH_ROW && n.children.length === 1 && parent) rows.push([n, parent]);
+  });
+  for (const [row, parent] of rows) parent.children[parent.children.indexOf(row)] = unwrapped(row.children[0], row, tabsKeys);
   walk(layout, (n) => {
     const c = n.content;
     if (c?.mod === AGENTS_MOD && c.props?.replaces) {
@@ -172,10 +236,10 @@ function editJson(path: string, edit: (v: Json) => boolean): boolean {
   throw new Error(`${path} keeps changing; run the install again`);
 }
 
-type InstallRecord = { layouts: { [name: string]: { menuWas?: string | null; floatingAdded?: boolean } } };
+type InstallRecord = { layouts: { [name: string]: { menuWas?: string | null; floatingAdded?: boolean; tabsKeys?: string[] } } };
 const readRecord = (f: string): InstallRecord => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return { layouts: {} }; } };
 
-export function install(home: string, o: { app: string | null; agents: boolean; menu: boolean; commands?: boolean; take?: { agents?: boolean; menu?: boolean }; record: string }): string[] {
+export function install(home: string, o: { app: string | null; agents: boolean; menu: boolean; commands?: boolean; switch?: boolean; take?: { agents?: boolean; menu?: boolean }; record: string }): string[] {
   const say: string[] = [];
   const shipped = shippedLayouts(home);
   const shown = shownLayout(home, o.app);
@@ -196,18 +260,19 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
     name = target.edit;
     if (name !== shown) say.push(`layout: ${shown} is Herdr's own: editing your copy ${name} (switch to it to see sub-agent chats)`);
   }
-  let r: Patched = { agents: "skipped", menu: "skipped", commands: "skipped" };
+  let r: Patched = { agents: "skipped", menu: "skipped", commands: "skipped", switch: "skipped" };
   editJson(join(home, "layouts", `${name}.json`), (l) => {
-    r = patchLayout(l, { agents: o.agents, menu: o.menu, commands: o.commands ?? true, take: o.take });
-    return r.agents === "changed" || r.menu === "changed" || r.commands === "changed";
+    r = patchLayout(l, { agents: o.agents, menu: o.menu, commands: o.commands ?? true, switch: o.switch ?? true, take: o.take });
+    return r.agents === "changed" || r.menu === "changed" || r.commands === "changed" || r.switch === "changed";
   });
-  if (r.menu === "changed" || r.commands === "changed") {
+  if (r.menu === "changed" || r.commands === "changed" || r.switch === "changed") {
     const rec = readRecord(o.record);
     const was = rec.layouts[name] ?? {};
     rec.layouts[name] = {
       ...was,
       ...(r.menu === "changed" ? { menuWas: r.menuWas ?? null } : {}),
       ...(r.commands === "changed" ? { floatingAdded: r.floatingAdded ?? false } : {}),
+      ...(r.switch === "changed" ? { tabsKeys: r.tabsKeys } : {}),
     };
     writeFileSync(o.record, JSON.stringify(rec, null, 2) + "\n");
   }
@@ -226,7 +291,13 @@ export function install(home: string, o: { app: string | null; agents: boolean; 
     skipped: "right-click menu left as it is",
   }[r.menu];
   const commands = { changed: "new-chat's keys work (a new-chat copy in its floating list)", already: "new-chat's keys already work", skipped: "" }[r.commands];
-  say.push(`layout ${name}: ${agents}; ${menu}${commands ? `; ${commands}` : ""}`);
+  const sw = {
+    changed: "the top bar has the chat view's Chat | Terminal switch",
+    already: "the top bar already has the Chat | Terminal switch",
+    noslot: "no top bar block (id tabs) in a column: the chat view keeps its own Chat | Terminal switch",
+    skipped: "",
+  }[r.switch];
+  say.push(`layout ${name}: ${agents}; ${menu}${commands ? `; ${commands}` : ""}${sw ? `; ${sw}` : ""}`);
   if (r.agents === "taken") say.push(`layout ${name}: the agents block shows ${r.agentsHolder} (another plugin's): left to it, so a chat sub-agent's row opens Herdr's peek, not the chat. To take it: ./install.sh --take-agents-slot (uninstall gives it back)`);
   if (r.menu === "taken") say.push(`layout ${name}: terminal_menu is ${r.menuHolder} (another plugin's): left to it, so right-click has no Open as chat or Continue as chat. To take it: ./install.sh --take-menu (uninstall gives it back)`);
   return say;
@@ -238,7 +309,7 @@ export function uninstall(home: string, recordFile: string): string[] {
   let shipped: Set<string>;
   try { shipped = shippedLayouts(home); } catch { return ["layout: no installed.json, can't tell Herdr's layouts from yours: left as they are"]; }
   for (const [name] of personalLayouts(home, shipped)) {
-    if (editJson(join(home, "layouts", `${name}.json`), (l) => restoreLayout(l, rec.layouts[name]?.menuWas, rec.layouts[name]?.floatingAdded))) say.push(`layout ${name}: the agents list and right-click menu are Herdr's again`);
+    if (editJson(join(home, "layouts", `${name}.json`), (l) => restoreLayout(l, rec.layouts[name]?.menuWas, rec.layouts[name]?.floatingAdded, rec.layouts[name]?.tabsKeys))) say.push(`layout ${name}: the agents list and right-click menu are Herdr's again, the top bar as it was`);
   }
   rmSync(recordFile, { force: true });
   return say;
@@ -249,12 +320,12 @@ if (import.meta.main) {
   const flag = (f: string) => rest.includes(f);
   const value = (f: string) => { const i = rest.indexOf(f); return i >= 0 ? rest[i + 1] ?? null : null; };
   if (!home || (cmd !== "install" && cmd !== "uninstall")) {
-    process.stderr.write("usage: node install/layout.ts install|uninstall <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands] [--take-agents-slot] [--take-menu] [--record <file>]\n");
+    process.stderr.write("usage: node install/layout.ts install|uninstall <app home> [--app <herdr-app>] [--no-agents] [--no-menu] [--no-commands] [--no-switch] [--take-agents-slot] [--take-menu] [--record <file>]\n");
     process.exit(2);
   }
   const record = value("--record") ?? join(home, "data", "herdr-chat", "install-layout.json");
   try {
-    const lines = cmd === "install" ? install(home, { app: value("--app"), agents: !flag("--no-agents"), menu: !flag("--no-menu"), commands: !flag("--no-commands"), take: { agents: flag("--take-agents-slot"), menu: flag("--take-menu") }, record }) : uninstall(home, record);
+    const lines = cmd === "install" ? install(home, { app: value("--app"), agents: !flag("--no-agents"), menu: !flag("--no-menu"), commands: !flag("--no-commands"), switch: !flag("--no-switch"), take: { agents: flag("--take-agents-slot"), menu: flag("--take-menu") }, record }) : uninstall(home, record);
     for (const l of lines) process.stdout.write(`herdr-chat: ${l}\n`);
   } catch (e) {
     process.stderr.write(`herdr-chat: layout: ${e instanceof Error ? e.message : e}\n`);

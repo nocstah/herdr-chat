@@ -28,11 +28,13 @@
 import { View, div } from "gpui-kit";
 import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
-import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
+import { agents, appHome, closeOverlay, focused, hc, home, layout, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
 
 // What each chat pane shows, for the agents list (mods/chat-agents/chat-focus.js): pane → agent's terminal.
 const SHOWS = "herdr-chat.panes";
+// A terminal view's pane → its terminal, for the top bar's switch (mods/chat-switch).
+const VIEW_PANES = "herdr-chat.views";
 import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
@@ -370,6 +372,7 @@ export default class HerdrChat extends View {
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
     if (me && !this.sub) this.publishShows(me);
+    if (me && this.view) this.publishView(me);
     if (shown) this.markSeen(me, cx);
     if (this.sub && this.subKey() !== this.lastSubKey) { this.lastSubKey = this.subKey(); changed = true; } // the header bar
     // The hand-off's terminal (in its dialog): finished, back to the chat (the
@@ -682,6 +685,31 @@ export default class HerdrChat extends View {
     const next = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
     next[me.pane] = addr;
     setShared(SHOWS, next);
+  }
+
+  // The top bar's switch (mods/chat-switch) shows the face of the agent whose
+  // pane has the keyboard: for this pane, the terminal the view shows.
+  /** @param {any} me */
+  publishView(me) {
+    const map = /** @type {Record<string, string>} */ (shared(VIEW_PANES) ?? {});
+    if (map[me.pane] === this.view) return;
+    const live = new Set(panes().map((p) => p.pane));
+    const next = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
+    next[me.pane] = /** @type {string} */ (this.view);
+    setShared(VIEW_PANES, next);
+  }
+
+  // The layout's top bar has the switch (the installer's, mods/chat-switch): the view leaves out its own.
+  barSwitch() {
+    let found = false;
+    /** @param {any} n */
+    const walk = (n) => {
+      if (found || !n || n.hidden) return;
+      if (n.content?.mod === "chat-switch") found = true;
+      else for (const c of n.children ?? []) walk(c);
+    };
+    try { walk(layout()); } catch {}
+    return found;
   }
 
   // Herdr marks an agent seen only when its terminal is drawn, and the host
@@ -2697,10 +2725,13 @@ export default class HerdrChat extends View {
       .child(h_flex().h(16).px(6).gap(10).items_center()
         .child(div().flex_1().min_w(0).text_size(11).truncate().text_color(this.flashText ? t.blocked : t.dim).child(hintText ?? ""))
         .children([branchChip(this, t, { width: this.colW() })].filter(Boolean)));
+    // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
+    const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
+    const floats = pill && this.viewFloats();
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_size_change((sz, cx) => { if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); } })
       .on_drop((e, cx) => this.drop(e.paths ?? [], cx))
-      .children(this.sub ? [this.subBar(t)] : this.view && !this.viewFloats() ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
+      .children(this.sub ? [this.subBar(t)] : pill && !floats ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
 
@@ -2709,7 +2740,7 @@ export default class HerdrChat extends View {
       const notes = rows.filter((r) => r.kind === "item" && r.item.kind === "notice").slice(-3);
       return this.hud(root.child(v_flex().flex_1().min_h(0).justify_center().pb(40)
         .child(this.column(v_flex().gap(18).child(emptyState(this, t)).child(bottom)
-          .when(notes.length > 0, (e) => e.child(v_flex().gap(2).children(notes.map((r) => row(r, c)))))))), t);
+          .when(notes.length > 0, (e) => e.child(v_flex().gap(2).children(notes.map((r) => row(r, c)))))))), t, floats);
     }
     // Find's match: its row, or in a work group, its own step (cards.js, c.findItem).
     const mark = this.find?.rowId?.startsWith("g-") ? null : this.find?.rowId ?? null;
@@ -2732,13 +2763,13 @@ export default class HerdrChat extends View {
           .child(h_flex().id("latest").h(26).px(11).gap(6).items_center()
             .rounded(13).bg(t.popover).border_1().border_color(t.input).text_size(12).text_color(t.foreground).cursor_pointer().shadow_md()
             .hover((x) => x.bg(t.hover)).on_click((_e, cx) => this.control("latest", cx))
-            .child(icon("arrow-down", 12)).child("Latest"))))), t);
+            .child(icon("arrow-down", 12)).child("Latest"))))), t, floats);
   }
 
   // The terminal view's floating switch and the FPS HUD (debug/fps): on top
   // of the chat, last children of the root.
-  hud(el, t) {
-    if (this.view && !this.sub && this.viewFloats()) el = el.relative().child(div().absolute().top(8).right(14).child(this.viewBar(t)));
+  hud(el, t, floats = false) {
+    if (floats) el = el.relative().child(div().absolute().top(8).right(14).child(this.viewBar(t)));
     return this.debug?.fps ? el.relative().child(fps_monitor()) : el;
   }
 
