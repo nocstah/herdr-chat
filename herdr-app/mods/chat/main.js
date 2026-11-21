@@ -983,7 +983,8 @@ export default class HerdrChat extends View {
 
   viewBar(t) {
     const st = this.viewStatus;
-    const words = { working: "working", blocked: "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
+    // Waiting on a dialog the chat shows as a card: answered here; one it doesn't know: in the terminal.
+    const words = { working: "working", blocked: this.store.state.dialog ? "needs you" : "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
     const color = st === "blocked" ? t.blocked : st === "ended" ? t.dim : t[st] ?? t.dim;
     const seg = (id, label, on, what) => div().id(id).flex_none().px(10).py(2).rounded(5).text_size(11.5)
       .when(on, (e) => e.bg(t.background).text_color(t.foreground).font_semibold())
