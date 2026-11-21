@@ -82,6 +82,12 @@ export function startError(text, cwd) {
 }
 
 const BACKOFF = [250, 500, 1000, 2000, 2000];
+// While a host comes up for a chat someone just opened (a flip's first chat view, a new chat): its registry entry is
+// read this often, so the chat connects within a tenth of a second of the host's start instead of at the backoff's
+// next step (a host is ready in about half a second). Another machine's costs a command there per look: SOON_REMOTE.
+const SOON = 100;
+const SOON_REMOTE = 250;
+const SOON_FOR = 10000;
 
 export class Connection {
   // opts: {chat, cwd, attachOnly (never start a host), place: () => ({space, tab}) | null (a host starts only once the chat's tab is known),
@@ -100,6 +106,7 @@ export class Connection {
     this.startedHostAt = 0;
     this.welcome = null;
     this.connects = 0;
+    this.openedAt = Date.now();
     // Start a host when none runs: on open, and after Restart. Once a host
     // answered, its going away shows "host stopped" instead (main.js).
     this.autoStart = true;
@@ -110,6 +117,14 @@ export class Connection {
     this.autoStart = true;
     this.startedHostAt = 0;
     this.attempt = 0;
+  }
+
+  /** How long until the next look: soon while the chat's host comes up (it waits for its first connection, or for a
+   *  host it just started), else the backoff. */
+  nextLook() {
+    const waiting = this.status === "starting" || (this.status === "connecting" && !this.connects);
+    if (waiting && Date.now() - Math.max(this.openedAt, this.startedHostAt) < SOON_FOR) return this.o.machine?.() ? SOON_REMOTE : SOON;
+    return BACKOFF[Math.min(this.attempt++, BACKOFF.length - 1)];
   }
 
   set(status, error, cx) {
@@ -135,7 +150,7 @@ export class Connection {
         }
         this.failPending("disconnected");
         if (this.closed) return;
-        await cx.sleep(BACKOFF[Math.min(this.attempt++, BACKOFF.length - 1)]);
+        await cx.sleep(this.nextLook());
       }
     });
     // Requests nobody answered within their time: fail them, keep the loop.
