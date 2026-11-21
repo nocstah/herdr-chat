@@ -1,4 +1,7 @@
 // File paths in an answer's prose as links (no toolkit imports: tests/host/paths.test.ts runs it in Node).
+// An inline `! command` is a link too (bang.js): the chat asks where to run it.
+
+import { bangOf, runHref } from "./bang.js";
 
 const FENCE = /^\s*(`{3,}|~{3,})/;
 
@@ -30,7 +33,9 @@ export function linkPaths(text) {
     for (const m of line.matchAll(SKIP)) {
       out += bare(line.slice(at, m.index));
       const code = m[1] ? m[2].trim() : null;
-      out += code && CODE_PATH.test(code) && (code.includes("/") || /:\d+/.test(code)) ? `[${m[0]}](${fileHref(code)})` : m[0];
+      const bang = code ? bangOf(code) : null;
+      out += bang ? `[${m[0]}](${runHref(bang)})`
+        : code && CODE_PATH.test(code) && (code.includes("/") || /:\d+/.test(code)) ? `[${m[0]}](${fileHref(code)})` : m[0];
       at = m.index + m[0].length;
     }
     return out + bare(line.slice(at));

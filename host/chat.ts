@@ -1097,7 +1097,9 @@ export class Chat {
   }
 
   /** `onRejected`: the agent refused the message after it was sent (the timeline item is gone again). */
-  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
+  /** `echo: false`: no message of the person's on the timeline and no run of the chat's: what the agent writes
+   *  for it shows instead (the terminal view's `!command`, a Bash card from Claude Code's own records). */
+  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string; echo?: boolean }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
     const text = String(args.text ?? "");
     const imagePaths = Array.isArray(args.images) ? args.images.map(String) : [];
     if (!text.trim() && !imagePaths.length) throw new Error("Nothing to send");
@@ -1132,14 +1134,15 @@ export class Chat {
     // The message is on the timeline at once (the agent may echo it seconds later, when its turn starts); the echo confirms it.
     const id = randomUUID();
     const sent: Sent = { source, text, images: imagePaths, ...(args.from ? { from: args.from } : {}) };
-    if (!working) {
+    const shows = args.echo !== false;
+    if (!working && shows) {
       const shown = this.withSkill(message);
       sent.item = this.timeline.addUser(shown.text, images.length, source, args.from, Date.now(), images, shown.skill).id;
       this.urgent();
     }
     this.unconfirmed.set(id, sent);
     if (this.unconfirmed.size > MAX_UNCONFIRMED) this.unconfirmed.delete(this.unconfirmed.keys().next().value!);
-    const counted = !working;
+    const counted = !working && shows;
     if (counted) {
       this.expectRun++;
       this.set({ phase: "working" });
@@ -1680,7 +1683,7 @@ export class Chat {
   async op(name: string, a: Rec): Promise<unknown> {
     switch (name) {
       case "send":
-        return this.send({ text: a.text, images: a.images, mode: a.mode, source: a.source === "external" ? "external" : "composer", from: typeof a.from === "string" ? a.from : undefined });
+        return this.send({ text: a.text, images: a.images, mode: a.mode, source: a.source === "external" ? "external" : "composer", from: typeof a.from === "string" ? a.from : undefined, echo: a.echo !== false });
       case "abort":
         return this.abort();
       // `message`, not `id`: `id` is the request's own.

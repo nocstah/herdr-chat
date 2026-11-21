@@ -13,12 +13,19 @@
 // - sending: `hc send`, which pastes and presses Enter as the person would;
 //   stopping: `hc interrupt` (the agent's stop key).
 //
-// What the TUI does on its own screen (permission prompts, /model's picker)
-// stays there: the chat has no asks or pickers of its own here.
+// Claude Code's dialogs (a tool's permission, a plan's approval, its
+// questions) show in the chat as cards: while it waits (status "blocked") its
+// screen is read (screen.ts), and an answer is the keys a person would press
+// there (`hc keys`, a typed answer `hc send --force`). Its other screens
+// (/model's picker) stay in the terminal.
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { movesTo, promptKey, readPrompt } from "./screen.ts";
+import type { Row, ScreenPrompt } from "./screen.ts";
 import { TranscriptFollower } from "./follow.ts";
 import { historyOf } from "./history.ts";
 import { ClaudePlans } from "./plans.ts";
@@ -27,7 +34,7 @@ import { processTree } from "../tui.ts";
 import { CLAUDE_TOOLS } from "./tools.ts";
 import { AgentError } from "../types.ts";
 import type {
-  AdapterHost, AdapterOptions, AgentCommand, AgentModel, AskAnswer, Capabilities, Disposition, ImageBlock, NormalizedEvent,
+  AdapterHost, AdapterOptions, AgentCommand, AgentModel, Ask, AskAnswer, Capabilities, Disposition, ImageBlock, NormalizedEvent,
   PromptMode, ProviderAdapter, SessionSource, StartInfo, UsageInfo,
 } from "../types.ts";
 
@@ -40,10 +47,25 @@ const TAIL_MS = () => num(process.env.HERDR_CHAT_TAIL_MS, 150);
 /** How often the registry is read for the session the TUI has open. */
 const SESSION_MS = () => num(process.env.HERDR_CHAT_SESSION_MS, 1000);
 const SENT_TTL_MS = 10 * 60_000;
+/** How often the screen is read while Claude Code waits on a dialog. */
+const ASK_MS = () => num(process.env.HERDR_CHAT_ASK_MS, 500);
+/** After an answer's keys: the screen settles before it's read again (or the old dialog would come back). */
+const ASK_SETTLE_MS = 700;
 const AGENT_APPS = new Set(["claude", "claude-code"]);
 
 const NOT_HERE = "Do that in Claude Code's terminal: Ctrl+Shift+J flips to it.";
+const BUSY = "Claude Code is working: run the command when it's done, or in a new tab.";
 const ASKING = "Claude Code is asking something in its terminal: answer it there first (Ctrl+Shift+J shows it), then send.";
+const ASKING_CARD = "Claude Code is asking something: answer its card above the composer first, then send.";
+const CHANGED = "Claude Code's dialog changed in the terminal: answer the new one.";
+
+/** A row's words and what's in brackets or after a dot: "Yes, and switch to accept edits (auto-approve file edits…)". */
+function splitLabel(label: string): { label: string; description?: string } {
+  const plain = label.replace(/\s*\((?:shift\+tab|tab)\)$/i, "");
+  const m = /^(.+?)(?: · |\s+\()(.+)$/.exec(plain);
+  if (!m) return { label: plain };
+  return { label: m[1]!.trim(), description: m[2]!.replace(/[()]/g, "").replace(/\s+/g, " ").trim() };
+}
 
 /** Why `hc send` refused, in words (it prints {"error": {kind, message, hint}}). */
 function sendError(out: string): string {
@@ -85,7 +107,15 @@ export type TerminalAdapterOptions = AdapterOptions & {
   /** The terminal the TUI runs in (`t7`, as the host's core names it). */
   terminal: string;
   hc: string;
+  /** Where the images a message sends are saved for Claude Code to read (sendImages); none: no images. */
+  sentDir?: string;
 };
+
+/** How long a sent image's file is kept: Claude Code reads it as the message lands; the chat shows it again from it. */
+const SENT_KEEP_MS = 7 * 24 * 3600_000;
+const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+/** An `@` mention of a file, as Claude Code reads it (quoted when the path has a space). */
+const mention = (p: string) => (/\s/.test(p) ? `@"${p}"` : `@${p}`);
 
 /** A process's CLAUDE_CONFIG_DIR (Linux: its environment), else null. */
 function envOf(pid: number, name: string): string | null {
@@ -103,8 +133,8 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   readonly name = "Claude Code";
   readonly tools = CLAUDE_TOOLS;
   readonly capabilities: Capabilities = {
-    steer: true, followUp: true, thinkingLevels: [], permissions: false, permissionModes: [], extensionUi: false,
-    compact: false, compactInstructions: false, rename: false, fork: false, images: false, cost: false, tui: false,
+    steer: true, followUp: true, thinkingLevels: [], permissions: true, permissionModes: [], extensionUi: false,
+    compact: false, compactInstructions: false, rename: false, fork: false, images: true, cost: false, tui: false,
   };
   readonly sessions: SessionSource = { kind: "files", files: (_current, scope) => sessionFiles(this.opts.cwd, scope), describe: describeSession };
 
@@ -132,12 +162,51 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   private model: string | null = null;
   private lastUsage: Rec | null = null;
   private quitSaid = false;
+  /** The dialog on Claude Code's screen shown as a card (its id, what it asks, the screen read). */
+  private ask: { id: string; key: string; prompt: ScreenPrompt } | null = null;
+  private askSeq = 0;
+  private askTimer: NodeJS.Timeout | null = null;
+  private answering = false;
+  private askHold = 0;
+  /** Until then, a review of the answers is sent as the card's last answer leaves it (the card asked them all). */
+  private autoSubmit = 0;
+  /** The answer being pressed is a question's last: its review is sent once its keys are in. */
+  private submitNext = false;
   private snapshot: Promise<void>;
   private gotSnapshot: () => void = () => {};
 
   constructor(opts: TerminalAdapterOptions) {
     this.opts = opts;
     this.snapshot = new Promise((r) => (this.gotSnapshot = r));
+    if (opts.sentDir) this.pruneSent(opts.sentDir);
+  }
+
+  /** Sent images older than SENT_KEEP_MS go. */
+  private pruneSent(dir: string): void {
+    try {
+      for (const f of readdirSync(dir)) {
+        const p = join(dir, f);
+        if (/^herdr-chat-[0-9a-f]{16}\./.test(f) && Date.now() - statSync(p).mtimeMs > SENT_KEEP_MS) rmSync(p, { force: true });
+      }
+    } catch {}
+  }
+
+  /**
+   * A message's images, for Claude Code: each saved as a file it reads as the
+   * message lands, named in the message as an `@` mention (Claude Code attaches
+   * an image it's pointed at; the chat shows these as the message's images,
+   * sessions.ts sentImages). The mentions go first, so the cursor never ends in
+   * one (Enter there could take a file suggestion instead of sending).
+   */
+  private sendImages(images: ImageBlock[]): string[] {
+    const dir = this.opts.sentDir;
+    if (!dir) throw new Error("Images can't be sent from here: paste them in Claude Code's terminal.");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return images.map((img) => {
+      const p = join(dir, `herdr-chat-${randomBytes(8).toString("hex")}.${EXT[img.mimeType] ?? "png"}`);
+      writeFileSync(p, Buffer.from(img.data, "base64"), { mode: 0o600 });
+      return p;
+    });
   }
 
   get alive(): boolean {
@@ -220,6 +289,208 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (!this.host) return;
     if (state === "working" || state === "blocked") this.runOn();
     else this.settle();
+    if (state === "blocked") this.watchAsk();
+    else this.closeAsk();
+  }
+
+  // ---------------------------------------------------------------- its dialogs
+
+  private watchAsk(): void {
+    if (this.askTimer || this.disposed) return;
+    this.askTimer = setTimeout(() => void this.pollAsk(), 0);
+    this.askTimer.unref();
+  }
+
+  private async pollAsk(): Promise<void> {
+    if (!this.disposed && this.status === "blocked" && !this.answering && Date.now() >= this.askHold) {
+      const p = await this.screenPrompt();
+      if (this.status === "blocked" && !this.answering && Date.now() >= this.askHold && p !== undefined) this.showAsk(p);
+    }
+    this.askTimer = null;
+    if (!this.disposed && this.status === "blocked") {
+      this.askTimer = setTimeout(() => void this.pollAsk(), ASK_MS());
+      this.askTimer.unref();
+    }
+  }
+
+  /** The dialog on the screen now; null: none it knows; undefined: the screen couldn't be read. */
+  private async screenPrompt(): Promise<ScreenPrompt | null | undefined> {
+    const r = await this.hc(["read", "--json", this.opts.terminal], 5000);
+    try {
+      const text = JSON.parse(r.stdout)?.text;
+      return typeof text === "string" ? readPrompt(text) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private showAsk(p: ScreenPrompt | null): void {
+    const key = p ? promptKey(p) : null;
+    if (this.ask && key === this.ask.key) {
+      this.ask.prompt = p!; // the same dialog: the card stays (the cursor may have moved)
+      return;
+    }
+    this.closeAsk();
+    if (!p || !key) return;
+    // The card asked every question: the review it leads to is sent as the person's last answer was.
+    if (p.kind === "review" && Date.now() < this.autoSubmit) {
+      this.autoSubmit = 0;
+      const send = p.rows[0]!;
+      void this.pressKeys([...movesTo(p, send), "enter"]).then(() => (this.askHold = Date.now() + ASK_SETTLE_MS), (e: Error) => this.log(`review: ${e.message}`));
+      this.askHold = Date.now() + ASK_SETTLE_MS;
+      return;
+    }
+    const id = `tv-ask-${++this.askSeq}`;
+    this.ask = { id, key, prompt: p };
+    this.emit({ type: "ask", ask: this.askOf(id, p) });
+  }
+
+  private closeAsk(): void {
+    if (!this.ask) return;
+    this.emit({ type: "ask_closed", id: this.ask.id });
+    this.ask = null;
+  }
+
+  /** The card for a dialog: a permission card (its rows as choices) or a question. */
+  private askOf(id: string, p: ScreenPrompt): Ask {
+    if (p.kind === "question") {
+      const options = p.rows.filter((r) => r !== p.other).map((r) => ({ label: r.label, ...(r.description ? { description: r.description } : {}) }));
+      const tabs = p.tabs ?? [];
+      const header = p.header ?? (tabs.length === 1 ? tabs[0]!.label : null);
+      const title = tabs.length > 1 ? `Claude Code has ${tabs.length} questions (${Math.min(tabs.filter((t) => t.answered).length + 1, tabs.length)} of ${tabs.length})` : "Claude Code has a question";
+      return { id, kind: "questions", title, questions: [{ id: "q", ...(header ? { header } : {}), question: p.question, options, multiSelect: p.multi, allowOther: Boolean(p.other) }] };
+    }
+    let firstYes = true;
+    const choice = (r: Row) => {
+      const yes = /^Yes\b/i.test(r.label);
+      const kind = /^(No|Cancel)\b/i.test(r.label) || /^Tell Claude what to change\b/i.test(r.label) ? "deny" as const
+        : yes && firstYes ? "allow" as const
+          : /^Yes, and (?:always|don't ask)/i.test(r.label) ? "allow_always" as const : "other" as const;
+      if (yes) firstYes = false;
+      const { label, description } = splitLabel(r.label);
+      const desc = [description, r.description].filter(Boolean).join(" · ");
+      return { id: `r${r.stop}`, label, kind, ...(desc ? { description: desc } : {}) };
+    };
+    if (p.kind === "review") {
+      const message = p.answers.map((a) => `- **${a.question}** → ${a.answer}`).join("\n");
+      return { id, kind: "permission", title: "Review your answers", ...(message ? { message } : {}), choices: p.rows.map((r) => ({ ...choice(r), kind: r.stop === 0 ? "allow" as const : "other" as const })) };
+    }
+    if (p.kind === "plan") {
+      const message = this.planText(p.planFile) ?? p.body;
+      return { id, kind: "permission", title: "Claude Code's plan is ready", ...(message ? { message } : {}), choices: p.rows.map(choice) };
+    }
+    if (p.kind === "permission") {
+      const message = [p.body, `**${p.question}**`].filter(Boolean).join("\n\n");
+      return { id, kind: "permission", title: p.title, message, choices: p.rows.map(choice) };
+    }
+    return { id, kind: "permission", title: p.title, ...(p.body ? { message: p.body } : {}), choices: p.rows.map(choice) };
+  }
+
+  /** A plan's file, as Claude Code wrote it (the screen shows its end when it's long). */
+  private planText(file: string | null): string | null {
+    if (!file) return null;
+    const home = (this.agent && envOf(this.agent.pid, "HOME")) || homedir();
+    const path = file.startsWith("~/") ? join(home, file.slice(2)) : file;
+    try {
+      if (statSync(path).size > 256 * 1024) return null;
+      return readFileSync(path, "utf8").trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async pressKeys(keys: string[]): Promise<void> {
+    if (!keys.length) return;
+    this.log(`dialog: keys ${keys.join(" ")}`);
+    const r = await this.hc(["keys", "--json", this.opts.terminal, ...keys], 10_000);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc keys: exit ${r.code}`);
+  }
+
+  /**
+   * Until the screen shows what the keys before did (the cursor on a row, a row
+   * that takes text): Claude Code can take a paste before it draws a move, and
+   * the paste and its Enter would land on the row the cursor left.
+   */
+  private async screenShows(what: (p: ScreenPrompt) => boolean, ms = 2500): Promise<ScreenPrompt> {
+    for (const t0 = Date.now(); ; await new Promise((r) => setTimeout(r, 80))) {
+      const p = await this.screenPrompt();
+      if (p && what(p)) return p;
+      if (Date.now() - t0 > ms) throw new Error("Claude Code didn't take the keys: answer in its terminal (Ctrl+Shift+J)");
+    }
+  }
+
+  private async moveThenType(p: ScreenPrompt, row: Row, text: string, extra: string[] = []): Promise<void> {
+    await this.pressKeys([...movesTo(p, row), ...extra]);
+    await this.screenShows((now) => now.stops.find((r) => r.selected)?.stop === row.stop && (!extra.length || Boolean(now.stops[row.stop]?.input)));
+    await this.typeAnswer(text);
+  }
+
+  /** Typed into the row the cursor is on (Type something, a reason), and Enter. */
+  private async typeAnswer(text: string): Promise<void> {
+    this.log(`dialog: typed ${text.length} chars`);
+    const r = await this.hc(["send", "--json", "--force", this.opts.terminal, text.replace(/\s*\n\s*/g, " ").trim()], 20_000);
+    if (r.code !== 0) throw new Error(sendError(r.stdout || r.stderr) || `hc send: exit ${r.code}`);
+  }
+
+  private async answerAsk(key: string, a: AskAnswer): Promise<void> {
+    // The screen as it is now: the cursor may have moved, and it must still be the dialog the card showed.
+    const p = await this.screenPrompt();
+    if (!p || promptKey(p) !== key) throw new Error(CHANGED);
+    if ("cancelled" in a) return this.pressKeys(["esc"]);
+    if (p.kind === "question") return this.answerQuestion(p, "answers" in a ? a.answers.q : undefined);
+    if (!("choice" in a)) return this.pressKeys(["esc"]);
+    const row = p.stops.find((r) => `r${r.stop}` === a.choice);
+    if (!row) throw new Error(CHANGED);
+    const reason = a.message?.trim() ?? "";
+    if (row.input) {
+      // Tell Claude what to change: what to change goes in the row; none, and Esc keeps it planning.
+      if (!reason) return this.pressKeys(["esc"]);
+      return this.moveThenType(p, row, reason);
+    }
+    if (reason && p.kind === "permission" && /^No\b/i.test(row.label)) {
+      // Tab makes "No" take a reason: "No, and tell Claude what to do differently".
+      return this.moveThenType(p, row, reason, ["tab"]);
+    }
+    return this.pressKeys([...movesTo(p, row), "enter"]);
+  }
+
+  private async answerQuestion(p: Extract<ScreenPrompt, { kind: "question" }>, v: string | string[] | undefined): Promise<void> {
+    if (v === undefined) return this.pressKeys(["esc"]);
+    const picks = (Array.isArray(v) ? v : [v]).map((x) => x.trim()).filter(Boolean);
+    const options = p.rows.filter((r) => r !== p.other);
+    const typed = picks.filter((x) => !options.some((r) => r.label === x)).join(", ");
+    if (typed && !p.other) throw new Error("This question takes one of its options only.");
+    // Its last question: Claude Code shows the answers to send next (a review), which goes as this answer does.
+    if (p.tabs && p.tabs.filter((t) => !t.answered).length <= 1) this.submitNext = true;
+    if (!p.multi) {
+      const row = options.find((r) => r.label === picks[0]);
+      if (row) return this.pressKeys([...movesTo(p, row), "enter"]);
+      return this.moveThenType(p, p.other!, typed);
+    }
+    // A multiple choice: each box as the answer has it, what was typed in its own row, then Submit.
+    const keys: string[] = [];
+    let at = p.stops.find((r) => r.selected)?.stop ?? 0;
+    const move = (to: number) => {
+      for (; at !== to; at += to > at ? 1 : -1) keys.push(to > at ? "down" : "up");
+    };
+    for (const r of options) if (Boolean(r.checked) !== picks.includes(r.label)) {
+      move(r.stop);
+      keys.push("enter");
+    }
+    await this.pressKeys(keys);
+    if (typed) {
+      const other = p.other!;
+      const moved = await this.screenShows((now) => now.stops.find((r) => r.selected)?.stop === at);
+      await this.moveThenType(moved, other, typed);
+      // Enter after the text can leave its box empty: tick it.
+      const now = await this.screenShows((x) => x.kind === "question" && x.stops[other.stop]?.label !== "Type something");
+      const box = now.stops[other.stop]!;
+      if (!box.checked) await this.pressKeys([...movesTo(now, box), "enter"]);
+    }
+    // Submit, once the boxes show as the answer has them.
+    const now = await this.screenShows((x) => x.kind === "question" && Boolean(x.submit) && x.rows.filter((r) => r !== x.other).every((r) => Boolean(r.checked) === picks.includes(r.label)));
+    if (now.kind !== "question" || !now.submit) throw new Error(CHANGED);
+    await this.pressKeys([...movesTo(now, now.submit), "enter"]);
   }
 
   private gone(why: string): void {
@@ -252,7 +523,9 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (!fg) return null;
     const pids = this.agent ? [this.agent.pid] : processTree(fg.pid);
     for (const pid of pids) {
-      const dir = this.agent?.pid === pid ? this.agent.dir : envOf(pid, "CLAUDE_CONFIG_DIR") ?? configDir();
+      // Its own config folder: from its environment (CLAUDE_CONFIG_DIR, else its HOME's), as it resolves it.
+      const home = envOf(pid, "HOME");
+      const dir = this.agent?.pid === pid ? this.agent.dir : envOf(pid, "CLAUDE_CONFIG_DIR") ?? (home ? join(home, ".claude") : configDir());
       try {
         const r = JSON.parse(readFileSync(join(dir, "sessions", `${pid}.json`), "utf8"));
         if (typeof r?.sessionId !== "string") continue;
@@ -396,6 +669,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     this.sessionTimer.unref();
     const streaming = this.status === "working" || this.status === "blocked";
     if (streaming) this.running = true;
+    if (this.status === "blocked") this.watchAsk();
     const hasHistory = Boolean(this.file && existsSync(this.file));
     // The core reads the history when it started on a session or there is one (chat.ts boot).
     this.awaitingHistory = Boolean(session) || hasHistory;
@@ -420,15 +694,22 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Claude Code's terminal has ended.", true);
     if (!this.registry()) throw new Error("Claude Code isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
-    if (p.images.length) throw new Error("Images can't be sent from here: paste them in Claude Code's terminal.");
     // Typing would answer its question (hc send refuses too).
-    if (this.status === "blocked") throw new Error(ASKING);
+    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    // `!command`: Claude Code's bash mode runs it in the agent's shell, and the agent sees what it
+    // printed; it comes back as a Bash card (sessions.ts bashEvents). Only at rest, as Ctrl+! does.
+    const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
+    if (bang && this.status === "working") throw new Error(BUSY);
     // A command is the TUI's (its screen, or a run it starts itself): what it writes shows as it comes.
-    const command = /^\/\S/.test(p.text.trim());
+    const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
+    if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
+    const files = p.images.length ? this.sendImages(p.images) : [];
+    const words = p.text.trim() ? p.text : files.length ? "" : p.text;
+    const text = bang ? `!${bang[1]!.trim()}` : files.length ? `${files.map(mention).join(" ")} ${words}`.trimEnd() + (words ? "" : " ") : p.text;
     // Noted before it's typed: the TUI writes its echo as Enter lands, before `hc send` returns.
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
-    const r = await this.hc(["send", "--json", this.opts.terminal, p.text], 70_000);
+    const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
@@ -447,7 +728,31 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     });
   }
 
-  answer(_askId: string, _answer: AskAnswer): void {}
+  /** A card's answer: the keys a person would press in the terminal. */
+  answer(askId: string, a: AskAnswer): void {
+    const ask = this.ask;
+    const what = "choice" in a ? `choice ${a.choice}${a.message ? " with a reason" : ""}` : Object.keys(a).join(",");
+    if (!ask || ask.id !== askId) {
+      this.log(`dialog: ${what} for ${askId}, not the open one (${ask?.id ?? "none"})`);
+      return;
+    }
+    this.log(`dialog: ${ask.prompt.kind} ${askId}: ${what}`);
+    this.ask = null; // the card is gone; the poll shows it again if the dialog stays
+    this.answering = true;
+    void this.answerAsk(ask.key, a)
+      .then(() => {
+        if (this.submitNext) this.autoSubmit = Date.now() + 4000;
+      })
+      .catch((e: Error) => {
+        this.autoSubmit = 0;
+        this.emit({ type: "notice", level: "warning", source: "host", text: `Couldn't answer in Claude Code's terminal: ${e.message}` });
+      })
+      .finally(() => {
+        this.submitNext = false;
+        this.answering = false;
+        this.askHold = Date.now() + ASK_SETTLE_MS;
+      });
+  }
 
   async dispose(): Promise<void> {
     this.kill();
@@ -455,7 +760,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   kill(): void {
     this.disposed = true;
-    for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry]) if (t) clearTimeout(t);
+    for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry, this.askTimer]) if (t) clearTimeout(t);
     this.events?.kill();
     this.events = null;
   }

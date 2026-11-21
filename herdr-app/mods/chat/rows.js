@@ -107,6 +107,12 @@ export function buildRows(items, state) {
     }
     if (it.kind === "assistant") (run ??= { assistants: [] }).assistants.push(it);
     if (!visible(it)) continue;
+    // A command the person ran (`!`: Claude Code's bash mode, Pi's): a card of its own, never in the agent's fold.
+    if (it.kind === "tool" && String(it.toolCallId ?? "").startsWith("you-")) {
+      flush();
+      rows.push({ id: it.id, kind: "item", item: it });
+      continue;
+    }
     if (isWork(it)) {
       (group ??= []).push(it);
       continue;

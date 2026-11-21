@@ -85,7 +85,7 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   if (view && provider !== "claude") die(`--attach works with Claude Code only for now (not ${provider})`);
   const hcBin = process.env.HERDR_CHAT_HC || "hc";
   const adapter = view
-    ? new ClaudeTerminalAdapter({ cwd, args: [], log, command: "claude", terminal: view, hc: hcBin })
+    ? new ClaudeTerminalAdapter({ cwd, args: [], log, command: "claude", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent") })
     : createAdapter(provider, { cwd, args: a.after, log, ...(agentCommand ? { command: agentCommand } : {}) });
   log(`serve chat=${chatId} cwd=${cwd} session=${session ?? "-"} provider=${provider} cmd=${agentCommand ?? "(default)"}${view ? ` view=${view}` : ""} pid=${process.pid}`);
 

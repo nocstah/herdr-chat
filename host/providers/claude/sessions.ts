@@ -5,7 +5,7 @@ import { readdirSync, statSync, readFileSync, realpathSync, openSync, readSync, 
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import type { SessionInfo, SessionScope } from "../types.ts";
+import type { ImageBlock, NormalizedEvent, SessionInfo, SessionScope } from "../types.ts";
 import { jsonlFiles, subdirs } from "../../jsonl.ts";
 
 type Rec = Record<string, any>;
@@ -76,6 +76,71 @@ export function codeModeSession(path: string): boolean {
 }
 
 /** A user record that a person typed (not a tool result, a CLI marker or a meta record). */
+/**
+ * A `!` command the person ran in Claude Code's TUI (its bash mode): the
+ * command (`<bash-input>`), or what it printed (`<bash-stdout>` and
+ * `<bash-stderr>`, the next record). Else null.
+ */
+export function bashOf(r: Rec): { input: string } | { stdout: string; stderr: string } | null {
+  if (r?.type !== "user" || r.isSidechain) return null;
+  const c = r.message?.content;
+  const text = typeof c === "string" ? c : Array.isArray(c) && c.length === 1 && c[0]?.type === "text" ? String(c[0].text ?? "") : null;
+  if (text === null) return null;
+  const t = text.trim();
+  const input = /^<bash-input>([\s\S]*)<\/bash-input>$/.exec(t);
+  if (input) return { input: input[1]! };
+  if (!t.startsWith("<bash-stdout>") && !t.startsWith("<bash-stderr>")) return null;
+  const part = (tag: string) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(t)?.[1] ?? "";
+  return { stdout: part("bash-stdout"), stderr: part("bash-stderr") };
+}
+
+/**
+ * bashOf's records as a Bash tool card, as Pi's own `!` runs show (pi/adapter.ts
+ * bashExecution): the command starts a card (`callId`: the record's), its output
+ * ends the open one. `open`: the card waiting for its output, carried from record
+ * to record by the caller.
+ */
+export function bashEvents(r: Rec, open: { callId: string | null }, t: { ts?: number }): NormalizedEvent[] | null {
+  const b = bashOf(r);
+  if (!b) return null;
+  if ("input" in b) {
+    open.callId = `you-bash-${String(r.uuid ?? Date.now())}`; // "you-": the person's run, a card of its own (rows.js)
+    return [{ type: "tool_call", callId: open.callId, name: "Bash", args: { command: b.input }, ...t }];
+  }
+  if (!open.callId) return [];
+  const callId = open.callId;
+  open.callId = null;
+  const output = [b.stdout, b.stderr].filter((s) => s.trim()).join("\n");
+  return [{ type: "tool_ended", callId, name: "Bash", isError: Boolean(b.stderr.trim()) && !b.stdout.trim(), output, ...t }];
+}
+
+/**
+ * Images the terminal view sent as `@` mentions ahead of the message
+ * (terminal.ts sendImages: files named herdr-chat-<16 hex>.<ext>): the text
+ * without them, and their files, shown as the message's images.
+ */
+export const SENT_IMAGE = /^@(?:"([^"]*\/herdr-chat-[0-9a-f]{16}\.(?:png|jpe?g|gif|webp))"|(\S*\/herdr-chat-[0-9a-f]{16}\.(?:png|jpe?g|gif|webp)))(?:\s+|$)/;
+export function sentImages(text: string): { text: string; files: string[] } {
+  const files: string[] = [];
+  let rest = text;
+  for (let m = SENT_IMAGE.exec(rest); m; m = SENT_IMAGE.exec(rest)) {
+    files.push((m[1] ?? m[2])!);
+    rest = rest.slice(m[0].length);
+  }
+  return files.length ? { text: rest, files } : { text, files };
+}
+
+/** A sent image's file as an image block, while it's there. */
+export function imageFile(path: string): ImageBlock | null {
+  const ext = path.replace(/^.*\./, "").toLowerCase();
+  const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "webp" ? "image/webp" : "image/png";
+  try {
+    return { data: readFileSync(path).toString("base64"), mimeType };
+  } catch {
+    return null;
+  }
+}
+
 export function promptText(r: Rec): string | null {
   if (r.type !== "user" || r.isSidechain || r.isMeta || r.isCompactSummary) return null;
   const c = r.message?.content;
@@ -89,6 +154,7 @@ export function promptText(r: Rec): string | null {
   const cmd = /^<command-name>\/?([^<]*)<\/command-name>[\s\S]*?(?:<command-args>([\s\S]*?)<\/command-args>)?/.exec(text.trim());
   if (cmd) return `/${cmd[1]!.trim()}${cmd[2]?.trim() ? " " + cmd[2].trim() : ""}`;
   if (/^<local-command-(stdout|stderr|caveat)>/.test(text.trim())) return null;
+  if (bashOf(r)) return null;
   if (/^\[Request interrupted by user/.test(text.trim())) return null;
   return text;
 }

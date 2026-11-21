@@ -30,6 +30,9 @@ import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
+
+// What each chat pane shows, for the agents list (mods/chat-agents/chat-focus.js): pane → agent's terminal.
+const SHOWS = "herdr-chat.panes";
 import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
@@ -44,6 +47,7 @@ import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { findMark, lineOf, planProgress, row, samePlan } from "./cards.js";
 import { fileLink } from "./paths.js";
+import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
@@ -365,6 +369,7 @@ export default class HerdrChat extends View {
       if (this.redirectFocus(cx)) changed = true;
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
+    if (me && !this.sub) this.publishShows(me);
     if (shown) this.markSeen(me, cx);
     if (this.sub && this.subKey() !== this.lastSubKey) { this.lastSubKey = this.subKey(); changed = true; } // the header bar
     // The hand-off's terminal (in its dialog): finished, back to the chat (the
@@ -665,6 +670,20 @@ export default class HerdrChat extends View {
     return true;
   }
 
+  // The agents list marks the agent this chat shows while its pane has the
+  // keyboard (mods/chat-agents/chat-focus.js): the host's terminal, or the
+  // terminal view's. Stale panes go out with the next change.
+  /** @param {any} me */
+  publishShows(me) {
+    const addr = this.view ?? hostTerminal(this.chat)?.address ?? null;
+    const map = /** @type {Record<string, string>} */ (shared(SHOWS) ?? {});
+    if (!addr || map[me.pane] === addr) return;
+    const live = new Set(panes().map((p) => p.pane));
+    const next = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
+    next[me.pane] = addr;
+    setShared(SHOWS, next);
+  }
+
   // Herdr marks an agent seen only when its terminal is drawn, and the host
   // never is: while the person looks at the chat (the window active, its tab
   // shown), the host's turn is labeled seen (herdr.seen, shared by every
@@ -892,7 +911,9 @@ export default class HerdrChat extends View {
     }
     this.composer.clear();
     this.timeline.toBottom();
-    this.fire("send", { text, ...(images.length ? { images } : {}), mode }, cx, (d, cx) => {
+    // The terminal view: `!command` is Claude Code's bash mode, shown by its own records (a Bash card).
+    const bang = Boolean(this.view) && !images.length && /^!\s*[^\s=!]/.test(text.trim());
+    this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}) }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
       // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal).
       if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1])) this.showFace("terminal", cx);
@@ -962,7 +983,8 @@ export default class HerdrChat extends View {
 
   viewBar(t) {
     const st = this.viewStatus;
-    const words = { working: "working", blocked: "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
+    // Waiting on a dialog the chat shows as a card: answered here; one it doesn't know: in the terminal.
+    const words = { working: "working", blocked: this.store.state.dialog ? "needs you" : "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
     const color = st === "blocked" ? t.blocked : st === "ended" ? t.dim : t[st] ?? t.dim;
     const seg = (id, label, on, what) => div().id(id).flex_none().px(10).py(2).rounded(5).text_size(11.5)
       .when(on, (e) => e.bg(t.background).text_color(t.foreground).font_semibold())
@@ -1505,6 +1527,7 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_escape") {
       if (m) this.composer.menu = null;
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
+      else if (this.runAsk) this.runAsk = null;
       else if (this.store.working()) this.abort(cx);
       else if (this.peekMode) return this.closePeek();
     }
@@ -1866,9 +1889,78 @@ export default class HerdrChat extends View {
   // a tool's path does, once it's there; any other link goes to the system.
   /** @param {string} url @param {import("gpui-kit").Context} cx */
   onLink(url, cx) {
+    const bang = runLink(url);
+    if (bang) return this.askRun([bang], cx);
     const f = fileLink(url);
     if (!f) return cx.open_url(url);
     this.openFile(f.path, f.line, cx, { mustExist: true });
+  }
+
+  // ---- `!` commands in answers (bang.js) -------------------------------------------
+
+  // What the answers' run bars and links do: where a `!` command can run.
+  // `here`: the agent's name when it can run there (the terminal view: Claude
+  // Code's bash mode), else null (a chat's own agent has no bash mode: a new tab only).
+  bangTarget() {
+    return { here: this.view ? this.providerName() : null, run: (/** @type {string[]} */ cmds, /** @type {string} */ where, /** @type {any} */ cx) => this.runBang(cmds, where, cx) };
+  }
+
+  // An inline `! command` was clicked: the card above the composer asks where to run it.
+  /** @param {string[]} commands @param {any} cx */
+  askRun(commands, cx) {
+    this.runAsk = { commands, at: Date.now() };
+    this.debug.mark();
+    cx.notify();
+  }
+
+  // Runs `commands` (one run: in order, stopping at the first that fails) in the agent or a new tab.
+  /** @param {string[]} commands @param {string} where "agent" | "tab" @param {any} cx */
+  runBang(commands, where, cx) {
+    this.runAsk = null;
+    const name = this.providerName();
+    if (where === "agent") {
+      const line = bangLine(commands);
+      if (!this.view || line === null) return;
+      if (this.viewStatus === "working") return this.flash(`${name} is working: run it when it's done, or in a new tab`, cx);
+      if (this.viewStatus === "blocked") return this.flash(`${name} is asking something: answer it first`, cx);
+      this.lastRun = { where, commands, at: Date.now() };
+      this.timeline.toBottom();
+      // No bubble: Claude Code's own records show the run (a Bash card), once it's typed.
+      this.fire("send", { text: `!${line}`, mode: "auto", echo: false }, cx);
+      return;
+    }
+    const me = this.myPane();
+    const space = me ? spaces().find((sp) => sp.tabs.some((tb) => tb.id === me.tab))?.id ?? null : null;
+    const folder = this.cwd ?? this.store.state.cwd ?? null;
+    this.lastRun = { where, commands, at: Date.now() };
+    run("tab.new", { name: "run", ...(space ? { space } : {}), ...(folder ? { folder } : {}), argv: ["bash", "-c", tabScript(commands)] });
+    cx.notify();
+  }
+
+  // The card for an inline `! command`: run it here or in a new tab (Esc or × closes it).
+  /** @param {any} t */
+  runCard(t) {
+    const ask = this.runAsk;
+    if (!ask) return null;
+    const here = this.view ? this.providerName() : null;
+    const line = bangLine(ask.commands);
+    const btn = (/** @type {string} */ id, /** @type {string} */ label, /** @type {boolean} */ primary, /** @type {(cx: any) => void} */ fn) =>
+      h_flex().id(id).h(28).px(12).items_center().rounded(7).cursor_pointer()
+        .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
+        .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium()
+        .hover((s) => s.opacity(0.88)).on_click((_e, cx) => fn(cx)).child(label);
+    return v_flex().gap(8).p(12).rounded(10).border_1().border_color(t.border).bg(t.popover)
+      .child(h_flex().gap(8).items_center()
+        .child(icon("terminal", 13).text_color(t.muted))
+        .child(div().flex_1().min_w(0).text_size(13).font_semibold().child("Run this command?"))
+        .child(div().id("run-cancel").cursor_pointer().text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => { this.runAsk = null; cx.notify(); }).child("Esc")))
+      .child(div().px(10).py(6).rounded(7).bg(t.background).border_1().border_color(t.border).font_family(monoFont()).text_size(12.5)
+        .child(`! ${line ?? ask.commands.join(" && ")}`))
+      .child(h_flex().gap(8).flex_wrap()
+        .when(Boolean(here) && line !== null, (e) => e.child(btn("run-ask-here", `Run in ${here}`, true, (cx) => this.runBang(ask.commands, "agent", cx))))
+        .child(btn("run-ask-tab", "Run in a new tab", !here, (cx) => this.runBang(ask.commands, "tab", cx)))
+        .child(btn("run-ask-copy", "Copy", false, (cx) => { this.copy("run-ask", line ?? ask.commands.join("\n"), cx); this.runAsk = null; })));
   }
 
   // A file a tool touched, in an editor (files.js). `mustExist`: a path an answer
@@ -2503,6 +2595,7 @@ export default class HerdrChat extends View {
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
+      runBang: this.sub ? null : this.bangTarget(),
       openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null, findItem: this.find?.current?.id ?? null,
       setSvgHover: (key, on, cx) => this.setSvgHover(key, on, cx), groupOpen: (id) => this.groups.get(id),
@@ -2577,6 +2670,7 @@ export default class HerdrChat extends View {
     const bottom = v_flex().id("chat-bottom").w_full().gap(8)
       .on_size_change((sz, cx) => { if (sz.height !== this.bottomH) { this.bottomH = sz.height; this.debug.mark(); } })
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
+      .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
       .children([widgetTray(this, above, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
