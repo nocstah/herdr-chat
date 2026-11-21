@@ -35,7 +35,7 @@ import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
 import { appHas, bare, flip, viewProps, viewTerminal } from "./faces.js";
-import { VIEW_AGENTS, faceOf, started, withFace } from "./first-face.js";
+import { REMOTE_CHECK, VIEW_AGENTS, faceOf, flipsThere, remoteAnswer, started, withFace } from "./first-face.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -300,11 +300,24 @@ async function setFirstFace(arg) {
   await fs.writeFile(SETTINGS(), JSON.stringify(withFace(settings, face, agent), null, 2) + "\n");
 }
 
+/** What `machine` says of its own first face (first-face.js REMOTE_CHECK), asked over its core; null when it didn't
+ *  answer. Kept a few seconds, for terminals starting there together. */
+const remoteChecks = new Map();
+async function remoteCheck(machine) {
+  const had = remoteChecks.get(machine);
+  if (had && Date.now() - had.at < 5000) return had.answer;
+  const r = await exec("/bin/sh", ["-c", REMOTE_CHECK], { on: machine, timeout: 8000 }).catch(() => null);
+  const answer = r?.code === 0 ? remoteAnswer(r.stdout) : null;
+  remoteChecks.set(machine, { at: Date.now(), answer });
+  return answer;
+}
+
 /**
- * Claude Code's and Codex's first face (first-face.js): every half second, this computer's terminals where one started
- * since the last look; unless settings.json's face for that agent is "terminal", each shows its chat view, made as the
- * flip key makes it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds. The
- * keyboard follows into the view only from the terminal's own pane.
+ * Claude Code's and Codex's first face (first-face.js): every half second, the terminals where one started since the
+ * last look; unless settings.json's face for that agent is "terminal", each shows its chat view, made as the flip key
+ * makes it. A terminal whose pane isn't in the layout document yet (a tab just made) is tried again for a few seconds.
+ * The keyboard follows into the view only from the terminal's own pane. Another machine's terminal only while that
+ * machine's own app doesn't run, and by that machine's setting (remoteCheck).
  */
 class FirstFace {
   constructor(cx) {
@@ -312,6 +325,8 @@ class FirstFace {
     this.was = null;
     /** @type {Map<string, number>} address → until when to try its flip */
     this.pending = new Map();
+    /** @type {Set<string>} another machine's terminals pending here that its check let this app flip */
+    this.allowed = new Set();
     this.busy = false;
     // The first look after the app has listed its terminals: what runs then keeps its face.
     cx.timer.after(2000, () => cx.timer.every(500, () => void this.look(cx)));
@@ -321,33 +336,45 @@ class FirstFace {
     if (this.busy) return;
     this.busy = true;
     try {
-      const list = terminals().filter((t) => t?.address && !machineOf(t.address));
+      const list = terminals().filter((t) => t?.address);
       // Not one of herdr-chat's own: a chat's host, or the TUI its /tui opened, which was asked for as a terminal.
       const runs = (t) => t.state === "live" && VIEW_AGENTS.includes(agentOf(t)) && !Object.keys(t.labels ?? {}).some((k) => k.startsWith("herdr-chat."));
       const now = Date.now();
-      for (const a of started(this.was, list, runs, now)) this.pending.set(a, now + 8000);
+      // Another machine's document reaches this app later (its core's event, then a read over its link): longer.
+      for (const a of started(this.was, list, runs, now)) this.pending.set(a, now + (machineOf(a) ? 15000 : 8000));
       this.was = new Map(list.map((t) => [t.address, runs(t)]));
       if (!this.pending.size) return;
       // A settings.json that isn't JSON: as one without the keys (setFirstFace says what's wrong with it).
       let settings = null;
-      try {
-        settings = await readSettings();
-      } catch {}
+      if ([...this.pending.keys()].some((a) => !machineOf(a))) {
+        try {
+          settings = await readSettings();
+        } catch {}
+      }
       for (const [address, until] of [...this.pending]) {
         const t = list.find((x) => x.address === address);
-        if (!t || !runs(t) || faceOf(settings, agentOf(t)) !== "chat") {
+        const machine = machineOf(address);
+        // Another machine's: asked once per start (its app may flip it itself, or its setting may be the terminal).
+        if (machine && t && runs(t) && !this.allowed.has(address)) {
+          if (flipsThere(await remoteCheck(machine), agentOf(t))) this.allowed.add(address);
+          else { this.pending.delete(address); continue; }
+        }
+        if (!t || !runs(t) || (!machine && faceOf(settings, agentOf(t)) !== "chat")) {
           this.pending.delete(address);
+          this.allowed.delete(address);
           continue;
         }
         const mine = focused()?.terminal === address;
         try {
           const r = await flip(cx, address, "chat", viewProps(bare(address), t.foreground?.cwd ?? t.cwd ?? null, agentOf(t)));
           this.pending.delete(address);
-          if (mine && (!r.created || (await appHas(cx, r.pane))) && focused()?.terminal === address) run("pane.focus", { pane: r.pane });
+          this.allowed.delete(address);
+          if (mine && (!r.created || (await appHas(cx, r.pane, machine ? 8000 : 2000))) && focused()?.terminal === address) run("pane.focus", { pane: r.pane });
         } catch (e) {
           // A tab just made: its pane reaches the document after this look. Else, or out of time: the terminal stays.
           if (!/has no pane/.test(String(e?.message)) || Date.now() > until) {
             this.pending.delete(address);
+            this.allowed.delete(address);
             if (!/has no pane/.test(String(e?.message))) notify({ title: "Chat view", body: `${NAMES[agentOf(t)] ?? "The agent"} started in ${address}; its chat view didn't open: ${e?.message ?? e}`, level: "error" });
           }
         }

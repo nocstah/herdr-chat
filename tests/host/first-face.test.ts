@@ -2,8 +2,12 @@
 // settings.json's claude.face. The flip itself is faces.js's (terminal-view.test.ts, the rig).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 // @ts-expect-error: a mod's plain JavaScript, with no declarations (it loads as is in the app)
-import { DEFAULT_FACE, RECENT_MS, faceOf, started, withFace } from "../../herdr-app/mods/new-chat/first-face.js";
+import { DEFAULT_FACE, RECENT_MS, REMOTE_CHECK, faceOf, flipsThere, remoteAnswer, started, withFace } from "../../herdr-app/mods/new-chat/first-face.js";
 
 const runs = (t: any) => t.claude === true;
 const NOW = 1_800_000_000_000;
@@ -61,4 +65,70 @@ test("Codex has its own face: codex.face, the same default, written beside Claud
     assert.equal(faceOf({ codex: { face: "terminal" } }), "chat", "without an agent: Claude Code's");
     assert.deepEqual(withFace({ claude: { face: "chat" }, codex: { tui: ["x"] } }, "terminal", "codex"), { claude: { face: "chat" }, codex: { tui: ["x"], face: "terminal" } });
   });
+});
+
+test("remoteAnswer and flipsThere: another machine's terminal flips here only while its app is closed, by its setting", () => {
+  const said = (head: string, settings = "") => remoteAnswer(`${head}\n\x1e\n${settings}`);
+  const NOW = "herdr-chat=1 app=0 default=chat agents=claude,codex";
+  assert.deepEqual(said(NOW, '{"updates":{"check":false}}'), { herdrChat: true, app: false, agents: ["claude", "codex"], faces: { claude: "chat", codex: "chat" } });
+  assert.equal(flipsThere(said(NOW)), true, "no settings.json: its default");
+  assert.equal(flipsThere(said(NOW), "codex"), true);
+  assert.equal(flipsThere(said("herdr-chat=1 app=1 default=chat agents=claude,codex")), false, "its own app flips it");
+  assert.equal(flipsThere(said(NOW, '{"claude":{"face":"terminal"}}')), false, "its setting");
+  assert.equal(flipsThere(said(NOW, '{"claude":{"face":"terminal"}}'), "codex"), true, "Claude Code's setting isn't Codex's");
+  assert.equal(flipsThere(said(NOW, '{"codex":{"face":"terminal"}}'), "codex"), false);
+  // builds from before: no agents line (Claude Code's view alone), and before that no default line (the terminal)
+  assert.equal(flipsThere(said("herdr-chat=1 app=0 default=chat agents=claude")), true);
+  assert.equal(flipsThere(said("herdr-chat=1 app=0 default=chat agents=claude"), "codex"), false, "no Codex view there");
+  assert.equal(flipsThere(said("herdr-chat=1 app=0 default=chat"), "codex"), false);
+  assert.equal(flipsThere(said("herdr-chat=1 app=0 default=terminal agents=claude")), false);
+  assert.equal(flipsThere(said("herdr-chat=1 app=0 default=terminal agents=claude", '{"claude":{"face":"chat"}}')), true);
+  assert.equal(said(NOW, "{not json")?.faces.claude, "chat", "a settings.json that isn't JSON: its default");
+  assert.equal(flipsThere(remoteAnswer("herdr-chat=0\n")), false, "no setting there: a herdr-chat without it, or none");
+  assert.equal(remoteAnswer("sh: 1: syntax error"), null);
+  assert.equal(flipsThere(remoteAnswer("")), false);
+  assert.equal(flipsThere(null), false, "no answer");
+});
+
+test("REMOTE_CHECK, run by sh: the setting's file, the app's socket (live, stale, untried), its lines, settings.json", async () => {
+  const d = mkdtempSync(join(tmpdir(), "hc-ff-"));
+  try {
+    const home = join(d, "app"), sock = join(home, "herdr-app.sock");
+    const check = (env: Record<string, string> = {}) => {
+      const r = spawnSync("/bin/sh", ["-c", REMOTE_CHECK], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HERDR_APP_HOME: home + "/", ...env } });
+      assert.equal(r.status, 0, r.stderr);
+      return remoteAnswer(r.stdout);
+    };
+    mkdirSync(join(home, "mods/new-chat"), { recursive: true });
+    mkdirSync(join(home, "mods/chat"), { recursive: true });
+    mkdirSync(join(home, "data/herdr-chat"), { recursive: true });
+    assert.deepEqual(check(), { herdrChat: false, app: false, agents: [], faces: {} }, "no first-face.js: no setting there");
+    // this build's own lines, as the file has them
+    const { readFileSync } = await import("node:fs");
+    const own = readFileSync(new URL("../../herdr-app/mods/new-chat/first-face.js", import.meta.url), "utf8");
+    writeFileSync(join(home, "mods/new-chat/first-face.js"), own);
+    writeFileSync(join(home, "mods/chat/config.json"), JSON.stringify({ host: "/x/herdr-chat-host", node: process.execPath }, null, 2) + "\n");
+    assert.deepEqual(check(), { herdrChat: true, app: false, agents: ["claude", "codex"], faces: { claude: "chat", codex: "chat" } }, "no app socket: its app isn't running");
+    // the app runs: its socket answers
+    const app = spawn(process.execPath, ["-e", `require("net").createServer((c) => c.end()).listen(${JSON.stringify(sock)}, () => console.log("up"))`], { stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise((r) => app.stdout.once("data", r));
+    try {
+      assert.equal(check()?.app, true);
+      // a socket that can't be tried (the node its install named is gone): as running, so the two apps never both flip
+      writeFileSync(join(home, "mods/chat/config.json"), JSON.stringify({ node: join(d, "no-node") }, null, 2) + "\n");
+      assert.equal(check()?.app, true);
+    } finally {
+      app.kill("SIGKILL");
+    }
+    // the app was killed: its socket file stays, and nothing answers it
+    writeFileSync(join(home, "mods/chat/config.json"), JSON.stringify({ node: process.execPath }, null, 2) + "\n");
+    assert.equal(check()?.app, false, "a stale socket");
+    writeFileSync(join(home, "data/herdr-chat/settings.json"), '{"claude":{"face":"terminal"}}');
+    assert.deepEqual(check()?.faces, { claude: "terminal", codex: "chat" });
+    writeFileSync(join(home, "data/herdr-chat/settings.json"), "{not json");
+    writeFileSync(join(home, "mods/new-chat/first-face.js"), "// a build from before DEFAULT_FACE and VIEW_AGENTS\n");
+    assert.deepEqual(check()?.faces, { claude: "terminal" });
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });

@@ -157,6 +157,14 @@ Claude Code's, `new-chat.first-face:codex:chat` and
 `new-chat.first-face:codex:terminal` Codex's (a key, or another mod's
 settings).
 
+On another machine's terminal (a space of `hc machine`'s), that machine's
+own setting counts, and its own app does the flipping: the face is in its
+layout document, so every app showing the space shows it. While that app
+isn't running there (only its core is), the app that sees the agent start
+flips it in its place, with that machine's setting all the same (and only
+for an agent that machine's herdr-chat has a view for); it asks that machine
+(over its core) whether its app's socket answers.
+
 ### Spaces on another machine
 
 A chat in a space of another machine (`hc machine add`) runs where that
