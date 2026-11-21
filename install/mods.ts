@@ -49,7 +49,7 @@ const HERDR_IMPORT = /^import \{([^}]*)\} from "herdr";$/m;
 export function focusAgents(src: string): string {
   const m = HERDR_IMPORT.exec(src);
   if (!m) return src;
-  const names = m[1].split(",").map((n) => n.trim()).filter(Boolean);
+  const names = (m[1] ?? "").split(",").map((n) => n.trim()).filter(Boolean);
   if (!names.includes("agents")) return src;
   const rest = names.filter((n) => n !== "agents");
   const line = (rest.length ? `import { ${rest.join(", ")} } from "herdr";\n` : "") + `import { agents } from "./chat-focus.js";`;
