@@ -233,6 +233,35 @@ test("the view: the TUI's session as history, a message typed into the terminal,
   }
 });
 
+test("the view: the effort and permission mode Claude Code runs with, from its records, as the chat's own state", async () => {
+  const r = rig();
+  try {
+    const S1 = "33333333-3333-4333-8333-333333333333";
+    r.register(S1);
+    const p1: Rec = { ...prompt("What does upload.ts do?"), permissionMode: "auto" };
+    const a1: Rec = { ...answer("m1", "It uploads a file.", p1.uuid), effort: "xhigh" };
+    r.write(S1, [p1, a1]);
+    r.event({ terminals: [{ address: "t9", state: "live", foreground: { pid: r.pid, name: "claude", argv: ["claude"] }, status: { app: "claude", state: "idle" } }] });
+    await r.adapter.start(null, r.host);
+    await r.adapter.history();
+    const said = () => r.events.filter((e) => e.type === "thinking" || e.type === "permission_mode").map((e: any) => e.level ?? e.mode);
+    assert.deepEqual(said(), ["auto", "xhigh"]);
+    // the person switches mode in the TUI (Shift+Tab), then a reply at another effort; the same again says nothing
+    r.events.length = 0;
+    const sw = rec({ type: "permission-mode", permissionMode: "plan", sessionId: S1 }, a1.uuid);
+    const p2: Rec = { ...prompt("Plan the retry", sw.uuid), permissionMode: "plan" };
+    const a2: Rec = { ...answer("m2", "Here is the plan.", p2.uuid), effort: "medium" };
+    const a3: Rec = { ...answer("m3", "And a note.", a2.uuid), effort: "medium" };
+    r.write(S1, [sw, p2, a2, a3]);
+    r.status("working");
+    await until("the new settings", () => said().length >= 2);
+    await new Promise((res) => setTimeout(res, 200));
+    assert.deepEqual(said(), ["plan", "medium"]);
+  } finally {
+    r.done();
+  }
+});
+
 test("the view: the terminal's program exits: said once, the view's agent is gone", async () => {
   const r = rig();
   try {

@@ -161,6 +161,9 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   private sent: { id: string; text: string; at: number }[] = [];
   private model: string | null = null;
   private lastUsage: Rec | null = null;
+  /** The effort and permission mode the TUI runs with, as its records last said (shown, not set: the TUI owns them). */
+  private effort: string | null = null;
+  private mode: string | null = null;
   private quitSaid = false;
   /** The dialog on Claude Code's screen shown as a card (its id, what it asks, the screen read). */
   private ask: { id: string; key: string; prompt: ScreenPrompt } | null = null;
@@ -620,6 +623,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     let ended = false;
     for (const r of this.parse(lines)) {
       if (r.type === "assistant" && !r.isSidechain) this.noteModel(r.message ?? {});
+      this.noteSettings(r);
       for (const ev of this.follower.feed(r)) {
         if (ev.type === "assistant_end" && !ev.parent) ended = ev.stopReason !== "toolUse";
         else if (ev.type === "tool_call" || ev.type === "user_message") ended = false;
@@ -628,6 +632,20 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     }
     // A turn that ended while the terminal never showed it working (a quick answer, a local command's output).
     if (ended && this.running && this.status !== "working" && this.status !== "blocked") this.settle();
+  }
+
+  /** Claude Code writes its effort on each reply (`effort`) and its permission mode on each prompt and mode
+   * switch (`permissionMode`, also a "permission-mode" record): the view shows them beside the model. */
+  private noteSettings(r: Rec): void {
+    if (r.isSidechain) return;
+    if (r.type === "assistant" && typeof r.effort === "string" && r.effort && r.effort !== this.effort) {
+      this.effort = r.effort;
+      this.emit({ type: "thinking", level: r.effort });
+    }
+    if ((r.type === "user" || r.type === "permission-mode") && typeof r.permissionMode === "string" && r.permissionMode && r.permissionMode !== this.mode) {
+      this.mode = r.permissionMode;
+      this.emit({ type: "permission_mode", mode: r.permissionMode });
+    }
   }
 
   private noteModel(m: Rec): void {
@@ -685,7 +703,10 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     this.offset = next;
     this.follower = new TranscriptFollower(file);
     this.follower.prime(records);
-    for (const r of records) if (r.type === "assistant" && !r.isSidechain) this.noteModel(r.message ?? {});
+    for (const r of records) {
+      if (r.type === "assistant" && !r.isSidechain) this.noteModel(r.message ?? {});
+      this.noteSettings(r);
+    }
     this.plans = new ClaudePlans();
     return this.plans.replay(historyOf(records, file));
   }

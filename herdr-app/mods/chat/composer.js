@@ -278,9 +278,10 @@ export class Composer {
     this.menu = null;
   }
 
-  // The composer card (visual-v2.md §1): the text, image chips, then the
-  // footer row `c.footer` (model, thinking, context; statuses, ⋯) and the
-  // send / stop button. `c` is the view's render context (cards.js).
+  // The composer card, as the Claude app draws its own: the text, image chips, then a row with the +
+  // (`c.plus`) at the left, what the keys do now or a flash (`c.hint`) between, and the mic (`c.mic`)
+  // and the send / stop button at the right. What it runs with is under the card (chrome.js
+  // underRow). `c` is the view's render context (cards.js).
   view(t, c) {
     const chips = this.chips.map((ch, i) => {
       const x = div().id(`chip-x-${i}`).cursor_pointer().rounded(4).hover((s) => s.text_color(t.foreground).bg(t.hover))
@@ -298,24 +299,25 @@ export class Composer {
     let wrap = div().id("composer-box").w_full().min_w(0).key_context(this.context());
     for (const a of ACTIONS) wrap = wrap.on_action(a, (_e, cx) => c.action(a, cx));
     if (PASTE_KEYS.length) wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
-    wrap = wrap.child(Textarea.new(this.ta).w_full().px(14).pt(12).pb(4).text_size(14).text_color(t.foreground).bg(alpha(t.background, 0))
+    wrap = wrap.child(Textarea.new(this.ta).w_full().px(16).pt(14).pb(8).text_size(14).text_color(t.foreground).bg(alpha(t.background, 0))
       .token((tok, _cx) => skillPillEl(tok, t)));
     const working = c.working;
     const typed = Boolean(this.value.trim() || this.chips.length);
     const stop = working && !typed;
-    const btn = h_flex().id(stop ? "stop" : "send").flex_none().w(30).h(30).rounded(10).items_center().justify_center().cursor_pointer()
+    const btn = h_flex().id(stop ? "stop" : "send").flex_none().w(32).h(32).rounded(10).items_center().justify_center().cursor_pointer()
       .bg(stop ? t.foreground : typed ? t.solid : t.raised)
       .text_color(stop ? t.background : typed ? t.solid_foreground : t.dim)
       .hover((s) => s.opacity(0.85))
       .tooltip(stop ? `Stop (Esc${keyHint("stop") ? ` · ${keyHint("stop")}` : ""})` : working ? "Steer (Enter)" : "Send (Enter)")
       .on_click((_e, cx) => c.action(stop ? "herdrchat_stop" : "herdrchat_enter", cx))
       .child(icon(stop ? "square" : "arrow-up", stop ? 11 : 15));
-    return v_flex().w_full().rounded(14).border_1().border_color(this.focused ? alpha(t.accent, 0.55) : t.input).bg(t.surface)
-      .when(this.focused, (e) => e.shadow_sm())
+    return v_flex().w_full().rounded(18).border_1().border_color(this.focused ? alpha(t.foreground, 0.2) : t.input).bg(t.surface).shadow_sm()
       .child(wrap)
-      .when(chips.length > 0, (e) => e.child(h_flex().px(12).pb(6).gap(6).flex_wrap().children(chips)))
-      .child(h_flex().h(42).pl(8).pr(6).gap(4).items_center()
-        .child(h_flex().flex_1().min_w(0).gap(2).items_center().overflow_hidden().child(c.footer ?? div())) // clips, never under the button
+      .when(chips.length > 0, (e) => e.child(h_flex().px(14).pb(6).gap(6).flex_wrap().children(chips)))
+      .child(h_flex().h(44).pl(8).pr(8).gap(6).items_center()
+        .child(c.plus ?? div())
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(c.hintColor ?? t.dim).child(c.hint ?? "")) // clips, never under the buttons
+        .children([c.mic].filter(Boolean))
         .child(btn));
   }
 }

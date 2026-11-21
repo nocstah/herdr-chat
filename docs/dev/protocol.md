@@ -592,8 +592,8 @@ git: { name: string;             // the branch, or the short commit when detache
 The host (`host/git.ts`) reads it when the agent starts, when a run settles
 (a repo the agent made), and when the repo's `HEAD` changes, so a switch
 from the agent's bash or another terminal shows without a turn. Read-only:
-no op switches branches. The mod shows it at the right end of the hint line
-under the composer; a click copies it.
+no op switches branches. The mod shows it beside the folder under the
+composer; a click copies it.
 
 ## v3.5: updates (additive)
 

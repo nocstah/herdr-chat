@@ -53,7 +53,7 @@ import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
-import { branchChip, emptyState, footerControls, planStrip, queueChips, queueLabels, widgetTray } from "./chrome.js";
+import { emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
 import { openFile } from "./files.js";
 import { Composer } from "./composer.js";
 import { Picker, menuView, slashItems, wheel as wheelMenu } from "./menus.js";
@@ -150,6 +150,15 @@ export default class HerdrChat extends View {
       this.keysReady = true;
       this.debug.mark();
       cx.notify();
+    });
+    // The composer's mic (chrome.js micButton): the desktop's dictation toggle, where there is one.
+    this.dictation = null;
+    cx.spawn(async (cx) => {
+      await cx.sleep(0);
+      try {
+        const r = await exec("/bin/sh", ["-c", "command -v omarchy-dictation"]);
+        if (r.code === 0 && r.stdout.trim()) { this.dictation = r.stdout.trim(); this.debug.mark(); cx.notify(); }
+      } catch {}
     });
     this.composer = new Composer(cx, {
       placeholder: `Message ${PROVIDER_NAMES[this.provider ?? DEFAULT_PROVIDER] ?? "the agent"}…`,
@@ -1712,6 +1721,13 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
+  // The composer's + menu (chrome.js plusButton).
+  setPlusOpen(open, cx) {
+    this.plusOpen = open;
+    this.debug.mark();
+    cx.notify();
+  }
+
   // Text selected in a code block (codeview.js), on ⌘C.
   copySelection(text, cx) {
     cx.write_to_clipboard(text);
@@ -2106,6 +2122,43 @@ export default class HerdrChat extends View {
       case "conflict:go": return this.goToConflict(cx);
       case "conflict:take": return this.fire("take_over", {}, cx);
       case "statuses": return this.setStatusesOpen(!this.statusesOpen, cx);
+      // The folder under the composer: its path copied.
+      case "folder": {
+        const path = this.store.state.cwd || this.cwd || "";
+        if (!path) return;
+        cx.write_to_clipboard(path);
+        this.copied = path.length;
+        this.lastCopy = { id: "folder", len: path.length, text: path };
+        return this.flash(`Copied ${path.replace(this.homeDir, "~")}`, cx);
+      }
+      // The + menu: "@" or "/" typed where the text ends, which opens its menu; or the clipboard's image.
+      case "plus:file":
+      case "plus:command": {
+        this.plusOpen = false;
+        const v = this.composer.value, ch = what === "plus:file" ? "@" : "/";
+        this.composer.set(v === "" ? ch : `${v}${/\s$/.test(v) ? "" : " "}${ch}`);
+        this.composer.focus();
+        this.updateMenu(cx);
+        break;
+      }
+      case "plus:image":
+        this.plusOpen = false;
+        this.composer.focus();
+        this.pasteImage(cx);
+        break;
+      // The mic: the desktop's dictation starts (or stops); it types into the composer, which has the keyboard.
+      case "dictate": {
+        this.composer.focus();
+        const cmd = this.dictation;
+        if (!cmd) return;
+        cx.spawn(async (cx) => {
+          await cx.sleep(0);
+          let r;
+          try { r = await exec(cmd, ["toggle"]); } catch (e) { r = { code: 1, stderr: message(e) }; }
+          if (r.code !== 0) this.flash(`Dictation: ${String(r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0]}`, cx);
+        });
+        break;
+      }
       case "update:restart": this.updater.want(); break;
       case "branch": {
         const what = this.store.state.git?.name;
@@ -2560,7 +2613,7 @@ export default class HerdrChat extends View {
       activity: this.activity(), lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
-      statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null,
+      statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
       update: { ...this.updater.dump(this.conn.welcome), healing: this.healing ?? null },
       widgetsOpen: this.prefs.widgetsOpen, themeSent: Boolean(this.themeSent), themeOk: this.themeOk ?? null,
       enlarged: this.enlarged ?? null, svgHover: this.svgHover ?? null, svgSizes: Object.fromEntries(this.svgSizes),
@@ -2727,14 +2780,14 @@ export default class HerdrChat extends View {
       : menuView(this.composer.menu, t, { onPick: (i, cx) => this.pickMenu(i, cx), onWheel: (dy, cx) => this.wheel(dy, cx),
         onOutside: (cx) => this.outside(cx), keys: (name) => this.slashKey(name) });
     const working = this.store.working();
-    const footer = footerControls(this, t, { width: this.colW() - 50 });
     const keyName = (a, plain) => { const k = keyHint(a); return k === "↩" ? plain : k; };
     const sendKey = keyName("steer", "Enter");
     const followKey = keyName("followUp", null);
     const hintText = this.flashText?.text ?? (s.dialog ? (s.dialog.method === "permission" ? "Answer above · Esc denies" : "Answer above · Esc cancels") : working
       ? [sendKey && `${sendKey} ${s.capabilities?.steer === false ? "queues" : "steers"}`, followKey && `${followKey} after this run`, "Esc stops"].filter(Boolean).join(" · ")
-      : this.composer.focused && !this.composer.value ? [sendKey && `${sendKey} sends`, "Shift+Enter new line", "/ commands", "@ files", this.peekMode && "Esc closes"].filter(Boolean).join(" · ") : null);
-    const composer = Popup.new("composer-anchor", this.composer.view(t, { ...c, working, footer, action: (a, cx) => this.action(a, cx) }))
+      : this.peekMode && this.composer.focused && !this.composer.value ? "Esc closes" : null);
+    const composer = Popup.new("composer-anchor", this.composer.view(t, { ...c, working, plus: plusButton(this, t), mic: micButton(this, t),
+      hint: hintText, hintColor: this.flashText ? t.blocked : t.dim, action: (a, cx) => this.action(a, cx) }))
       .anchor("bottom_left").w_full()
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
     // Its height is in the dump: an open menu must not change it (an overlay, not the flow).
@@ -2745,10 +2798,8 @@ export default class HerdrChat extends View {
       .children([widgetTray(this, above, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
-      // The hint line, and the branch at its right end.
-      .child(h_flex().h(16).px(6).gap(10).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).truncate().text_color(this.flashText ? t.blocked : t.dim).child(hintText ?? ""))
-        .children([branchChip(this, t, { width: this.colW() })].filter(Boolean)));
+      // Under the card, as the Claude app has it: the folder and its branch; the model, its effort and the mode.
+      .child(div().px(4).child(underRow(this, t, { width: this.colW() - 8 })));
     // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();

@@ -20,7 +20,7 @@ import { CLAUDE_TOOLS } from "./tools.ts";
 type Rec = Record<string, any>;
 
 export const CLAUDE_PERMISSION_MODES: PermissionMode[] = [
-  { id: "default", label: "Ask", description: "Ask before edits and commands" },
+  { id: "default", label: "Manual", description: "Ask before edits and commands" },
   { id: "acceptEdits", label: "Accept edits", description: "Edit files without asking; ask for commands" },
   { id: "plan", label: "Plan", description: "Read and plan only, no changes" },
   { id: "auto", label: "Auto", description: "Decide per tool call" },
