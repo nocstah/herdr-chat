@@ -131,7 +131,7 @@ it; every key is optional):
   "env": { "KEY": "value" },
   "pi":     { "command": "/path/to/pi", "args": ["--model", "anthropic/claude-sonnet-4-5"] },
   "claude": { "env": { "CLAUDE_CONFIG_DIR": "/path/to/config" }, "face": "chat" },
-  "codex":  { "tui": ["my-wrapper", "codex"] },
+  "codex":  { "tui": ["my-wrapper", "codex"], "face": "chat" },
   "updates": { "check": false },
   "machines": { "box": { "direct": true } }
 }
@@ -145,14 +145,17 @@ another URL with GitHub's release JSON. `machines.<name>.direct: true` is for
 a machine that shares this computer's loopback (a second herdr-core here):
 its chats connect to the host's port as it is, with no ssh forward.
 
-Claude Code opens in its chat view: a terminal of this computer where
-Claude Code starts (a new tab, or `claude` typed in a shell) shows its chat
-view at once, as ⌘⇧J (Ctrl+Shift+J) would flip it. `claude.face: "terminal"`
-keeps it in the terminal (`"chat"`, or no `face`, is the chat view). Once per
-start: flipping back to the terminal stays until Claude Code starts there
-again, and terminals already running it when the app starts keep their face.
-The `new-chat.first-face:chat` and `new-chat.first-face:terminal` commands
-set it (a key, or another mod's settings).
+Claude Code and Codex open in their chat view: a terminal of this computer
+where one starts (a new tab, or `claude` or `codex` typed in a shell) shows
+its chat view at once, as ⌘⇧J (Ctrl+Shift+J) would flip it.
+`claude.face: "terminal"` (or `codex.face`) keeps that agent in the terminal
+(`"chat"`, or no `face`, is the chat view). Once per start: flipping back to
+the terminal stays until the agent starts there again, and terminals already
+running it when the app starts keep their face. The
+`new-chat.first-face:chat` and `new-chat.first-face:terminal` commands set
+Claude Code's, `new-chat.first-face:codex:chat` and
+`new-chat.first-face:codex:terminal` Codex's (a key, or another mod's
+settings).
 
 ### Spaces on another machine
 
@@ -171,7 +174,7 @@ Images and diagrams the host saves are copied here when the chat shows them
 up to 8 MB). Continue as chat and `/tui` work on that machine's agents as on
 this computer's, except for sub-agents, which still open their TUI.
 
-A Claude Code terminal there flips to its chat view too (⌘⇧J, or the top
+A Claude Code or Codex terminal there flips to its chat view too (⌘⇧J, or the top
 bar's Chat/Terminal switch): the view's host runs on that machine and types
 into the terminal there. Which face shows is the tab's, kept in that
 machine's layout, so a flip shows on every window that shows the tab,

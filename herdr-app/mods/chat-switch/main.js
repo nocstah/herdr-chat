@@ -1,5 +1,5 @@
 // The top bar's Chat | Terminal switch, as in Ovis's header: for the agent
-// whose pane has the keyboard, a Claude Code terminal or its chat view (the
+// whose pane has the keyboard, a Claude Code or Codex terminal or its chat view (the
 // terminal view, mods/chat/faces.js), the face that shows and the other one to
 // flip to. The installer puts it at the right end of the layout's top bar, in
 // a row with the tabs block (install/layout.ts); the chat view then leaves out
@@ -16,8 +16,9 @@ import { h_flex } from "gpui-base";
 import { focused, keys, run, shared, terminals, theme, window as appWindow } from "herdr";
 
 const VIEWS = "herdr-chat.views";
-const CLAUDE = new Set(["claude", "claude-code"]);
-const isClaude = (t) => [t?.program?.key, t?.app, t?.status?.app, t?.report?.app, t?.agent].some((a) => CLAUDE.has(a));
+// Herdr's names for the agents with a chat view → how the switch names them.
+const AGENTS = { claude: "Claude Code", "claude-code": "Claude Code", codex: "Codex" };
+const agentName = (t) => [t?.program?.key, t?.app, t?.status?.app, t?.report?.app, t?.agent].map((a) => AGENTS[a]).find(Boolean) ?? null;
 const stop = (_e, cx) => cx.stop_propagation();
 
 // Herdr's binding for the flip ("ctrl-shift-j"), as Herdr writes keys for people.
@@ -46,8 +47,9 @@ export default class ChatSwitch extends View {
     if (!address) return null;
     const term = terminals().find((x) => x.address === address);
     if (!term) return null;
-    if (f.terminal && (term.state !== "live" || !isClaude(term))) return null;
-    return { address, face: f.terminal ? "terminal" : "chat", term };
+    const name = agentName(term);
+    if (f.terminal && (term.state !== "live" || !name)) return null;
+    return { address, face: f.terminal ? "terminal" : "chat", term, name: name ?? "Claude Code" };
   }
 
   render() {
@@ -68,7 +70,7 @@ export default class ChatSwitch extends View {
     const key = flipKey();
     return bar.child(h_flex().id("switch-pill").flex_none().h(28).pl(10).pr(2).gap(8).items_center().rounded(8)
       .bg(t.surface).border_1().border_color(t.border).text_size(12).on_mouse_down("left", stop)
-      .child(h_flex().id("switch-status").flex_none().gap(6).items_center().tooltip(`Claude Code${said ? ` · ${said}` : ""}`)
+      .child(h_flex().id("switch-status").flex_none().gap(6).items_center().tooltip(`${it.name}${said ? ` · ${said}` : ""}`)
         .child(st === "working"
           ? svg("mods/chat/icons/spinner.svg").size(11).flex_none().text_color(color).spin(900)
           : div().w(10).flex_none().text_color(color).child(st === "idle" || !st ? "○" : st === "ended" ? "·" : "●"))

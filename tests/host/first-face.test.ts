@@ -50,3 +50,15 @@ test("faceOf and withFace: the chat view unless set to the terminal; the rest of
   assert.deepEqual(withFace({ claude: "odd" }, "terminal"), { claude: { face: "terminal" } });
   assert.deepEqual(withFace([], "chat"), { claude: { face: "chat" } });
 });
+
+test("Codex has its own face: codex.face, the same default, written beside Claude Code's", () => {
+  // @ts-expect-error: as above
+  return import("../../herdr-app/mods/new-chat/first-face.js").then(({ VIEW_AGENTS }) => {
+    assert.deepEqual(VIEW_AGENTS, ["claude", "codex"]);
+    assert.equal(faceOf(null, "codex"), DEFAULT_FACE);
+    assert.equal(faceOf({ claude: { face: "terminal" } }, "codex"), "chat", "Claude Code's face isn't Codex's");
+    assert.equal(faceOf({ codex: { face: "terminal" } }, "codex"), "terminal");
+    assert.equal(faceOf({ codex: { face: "terminal" } }), "chat", "without an agent: Claude Code's");
+    assert.deepEqual(withFace({ claude: { face: "chat" }, codex: { tui: ["x"] } }, "terminal", "codex"), { claude: { face: "chat" }, codex: { tui: ["x"], face: "terminal" } });
+  });
+});

@@ -70,8 +70,8 @@ const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before t
 let VIEWS = 0;
 
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
-// The terminal view: Claude Code commands whose result shows in the chat (the transcript has it); any other opens a screen in the TUI.
-const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export"]);
+// The terminal view: Claude Code's and Codex's commands whose result shows in the chat (its records have it); any other opens a screen in the TUI.
+const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export", "new", "plan"]);
 
 // A model provider's name for the model picker's scope tabs: its id with the dashes
 // out. The agent names its providers (two Claude Code logins are two providers, so an
@@ -98,7 +98,7 @@ export default class HerdrChat extends View {
     // layout writes); `subagent`: the chat in a tab of its own (Open as tab), the host left paneless.
     this.sub = p.peek || p.subagent || null;
     this.peekMode = Boolean(p.peek);
-    // The terminal view (faces.js): this chat is the chat face of a Claude Code terminal. Its host
+    // The terminal view (faces.js): this chat is the chat face of a Claude Code or Codex terminal. Its host
     // reads the TUI's session and types into it; it has no pane of its own, and the tab is the terminal's.
     // The props name the terminal as its machine's document does ("t5"): `view` is the app's name for it.
     this.viewAttach = !this.sub && typeof p.attach === "string" ? bare(p.attach) : null;
@@ -946,7 +946,7 @@ export default class HerdrChat extends View {
     }
     this.composer.clear();
     this.timeline.toBottom();
-    // The terminal view: `!command` is Claude Code's bash mode, shown by its own records (a Bash card).
+    // The terminal view: `!command` is the TUI's shell command (Claude Code's bash mode), shown by its own records (a card).
     const bang = Boolean(this.view) && !images.length && /^!\s*[^\s=!]/.test(text.trim());
     this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}) }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
@@ -957,7 +957,7 @@ export default class HerdrChat extends View {
 
   // ---- the terminal view (faces.js) -------------------------------------------------
 
-  // A Claude Code command the chat face has no picker for (/model, /resume): typed into the TUI, which shows it.
+  // An agent's command the chat face has no picker for (/model, /resume): typed into the TUI, which shows it.
   viewCommand(name, cx) {
     this.fire("send", { text: `/${name}`, mode: "auto" }, cx, (_d, cx) => this.showFace("terminal", cx));
   }
@@ -1334,7 +1334,7 @@ export default class HerdrChat extends View {
         return this.startHandoff("session", "tui", cx);
       case "flip":
         if (this.view) return this.showFace("terminal", cx);
-        return this.flash(`${keyHint("flip") ?? "Ctrl+Shift+J"} flips a Claude Code terminal and its chat view. This chat runs its own agent: ${keyHint("tui") ?? "/tui"} opens it in a terminal`, cx);
+        return this.flash(`${keyHint("flip") ?? "Ctrl+Shift+J"} flips a Claude Code or Codex terminal and its chat view. This chat runs its own agent: ${keyHint("tui") ?? "/tui"} opens it in a terminal`, cx);
       case "resume": return this.view ? this.viewCommand("resume", cx) : toggle("sessions", () => this.openSessionsPicker(cx));
       case "pageUp": this.timeline.page(1); break;
       case "pageDown": this.timeline.page(-1); break;
@@ -1970,8 +1970,8 @@ export default class HerdrChat extends View {
   // ---- `!` commands in answers (bang.js) -------------------------------------------
 
   // What the answers' run bars and links do: where a `!` command can run.
-  // `here`: the agent's name when it can run there (the terminal view: Claude
-  // Code's bash mode), else null (a chat's own agent has no bash mode: a new tab only).
+  // `here`: the agent's name when it can run there (the terminal view: the
+  // TUI's shell command, Claude Code's bash mode), else null (a chat's own agent has no bash mode: a new tab only).
   bangTarget() {
     return { here: this.view ? this.providerName() : null, run: (/** @type {string[]} */ cmds, /** @type {string} */ where, /** @type {any} */ cx) => this.runBang(cmds, where, cx) };
   }
@@ -1996,7 +1996,7 @@ export default class HerdrChat extends View {
       if (this.viewStatus === "blocked") return this.flash(`${name} is asking something: answer it first`, cx);
       this.lastRun = { where, commands, at: Date.now() };
       this.timeline.toBottom();
-      // No bubble: Claude Code's own records show the run (a Bash card), once it's typed.
+      // No bubble: the agent's own records show the run (a command card), once it's typed.
       this.fire("send", { text: `!${line}`, mode: "auto", echo: false }, cx);
       return;
     }

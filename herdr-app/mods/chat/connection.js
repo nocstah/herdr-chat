@@ -297,7 +297,7 @@ export class Connection {
       "--", "/usr/bin/env", ...Object.entries(env).map(([k, v]) => `${k}=${v}`),
       host, "serve", "--chat", this.o.chat, "--cwd", this.o.cwd, "--state-dir", sideState(side), "--app-home", side ? side.home : appHome(), "--provider", provider,
       ...(session ? ["--session", session] : []),
-      // The terminal view (faces.js): the agent is the Claude Code TUI in that terminal.
+      // The terminal view (faces.js): the agent is the Claude Code or Codex TUI in that terminal.
       ...(this.o.attach ? ["--attach", this.o.attach] : []),
       // A Pi TUI this chat takes over: the host waits for its pid, then uses its model and
       // thinking (only while that pid lives: a later restart of the chat ignores them).

@@ -13,6 +13,7 @@ import type { RegistryEntry } from "./registry.ts";
 import { ChatClient, parseWait } from "./client.ts";
 import { createAdapter, DEFAULT_PROVIDER, providerNames, tuiSession } from "./providers/index.ts";
 import { ClaudeTerminalAdapter } from "./providers/claude/terminal.ts";
+import { CodexTerminalAdapter } from "./providers/codex/terminal.ts";
 import { parseArgs } from "./args.ts";
 import type { Args } from "./args.ts";
 import { appHomeOf, labelSelf, newChatId, planSubagent } from "./subagent.ts";
@@ -25,7 +26,7 @@ import { saveLimits } from "./limits.ts";
 const USAGE = `herdr-chat-host serve   --chat <id> --cwd <dir> --state-dir <dir> [--provider pi] [--session <file>] [--after-pid <pid> [--model <provider/id>] [--thinking <level>]] [--attach <terminal>] [--app-home <dir>] [--<provider> <cmd>] [-- <agent args>]
   (--app-home: the Herdr app's home, whose app it asks to close its hidden pane once its chat's pane is gone; default $HERDR_APP_HOME, else ~/.config/herdr-app)
   (--provider defaults to the chat's registered provider, else pi; --pi <cmd> or HERDR_CHAT_PI picks the pi binary)
-  (--attach <terminal>: the terminal view, Claude Code only: the agent is its own TUI in that terminal, which the chat reads and types into, never runs)
+  (--attach <terminal>: the terminal view, Claude Code or Codex: the agent is its own TUI in that terminal, which the chat reads and types into, never runs)
 herdr-chat-host run     [--provider pi|claude|codex] [--session <file>] [--cwd <dir>] [-- <agent args>]
   (a sub-agent chat, for \`hc run\`: a fresh chat id, the app's state dir and the chat mod's config.json, labels its own terminal)
 herdr-chat-host tui-session --provider <id> --pid <pid> --cwd <dir> [--label <session>]
@@ -88,13 +89,15 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   }
   process.on("exit", () => releaseChat(stateDir, chatId));
   // --attach <terminal>: the terminal view. The agent is the person's own TUI in that terminal;
-  // this host reads its session and types into it (providers/claude/terminal.ts), never runs it.
+  // this host reads its session and types into it (providers/claude/terminal.ts, codex/terminal.ts), never runs it.
   const view = a.flags.get("attach")?.[0] ?? null;
-  if (view && provider !== "claude") die(`--attach works with Claude Code only for now (not ${provider})`);
+  if (view && provider !== "claude" && provider !== "codex") die(`--attach works with Claude Code and Codex (not ${provider})`);
   const hcBin = process.env.HERDR_CHAT_HC || "hc";
-  const adapter = view
-    ? new ClaudeTerminalAdapter({ cwd, args: [], log, command: "claude", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent") })
-    : createAdapter(provider, { cwd, args: a.after, log, ...(agentCommand ? { command: agentCommand } : {}) });
+  const adapter = view && provider === "codex"
+    ? new CodexTerminalAdapter({ cwd, args: [], log, command: "codex", terminal: view, hc: hcBin })
+    : view
+      ? new ClaudeTerminalAdapter({ cwd, args: [], log, command: "claude", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent") })
+      : createAdapter(provider, { cwd, args: a.after, log, ...(agentCommand ? { command: agentCommand } : {}) });
   log(`serve chat=${chatId} cwd=${cwd} session=${session ?? "-"} provider=${provider} cmd=${agentCommand ?? "(default)"}${view ? ` view=${view}` : ""} pid=${process.pid}`);
 
   // Images saved by an earlier run of this chat belong to items that no longer exist.
