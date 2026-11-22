@@ -26,7 +26,10 @@ import { homedir } from "node:os";
 import { bindRollout, findRollout, isCodexTui, LINUX_IO } from "./bind.ts";
 import type { BindIO, Binding } from "./bind.ts";
 import { RolloutFollower } from "./items.ts";
-import { codexMovesTo, codexPromptKey, readCodexPrompt } from "./screen.ts";
+import { codexModels, modelAnswer, newLines, startingModel } from "./models.ts";
+import { codexAtPrompt, codexMovesTo, codexPromptKey, readCodexPrompt } from "./screen.ts";
+import { waitForPrompt } from "../prompt-wait.ts";
+import type { PromptWait } from "../prompt-wait.ts";
 import type { CodexPrompt, CodexRow } from "./screen.ts";
 import { readImageFile } from "./adapter.ts";
 import { CODEX_TOOLS } from "./tools.ts";
@@ -68,7 +71,7 @@ function sendError(out: string): string {
 
 /** Codex's own commands, for the slash menu: typed into the TUI (the chat flips to the terminal for those that open a screen there). */
 const VIEW_COMMANDS: [string, string][] = [
-  ["model", "Pick the model and reasoning effort (in the terminal)"],
+  ["model", "Pick the model and reasoning effort"],
   ["permissions", "What Codex may do without asking (in the terminal)"],
   ["plan", "Switch to Plan mode"],
   ["new", "Start a new conversation"],
@@ -170,6 +173,8 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   private askTimer: NodeJS.Timeout | null = null;
   private answering = false;
   private askHold = 0;
+  private modelNow: string | null = null;
+  private effortNow: string | null = null;
   private snapshot: Promise<void>;
   private gotSnapshot: () => void = () => {};
 
@@ -186,6 +191,12 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   private emit(ev: NormalizedEvent): void {
     if (this.disposed) return;
     this.host?.emit(ev);
+    // The model and effort it runs with now (the picker's current ones), and the model's levels for the effort chip.
+    if (ev.type === "model" && ev.model.id !== this.modelNow) {
+      this.modelNow = ev.model.id;
+      const m = codexModels(this.home()).find((x) => x.id === ev.model.id);
+      this.host?.emit({ type: "capabilities", capabilities: { thinkingLevels: m?.efforts ?? [] } });
+    } else if (ev.type === "thinking") this.effortNow = ev.level;
   }
 
   private log(msg: string): void {
@@ -291,6 +302,14 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     const fg = this.fg;
     if (!fg) return false;
     return this.io.tree(fg.pid).some((p) => isCodexTui(this.io.argv(p)));
+  }
+
+  private promptWaits = 0;
+
+  /** A command the chat typed opened a screen in the TUI (prompt-wait.ts): until Codex shows its prompt again. */
+  awaitPrompt(): Promise<PromptWait> {
+    const mine = ++this.promptWaits;
+    return waitForPrompt(() => this.screenText(), codexAtPrompt, { cancelled: () => this.disposed || !this.live || mine !== this.promptWaits });
   }
 
   private async screenText(): Promise<string | null> {
@@ -569,7 +588,14 @@ export class CodexTerminalAdapter implements ProviderAdapter {
       this.thread = UUID.exec(basename(session))?.[0] ?? null;
       this.emit({ type: "session", id: this.thread, file: session });
     }
-    if (!this.file) this.log("no Codex conversation found yet: waiting for one");
+    if (!this.file) {
+      this.log("no Codex conversation found yet: waiting for one");
+      // Until its first turn writes one: the model it started on, as Codex picks it (models.ts).
+      const tui = this.tuiPid();
+      const start = tui ? startingModel(this.io.argv(tui), this.home()) : null;
+      if (start?.model) this.emit({ type: "model", model: { provider: "openai", id: start.model, name: start.model, reasoning: true, contextWindow: null, input: ["text", "image"] } });
+      if (start?.effort) this.emit({ type: "thinking", level: start.effort });
+    }
     this.tailTimer = setInterval(() => this.tail(), TAIL_MS());
     this.tailTimer.unref();
     this.sessionTimer = setInterval(() => void this.checkSession(), SESSION_MS());
@@ -673,8 +699,63 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     this.events = null;
   }
 
+  /** Codex's /model picker's models (models.ts), and the current one if the catalog hides it. */
   async listModels(): Promise<AgentModel[]> {
-    return [];
+    return codexModels(this.home())
+      .filter((m) => m.listed || m.id === this.modelNow)
+      .map((m) => ({ provider: "openai", id: m.id, name: m.name, reasoning: m.efforts.length > 0, enabled: true }));
+  }
+
+  /** The Codex TUI's process in the terminal (the foreground, or one under it). */
+  private tuiPid(): number | null {
+    const fg = this.fg;
+    return fg ? this.io.tree(fg.pid).find((p) => isCodexTui(this.io.argv(p))) ?? null : null;
+  }
+
+  /**
+   * A /model line typed into the TUI (models.ts), as the person would type it: Codex sets the model at once,
+   * with no picker, and says so on its screen ("Model changed to …"), or prints why not: that refusal is this
+   * one's error. Its screen answers well before `hc send` is done (it waits a few seconds for a turn the line
+   * never starts); without either line on it, the send's end and a second more are the answer.
+   */
+  private async typeModelCommand(line: string): Promise<void> {
+    if (!this.live) throw new AgentError("Codex's terminal has ended.", true);
+    if (!this.codexRuns()) throw new Error("Codex isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
+    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    const before = await this.screenText();
+    let sent: { code: number | null; out: string } | null = null;
+    let sentAt = 0;
+    void this.hc(["send", "--json", this.opts.terminal, line], 70_000).then((r) => {
+      sent = { code: r.code, out: r.stdout || r.stderr };
+      sentAt = Date.now();
+    });
+    for (const t0 = Date.now(); Date.now() - t0 < 75_000;) {
+      await new Promise((res) => setTimeout(res, 250));
+      const done = sent as { code: number | null; out: string } | null;
+      if (done && done.code !== 0) throw new Error(`Couldn't type into the terminal: ${sendError(done.out) || `hc exit ${done.code}`}`);
+      const after = await this.screenText();
+      const answer = after === null ? null : modelAnswer(newLines(before, after));
+      if (answer && "refused" in answer) throw new Error(`Codex: ${answer.refused}`);
+      if (answer || (done && Date.now() - sentAt > 1000)) return;
+    }
+  }
+
+  async setModel(_provider: string, id: string): Promise<void> {
+    if (id === this.modelNow) return; // already (Codex refuses a hidden model by name, even the current one)
+    const m = codexModels(this.home()).find((x) => x.id === id);
+    if (!m) throw new Error(`Codex's model list has no "${id}".`);
+    // The effort it has now, where the new model has it; else the model's own default (as Codex's picker does).
+    const effort = this.effortNow && m.efforts.includes(this.effortNow) ? this.effortNow : m.defaultEffort;
+    await this.typeModelCommand(`/model ${id}${effort ? ` --reasoning=${effort}` : ""}`);
+    this.emit({ type: "model", model: { provider: "openai", id, name: id, reasoning: m.efforts.length > 0, contextWindow: m.contextWindow, input: ["text", "image"] } });
+    if (effort) this.emit({ type: "thinking", level: effort });
+  }
+
+  async setThinking(level: string): Promise<void> {
+    const m = this.modelNow ? codexModels(this.home()).find((x) => x.id === this.modelNow) : undefined;
+    if (m?.efforts.length && !m.efforts.includes(level)) throw new Error(`${m.name} has ${m.efforts.join(", ")}.`);
+    await this.typeModelCommand(`/model --reasoning=${level}`);
+    this.emit({ type: "thinking", level });
   }
 
   async commands(): Promise<AgentCommand[]> {
@@ -689,14 +770,6 @@ export class CodexTerminalAdapter implements ProviderAdapter {
 
   tuiCommand(): string[] {
     return [];
-  }
-
-  async setModel(): Promise<void> {
-    throw new Error(NOT_HERE);
-  }
-
-  async setThinking(): Promise<void> {
-    throw new Error(NOT_HERE);
   }
 
   async setPermissionMode(): Promise<void> {

@@ -400,6 +400,12 @@ export interface ProviderAdapter {
   // ---- settings and sessions (each emits the events for what changed)
   setModel(provider: string, id: string): Promise<void>;
   setThinking(level: string): Promise<void>;
+  /**
+   * Optional (the terminal view): a command the chat typed into the agent's TUI opened a screen there
+   * (a picker, a list); resolves `{back: true}` once the TUI shows its prompt again, `{back: false}`
+   * when the command opened nothing there, the wait gave up, or a newer one replaced it.
+   */
+  awaitPrompt?(): Promise<{ back: boolean }>;
   setPermissionMode(mode: string): Promise<void>;
   /** Resolves when compaction is done; rejects when it fails. */
   compact(instructions?: string): Promise<void>;

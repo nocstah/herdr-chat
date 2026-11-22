@@ -24,7 +24,9 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { movesTo, promptKey, readPrompt } from "./screen.ts";
+import { claudeAtPrompt, movesTo, promptKey, readPrompt } from "./screen.ts";
+import { waitForPrompt } from "../prompt-wait.ts";
+import type { PromptWait } from "../prompt-wait.ts";
 import type { Row, ScreenPrompt } from "./screen.ts";
 import { TranscriptFollower } from "./follow.ts";
 import { TuiQueue } from "./tui-queue.ts";
@@ -331,13 +333,26 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   /** The dialog on the screen now; null: none it knows; undefined: the screen couldn't be read. */
   private async screenPrompt(): Promise<ScreenPrompt | null | undefined> {
+    const text = await this.screenText();
+    return text === null ? undefined : readPrompt(text);
+  }
+
+  private async screenText(): Promise<string | null> {
     const r = await this.hc(["read", "--json", this.opts.terminal], 5000);
     try {
       const text = JSON.parse(r.stdout)?.text;
-      return typeof text === "string" ? readPrompt(text) : undefined;
+      return typeof text === "string" ? text : null;
     } catch {
-      return undefined;
+      return null;
     }
+  }
+
+  private promptWaits = 0;
+
+  /** A command the chat typed opened a screen in the TUI (prompt-wait.ts): until Claude Code shows its prompt again. */
+  awaitPrompt(): Promise<PromptWait> {
+    const mine = ++this.promptWaits;
+    return waitForPrompt(() => this.screenText(), claudeAtPrompt, { cancelled: () => this.disposed || !this.live || mine !== this.promptWaits });
   }
 
   private showAsk(p: ScreenPrompt | null): void {

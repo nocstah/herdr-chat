@@ -97,10 +97,16 @@ Ovis flips between a pane's terminal and its chat. Ctrl+Shift+J (⌘⇧J) in the
 terminal shows its chat view; the same key in the view, or its Chat | Terminal
 switch, shows the terminal again. Nothing restarts: the agent you started stays
 the one agent, and the view reads its conversation as it writes it and types
-what you send into it. A slash command that opens a screen in the TUI (`/model`,
-`/resume`, `/config`) shows the terminal for it. Its permission prompts and
-questions show as cards above the composer; an answer is the keys you would
-press in the terminal.
+what you send into it. A slash command that opens a screen in the TUI
+(`/resume`, `/config`, `/permissions`) shows the terminal for it, and the chat
+comes back by itself once the TUI is at its prompt again (Esc there, or a
+pick); a command that only prints something (`/status`) leaves you in the
+terminal to read it. Codex's model and effort chips (and `/model`) open the
+chat's own pickers, filled from Codex's model list: a pick is typed into the
+TUI as `/model <model> --reasoning=<level>`, and Codex's answer shows in the
+chat. Claude Code's `/model` still opens its picker in the terminal, and comes
+back the same way. Its permission prompts and questions show as cards above
+the composer; an answer is the keys you would press in the terminal.
 
 Codex runs its conversations in a shared background server, so its terminal
 doesn't say which conversation it shows: the view takes the one that server
