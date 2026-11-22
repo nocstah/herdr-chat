@@ -27,6 +27,7 @@ import { bindRollout, findRollout, isCodexTui, LINUX_IO } from "./bind.ts";
 import type { BindIO, Binding } from "./bind.ts";
 import { RolloutFollower } from "./items.ts";
 import { codexModels, modelAnswer, newLines, startingModel } from "./models.ts";
+import { imageLines, pruneImages, saveImages, withImageLines } from "../sent-images.ts";
 import { codexAtPrompt, codexMovesTo, codexPromptKey, readCodexPrompt } from "./screen.ts";
 import { waitForPrompt } from "../prompt-wait.ts";
 import type { PromptWait } from "../prompt-wait.ts";
@@ -57,7 +58,7 @@ const BUSY = "Codex is working: run the command when it's done, or in a new tab.
 const ASKING = "Codex is asking something in its terminal: answer it there first (Ctrl+Shift+J shows it), then send.";
 const ASKING_CARD = "Codex is asking something: answer its card above the composer first, then send.";
 const CHANGED = "Codex's dialog changed in the terminal: answer the new one.";
-const NO_IMAGES = "Images can't be typed into Codex's terminal from the chat yet: paste them there (Ctrl+Shift+J shows it).";
+const NO_IMAGES = "Images can't be sent from here: paste them in Codex's terminal (Ctrl+Shift+J shows it).";
 
 /** Why `hc send` refused, in words. */
 function sendError(out: string): string {
@@ -94,6 +95,8 @@ export type CodexTerminalOptions = AdapterOptions & {
   hc: string;
   /** What the binding reads (tests stand in for /proc). */
   io?: BindIO;
+  /** Where a message's images are saved for Codex to open (sent-images.ts); none: no images. */
+  sentDir?: string;
 };
 
 /** The text a user message and a sent one are compared by. */
@@ -134,13 +137,22 @@ export function rolloutRecords(path: string, home: string, depth = 0): Rec[] {
   return own;
 }
 
+/** A message's images, named in it as sent-images.ts writes them: shown as its images, without those lines. */
+function withImages(ev: NormalizedEvent): NormalizedEvent {
+  if (ev.type !== "user_message") return ev;
+  const m = imageLines(ev.text);
+  if (!m.images.length) return ev;
+  const images = [...(ev.imageBlocks ?? []), ...m.images];
+  return { ...ev, text: m.text, images: images.length, imageBlocks: images };
+}
+
 export class CodexTerminalAdapter implements ProviderAdapter {
   readonly id = "codex";
   readonly name = "Codex";
   readonly tools = CODEX_TOOLS;
   readonly capabilities: Capabilities = {
     steer: true, followUp: false, thinkingLevels: [], permissions: true, permissionModes: [], extensionUi: false,
-    compact: false, compactInstructions: false, rename: false, fork: false, images: false, cost: false, tui: false,
+    compact: false, compactInstructions: false, rename: false, fork: false, images: true, cost: false, tui: false,
   };
   // /resume is the TUI's (its picker): the chat's own list stays empty.
   readonly sessions: SessionSource = { kind: "files", files: () => [], describe: () => null };
@@ -182,6 +194,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     this.opts = opts;
     this.io = opts.io ?? LINUX_IO;
     this.snapshot = new Promise((r) => (this.gotSnapshot = r));
+    if (opts.sentDir) pruneImages(opts.sentDir);
   }
 
   get alive(): boolean {
@@ -421,7 +434,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
         continue;
       }
       const before = this.follower.turn;
-      for (const ev of this.follower.feed(r)) this.emit(this.matchEcho(ev));
+      for (const ev of this.follower.feed(r)) this.emit(this.matchEcho(withImages(ev)));
       if (this.follower.turn !== before) ended = this.follower.turn === "ended";
     }
     this.usageNow = this.follower.usage();
@@ -622,7 +635,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     for (const r of records) for (const ev of past.feed(r)) {
       if (ev.type === "model" || ev.type === "thinking") now.set(ev.type, ev);
       else if (ev.type === "status") now.set(`status:${ev.key}`, ev);
-      else out.push(ev);
+      else out.push(withImages(ev));
     }
     for (const ev of now.values()) this.emit(ev);
     // A turn still running stays open for the live follower: its items come as they finish.
@@ -643,12 +656,15 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     if (!this.live) throw new AgentError("Codex's terminal has ended.", true);
     if (!this.codexRuns()) throw new Error("Codex isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
     if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
-    if (p.images.length) throw new Error(NO_IMAGES);
     // `!command`: Codex runs it in a shell of its own and shows it; only at rest, as Ctrl+! does.
     const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
     if (bang && this.status === "working") throw new Error(BUSY);
     const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
-    const text = bang ? `!${bang[1]!.trim()}` : p.text;
+    if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
+    if (p.images.length && !this.opts.sentDir) throw new Error(NO_IMAGES);
+    // Images: saved as files and named in the message, which Codex opens with its image viewer (sent-images.ts).
+    const files = p.images.length ? saveImages(this.opts.sentDir!, p.images) : [];
+    const text = bang ? `!${bang[1]!.trim()}` : files.length ? withImageLines(p.text, files) : p.text;
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
     const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
