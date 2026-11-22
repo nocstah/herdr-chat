@@ -42,7 +42,8 @@ export function bgSummary(b) {
   return parts.join(" · ");
 }
 
-// Each row's parts. `now` is the host's time now (state.background.at, moved on by the time since it came).
+// Each row's parts. `now` is the host's time now (state.background.at, moved on by the time since it came). A shell
+// (a command Claude Code runs, v3.9) shows its command as its title and its last output line as what it does now.
 export function bgRows(b, now) {
   if (!b) return [];
   return b.tasks.map((x) => {
@@ -58,13 +59,37 @@ export function bgRows(b, now) {
     return {
       id: x.id, kind: x.kind, state: x.state,
       name: x.name,
-      title: x.kind === "agent" ? x.title ?? "" : "",
+      title: x.kind === "workflow" ? "" : x.title ?? "",
+      command: x.kind === "shell" || x.kind === "monitor",
       activity: x.state === "running" ? x.activity ?? "" : "",
       worktree: x.worktree ?? null,
       progress: x.kind === "workflow" && x.total ? Math.min(1, (x.done ?? 0) / x.total) : null,
       meta: meta.join(" · "),
     };
   });
+}
+
+// An opened row's lines (protocol v3.9 background_detail): a command's last `max` output lines, an agent's last steps
+// (a tool call's title, or its words' first line), a run's agents with how each is doing.
+export function bgDetailLines(d, max = 14) {
+  if (!d) return [];
+  if (d.kind === "shell" || d.kind === "monitor") {
+    const lines = (d.output ?? "").replace(/\n+$/, "").split("\n");
+    return (lines.length === 1 && !lines[0] ? [] : lines).slice(-max).map((text) => ({ kind: "output", text }));
+  }
+  if (d.kind === "agent") {
+    return (d.steps ?? []).slice(-max).map((s) => ({ kind: s.kind, text: s.kind === "text" ? s.text.split("\n").find((l) => l.trim())?.trim() ?? "" : s.text }));
+  }
+  return (d.agents ?? []).map((a) => ({ kind: a.state, text: a.label || "agent" }));
+}
+
+// What an opened row says when it has nothing to show yet.
+export function bgDetailEmpty(d) {
+  if (!d) return "Reading…";
+  if (d.error) return d.error;
+  if (d.kind === "shell" || d.kind === "monitor") return d.state === "running" ? "No output yet" : "No output";
+  if (d.kind === "agent") return "No steps yet";
+  return "No agents yet";
 }
 
 // The tick that moves the times on: while something runs, once a second.

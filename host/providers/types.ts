@@ -67,10 +67,11 @@ export type BackgroundState = "running" | "done" | "failed" | "stopped";
 export type BackgroundTask = {
   /** The agent's id, or the run's. */
   id: string;
-  kind: "agent" | "workflow";
-  /** An agent's type ("general-purpose"), a run's name. */
+  /** A shell: a command Claude Code runs now (claude/shells.ts); a monitor: a Monitor call's command. */
+  kind: "agent" | "workflow" | "shell" | "monitor";
+  /** An agent's type ("general-purpose"), a run's name, "shell" or "monitor". */
   name: string;
-  /** An agent's task (the description it was given); null for a run. */
+  /** An agent's task (the description it was given), a shell's command; null for a run. */
   title: string | null;
   /** What it does now: an agent's last tool call (its description, command, file…), a run's agents at work (their labels). */
   activity: string | null;
@@ -89,6 +90,29 @@ export type BackgroundTask = {
 
 /** `at`: the host's time when it was read (a client works out the elapsed times from it). */
 export type Background = { at: number; tasks: BackgroundTask[]; shells: number; monitors: number };
+
+/**
+ * One background task opened (protocol `background_detail`): a shell's output so far; an agent's last steps and words; a
+ * run's agents. Read when asked, for the person's own view; never logged.
+ */
+export type BackgroundDetail = {
+  id: string;
+  kind: BackgroundTask["kind"];
+  state: BackgroundState;
+  /** A shell's command, an agent's task. */
+  title: string | null;
+  /** A shell's or monitor's output, its end (`cut`: earlier output not sent); null for others. */
+  output: string | null;
+  cut: boolean;
+  /** Where the whole output is (a shell's output file). */
+  outputFile: string | null;
+  /** An agent's steps, oldest first: each tool call's title, and its words between them. */
+  steps: { kind: "tool" | "text"; text: string }[];
+  /** A run's agents. */
+  agents: { label: string; state: "running" | "done" | "failed" }[];
+  /** It can be stopped from here (a running shell). */
+  stoppable: boolean;
+};
 
 // ---------------------------------------------------------------- asks
 
@@ -191,7 +215,9 @@ export type NormalizedEvent = Common &
     | { type: "tool_call_start"; index: number; callId: string; name: string }
     | { type: "tool_call_delta"; index: number; delta: string }
     /** The call is complete; not running yet. */
-    | { type: "tool_call"; index?: number; callId: string; name: string; args: unknown }
+    | { type: "tool_call"; index?: number; callId: string; name: string; args: unknown; label?: string }
+    /** A better title for a call than its input gives (Claude Code's Code Mode Poll: the scripts it waits for, claude/repl.ts). */
+    | { type: "tool_label"; callId: string; label: string }
     | { type: "tool_started"; callId: string; name: string; args?: unknown }
     /** `output` is the whole output so far, not a delta. */
     | { type: "tool_progress"; callId: string; name: string; args?: unknown; output?: string }
@@ -347,6 +373,10 @@ export interface ProviderAdapter {
   removeQueued?(id: string): Promise<boolean>;
   /** Stops the run. Fire and forget: `run_settled` follows. */
   abort(): void;
+  /** Optional: one background task's detail (`background` events' tasks), or null when it isn't known (any more). */
+  backgroundDetail?(id: string): BackgroundDetail | null;
+  /** Optional: stops a background task that `backgroundDetail` calls stoppable. Resolves false when it can't. */
+  backgroundStop?(id: string): boolean;
   answer(askId: string, answer: AskAnswer): void;
 
   // ---- queries

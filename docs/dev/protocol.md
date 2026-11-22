@@ -672,3 +672,43 @@ The mod shows it as a strip above the composer (`chrome.js` `backgroundStrip`, w
 ## v3.8: messages typed while the agent works (Claude Code, no wire change)
 
 Claude Code 2.1.3xx hands a message typed while it works to the agent between two steps as an attachment record (`{"type":"attachment","attachment":{"type":"queued_command","prompt":…,"commandMode":"prompt","origin":{"kind":"human"}}}`), not a user record. History and the terminal view show it as the person's message where it went in (`sessions.ts` `queuedPrompt`); its `@` image mentions show as images, as for any message the terminal view sent. A task's notification (`commandMode: "task-notification"`) and another session's message (`origin.kind: "peer"`) are not messages and don't show. In the terminal view, the TUI's queue (its `queue-operation` records: `enqueue` with what was typed, `remove` as the agent takes it) is the steering lane while it waits (`tui-queue.ts`): what the agent queues by itself there (`<task-notification>`, Code Mode's `<event kind=…>`) never shows.
+
+## v3.9: commands in the background strip, a task's detail, Code Mode's calls (additive)
+
+### ChatState
+
+`background.tasks[].kind` adds `"shell"` and `"monitor"`: a command Claude Code runs, as a row of its own. `name` is the kind, `title` the command (its first line, terminal codes and control characters taken out; null when the host can't read it), `activity` its output's last line. In the terminal view, `shells` and `monitors` count these rows.
+
+Where they come from (`host/providers/claude/shells.ts`, Linux only, the terminal view only: it knows Claude Code's pid): Claude Code runs each command as a child `/bin/bash -c "… eval '<command>' < /dev/null && pwd -P >| …"` whose stdout and stderr go to `<tmp>/claude-<uid>/<project>/<session>/tasks/<task id>.output`. The host lists the pid's children once a second (`/proc/<pid>/task/*/children`), keeps those whose fd 1 is such a file, and reads the command from the `eval` word of their argv and the start from `/proc/<pid>/stat`.
+- Which show: in Code Mode (a `repl-mode` record in the transcript, or `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1` in the process's environment) every command that has run 2 s, as the TUI counts each running `$` as a background task; otherwise only those the transcript put in the background (a Bash call with `run_in_background`, a Monitor), as before.
+- An ended command stays 4 s: `stopped` when it was stopped from the chat, else its notification's status (`failed` too for a nonzero "(exit code N)"), else `done`.
+- Read: the command line and the output's end. Neither is logged; the debug dump counts lines only.
+
+### Ops
+
+```ts
+{ op: "background_detail", task: string }  →  { detail: BackgroundDetail | null }   // null: no such task now
+{ op: "background_stop",   task: string }  →  { stopped: boolean }                  // false: it had ended, or isn't a command
+
+type BackgroundDetail = {
+  id: string; kind: "agent" | "workflow" | "shell" | "monitor"; state: "running" | "done" | "failed" | "stopped";
+  title: string | null;          // the whole command (all its lines), an agent's task, a run's name
+  output: string | null;         // a command's output: its last 48 KB, terminal codes out, a line's last \r part kept
+  cut: boolean;                  // output starts later than the file does
+  outputFile: string | null;     // the command's output file (the mod's "Whole output" opens it)
+  steps: { kind: "tool" | "text"; text: string }[];   // an agent's last 40 steps: each tool call's title, its words (600 characters at most)
+  agents: { label: string; state: string }[];          // a run's agents
+  stoppable: boolean;            // a running command: Stop sends SIGTERM to its process group (its child is a session leader)
+};
+```
+
+An older host answers both with "Unknown op"; the mod then says "Restart the chat to see this".
+
+### Items: Code Mode's REPL and Poll
+
+- `tool_call` (the provider event) gains `label?: string`, and a new event `{ type: "tool_label", callId, label }` changes a call's title after it was made. The item's `title` is the label when there is one.
+- A REPL call's title is its `description` (else its code's first line, 80 characters at most); its detail is `{ type: "script", code }`, shown as the code with the result ("(dispatched #N)") under it.
+- A Poll call's title says what it waits for: "Waiting for #N <the script's description>, …" (the scripts dispatched and not yet ended when it was made), else "Waiting". Ends come as `<event kind="repl-eval" eval="N" status="settled">` in a Poll result, a `poll_events` attachment or a `queue-operation`; history matches them by time, as the "(dispatched #N)" results sit off the transcript's active branch.
+- The activity line under the timeline says the running Poll's title, or "Running <description>" for a running REPL call.
+
+Not shown yet: a script's own calls while it runs (Claude Code writes them when it ends), and stopping an agent from the strip.

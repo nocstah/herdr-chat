@@ -54,7 +54,7 @@ import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
-import { bgTicking } from "./background.js";
+import { bgDetailLines, bgTicking } from "./background.js";
 import { openFile } from "./files.js";
 import { Composer } from "./composer.js";
 import { Picker, menuView, slashItems, wheel as wheelMenu } from "./menus.js";
@@ -388,10 +388,20 @@ export default class HerdrChat extends View {
       if (this.redirectFocus(cx)) changed = true;
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
-    // The background strip's times move on once a second while something runs.
-    if (bgTicking(this.store.state.background)) {
+    // The background strip's times move on once a second while something runs; an opened row reads its detail again.
+    const bgTasks = this.store.state.background?.tasks ?? [];
+    if (this.bgOpenId && !bgTasks.some((x) => x.id === this.bgOpenId)) {
+      this.bgOpenId = null; // it left the strip
+      this.bgDetail = null;
+      changed = true;
+    }
+    if (bgTicking(this.store.state.background) || this.bgOpenId) {
       const sec = Math.floor(Date.now() / 1000);
-      if (sec !== this.bgSecond) { this.bgSecond = sec; changed = true; }
+      if (sec !== this.bgSecond) {
+        this.bgSecond = sec;
+        changed = true;
+        if (this.bgOpenId) this.bgFetch(cx);
+      }
     }
     if (me && !this.sub) this.publishShows(me);
     if (me && this.view) this.publishView(me);
@@ -2105,6 +2115,43 @@ export default class HerdrChat extends View {
     return Boolean(this.prefs.widgetsOpen[key]);
   }
 
+  // A background strip row opened or closed (chrome.js bgDetail): its detail is read now, then once a second.
+  bgOpen(id, cx) {
+    if (this.bgOpenId === id) {
+      this.bgOpenId = null;
+      this.bgDetail = null;
+      return;
+    }
+    this.bgOpenId = id;
+    this.bgDetail = null;
+    this.bgFetch(cx);
+  }
+
+  // Not through req(): its answer is a command's output, kept out of the ops the debug dump shows.
+  bgFetch(cx) {
+    const id = this.bgOpenId;
+    if (!id || this.bgFetching) return;
+    this.bgFetching = true;
+    cx.spawn(async (cx) => {
+      try {
+        const d = await this.conn.req("background_detail", { task: id });
+        if (this.bgOpenId === id) this.bgDetail = d?.detail ?? { id, error: "It has ended" };
+      } catch (e) {
+        if (this.bgOpenId === id) this.bgDetail = { id, error: /Unknown op/.test(message(e)) ? "Restart the chat to see this" : message(e) };
+      } finally {
+        this.bgFetching = false;
+      }
+      cx.notify();
+    });
+  }
+
+  bgStop(id, cx) {
+    this.fire("background_stop", { task: id }, cx, (d, cx) => {
+      this.flash(d?.stopped ? "Stopped" : "It had ended", cx);
+      this.bgFetch(cx);
+    });
+  }
+
   more(id, cx) {
     this.fire("tool_output", { item: id }, cx, (d) => {
       this.full.set(id, d?.text ?? "");
@@ -2189,6 +2236,13 @@ export default class HerdrChat extends View {
       case "dialog:submit": return this.answer("submit", null, cx);
       case "dialog:cancel": return this.answer("cancel", null, cx);
       default:
+        if (what.startsWith("bg:open:")) return this.bgOpen(what.slice(8), cx);
+        if (what.startsWith("bg:stop:")) return this.bgStop(what.slice(8), cx);
+        if (what.startsWith("bg:output:")) {
+          const f = this.bgDetail?.id === what.slice(10) ? this.bgDetail.outputFile : null;
+          if (f) this.openFile(f, undefined, cx, { mustExist: true });
+          break;
+        }
         if (what.startsWith("dialog:choice:")) {
           const ch = d?.choices?.find((x) => x.id === what.slice(14));
           if (ch) return this.answer("choice", this.dialog.choiceAnswer(ch), cx);
@@ -2579,7 +2633,8 @@ export default class HerdrChat extends View {
       phase: s.phase, error: s.error, model: s.model ? `${s.model.provider}/${s.model.id}` : null, thinking: s.thinking,
       sessionFile: s.sessionFile, sessionName: s.sessionName, usage: s.usage, queue: s.queue,
       plan: s.plan?.steps?.length ? { ...planProgress(s.plan), steps: s.plan.steps.map((x) => [x.text, x.status]), open: Boolean(this.planOpen) } : null,
-      background: s.background ? { rows: (this.bgShown ?? []).map((r) => [r.kind, r.name, r.state, r.meta]), shells: s.background.shells, monitors: s.background.monitors, open: !this.bgClosed } : null,
+      background: s.background ? { rows: (this.bgShown ?? []).map((r) => [r.kind, r.name, r.state, r.meta]), shells: s.background.shells, monitors: s.background.monitors, open: !this.bgClosed,
+        opened: this.bgOpenId ?? null, detail: this.bgDetail ? { kind: this.bgDetail.kind ?? null, state: this.bgDetail.state ?? null, lines: bgDetailLines(this.bgDetail).length, stoppable: Boolean(this.bgDetail.stoppable), error: this.bgDetail.error ?? null } : null } : null,
       dialog: s.dialog ? { id: s.dialog.id, method: s.dialog.method, title: s.dialog.title, value: this.dialog.field ? this.dialog.value() : null,
         ...this.dialog.form?.debugState() } : null,
       statuses: s.statuses.map((x) => ({ key: x.key, text: x.spans.map((y) => y.text).join("") })),
@@ -2688,7 +2743,12 @@ export default class HerdrChat extends View {
     const items = this.store.items;
     for (let i = items.length - 1; i >= 0 && i >= items.length - 40; i--) {
       const it = items[i];
-      if (it.kind === "tool" && (it.status === "running" || it.status === "pending")) return { text: `Running ${it.name}`, since: it.ts };
+      if (it.kind === "tool" && (it.status === "running" || it.status === "pending")) {
+        // Code Mode: a Poll says what it waits for ("Waiting for #12 Run the tests"), a script its description.
+        if (it.name === "Poll" && it.title) return { text: it.title, since: it.ts };
+        if (it.name === "REPL" && it.title && it.title !== "REPL") return { text: `Running ${it.title}`, since: it.ts };
+        return { text: `Running ${it.name}`, since: it.ts };
+      }
       // Its row counts the seconds, or the live row of the folded card it's in (rows.js liveSteps).
       if (it.kind === "thinking" && it.streaming) return { text: "Working", since: null };
       if (it.kind === "assistant" && it.streaming) return { text: it.text ? "Writing" : "Working", since: null };

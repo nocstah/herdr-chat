@@ -1,6 +1,7 @@
 // Claude Code's tools: its names, its shell's exit code, and the real patch
 // from an edit's or write's result.
 import { diffFromHunks, relPath, str, type ToolMap } from "../../tools.ts";
+import { scriptTitle } from "./repl.ts";
 
 export const CLAUDE_TOOLS: ToolMap = {
   names: {
@@ -12,6 +13,12 @@ export const CLAUDE_TOOLS: ToolMap = {
     WebFetch: "web_fetch",
     WebSearch: "web_search",
     Agent: "agent", Task: "agent",
+  },
+  // Code Mode: a REPL call by its description, its script under it; a Poll waits (repl.ts labels it with what for).
+  present(name, a) {
+    if (name === "REPL") return { title: scriptTitle(a) || "REPL", detail: { type: "script", code: str(a.code) ?? "" } };
+    if (name === "Poll") return { title: "Waiting", detail: { type: "generic", tool: "Poll" } };
+    return null;
   },
   exitCode(_result, isError, output) {
     const m = /^Exit code (\d+)/.exec(output);

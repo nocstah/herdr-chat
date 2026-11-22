@@ -6,11 +6,11 @@
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover } from "gpui-base";
-import { MOD, alpha, count, icon, money, providerIcon, spans, spansText, unwrapHc } from "./util.js";
+import { MOD, alpha, count, icon, money, monoFont, providerIcon, spans, spansText, spinner, unwrapHc } from "./util.js";
 import { withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
 import { MAC } from "./platform.js";
-import { bgRows, bgSummary } from "./background.js";
+import { bgDetailEmpty, bgDetailLines, bgRows, bgSummary } from "./background.js";
 
 const STATUS_MAX = 28;
 const STATUS_W = (text) => Math.min(STATUS_MAX, [...text].length) * 6.3 + 18;
@@ -329,7 +329,10 @@ export function planStrip(v, s, t) {
 // agents panel shows it under its prompt: "main", then a row per background agent (its type, its task, what it does
 // now, the worktree's branch, the time, its tokens) and per workflow run (its name, a bar of the agents that
 // answered, done/total, the time, the tokens); the shells and monitors are counted in the heading, as in the TUI's
-// footer. An ended task stays a moment, marked. A click on the heading folds the rows.
+// footer. An ended task stays a moment, marked. A click on the heading folds the rows. A command Claude Code runs is a
+// row of its own (v3.9: its command, its last output line), as under the TUI's ↓; a click on a row opens it under
+// itself, as the TUI's tasks list does: a command's output as it grows (Stop, the whole output in the file viewer), an
+// agent's last steps, a run's agents (main.js bgOpen, read once a second while open).
 export function backgroundStrip(v, s, t) {
   const b = s.background;
   if (!b?.tasks?.length && !b?.shells && !b?.monitors) return null;
@@ -349,11 +352,17 @@ export function backgroundStrip(v, s, t) {
     return state === "done" ? icon("check", 11).text_color(color) : state === "failed" || state === "stopped" ? icon("x", 11).text_color(color)
       : div().flex_none().size(7).rounded(4).border_1().border_color(t.muted);
   };
-  const line = (r) => h_flex().id(`bg-${r.id}`).h(22).px(10).gap(7).items_center().text_size(12)
+  const mono = monoFont();
+  const openId = v.bgOpenId ?? null;
+  const line = (r) => h_flex().id(`bg-${r.id}`).h(22).px(10).gap(7).items_center().text_size(12).cursor_pointer()
+    .when(r.id === openId, (e) => e.bg(t.hover)).hover((st) => st.bg(t.hover))
+    .on_click((_e, cx) => v.control(`bg:open:${r.id}`, cx))
     .tooltip([r.name, r.title, r.worktree && `worktree ${r.worktree}`, r.activity, r.meta].filter(Boolean).join(" · "))
     .child(div().flex_none().w(12).flex().justify_center().child(bullet(r.state)))
-    .child(div().flex_none().max_w(180).truncate().text_color(r.state === "running" ? t.muted : t.dim).child(r.name))
-    .when(Boolean(r.title), (e) => e.child(div().min_w(40).max_w(260).truncate().text_color(r.state === "running" ? t.foreground : t.dim).child(r.title)))
+    .child(r.command ? icon(r.kind === "monitor" ? "eye" : "terminal", 11).text_color(t.dim)
+      : div().flex_none().max_w(180).truncate().text_color(r.state === "running" ? t.muted : t.dim).child(r.name))
+    .when(Boolean(r.title), (e) => e.child(div().min_w(40).max_w(r.command ? 320 : 260).truncate().when(r.command, (x) => x.font_family(mono).text_size(11.5))
+      .text_color(r.state === "running" ? t.foreground : t.dim).child(r.title)))
     .when(r.progress !== null, (e) => e.child(div().flex_none().w(BAR).h(4).rounded(2).bg(alpha(t.muted, 0.2))
       .child(div().h_full().rounded(2).w(Math.round(BAR * r.progress)).bg(r.state === "failed" ? t.ansi1 : r.state === "done" ? t.ansi2 : t.accent))))
     .when(Boolean(r.worktree), (e) => e.child(h_flex().flex_none().max_w(140).gap(3).items_center().text_size(11).text_color(t.dim)
@@ -370,10 +379,45 @@ export function backgroundStrip(v, s, t) {
     .child(div().flex_none().w(12).flex().justify_center().child(div().size(7).rounded(4).bg(working ? t.accent : t.muted)))
     .child(div().text_color(t.foreground).child("main"))
     .child(div().text_size(11.5).text_color(t.dim).child(working ? "working" : "idle"));
+  const shownOpen = open && rows.some((r) => r.id === openId);
+  const rowsAndDetail = rows.flatMap((r) => (r.id === openId ? [line(r), bgDetail(v, r, t, mono)] : [line(r)]));
   return v_flex().w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
-    .when(open, (e) => e.child(v_flex().id("bg-rows").py(4).max_h(200).overflow_y_scroll().border_b_1().border_color(alpha(t.border, 0.6))
-      .child(main).children(rows.map(line))))
+    .when(open, (e) => e.child(v_flex().id("bg-rows").py(4).max_h(shownOpen ? 380 : 200).overflow_y_scroll().border_b_1().border_color(alpha(t.border, 0.6))
+      .child(main).children(rowsAndDetail)))
     .child(head);
+}
+
+// An opened row (backgroundStrip): what it did so far, read from the host once a second (main.js bgFetch).
+function bgDetail(v, r, t, mono) {
+  const d = v.bgDetail?.id === r.id ? v.bgDetail : null;
+  // As many lines as the box shows without scrolling (12 × 17 px under its 240): the newest at its foot.
+  const lines = d && !d.error ? bgDetailLines(d, 12) : [];
+  const button = (id, label, what, color = t.muted) => div().id(id).h(22).px(8).rounded(6).flex().items_center().text_size(11.5).text_color(color)
+    .cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => v.control(what, cx)).child(label);
+  const command = r.command && d?.title;
+  const body = lines.length
+    ? v_flex().children(lines.map((l, i) => {
+      if (l.kind === "output") return div().id(`bgl-${i}`).font_family(mono).text_size(11.5).line_height("17px").text_color(t.muted).truncate().child(l.text || " ");
+      if (l.kind === "tool") return h_flex().gap(6).items_center().text_size(11.5).text_color(t.muted)
+        .child(icon("wrench", 10).text_color(t.dim)).child(div().min_w(0).truncate().font_family(mono).child(l.text));
+      if (l.kind === "text") return div().text_size(12).text_color(t.foreground).truncate().child(l.text);
+      // A run's agent.
+      return h_flex().gap(6).items_center().text_size(12)
+        .child(l.kind === "running" ? spinner(10, t.working ?? t.accent) : icon(l.kind === "failed" ? "x" : "check", 10).text_color(l.kind === "failed" ? t.ansi1 : t.ansi2))
+        .child(div().min_w(0).truncate().text_color(l.kind === "running" ? t.foreground : t.dim).child(l.text));
+    }))
+    : div().text_size(11.5).text_color(t.dim).child(bgDetailEmpty(d));
+  const actions = h_flex().gap(4).items_center()
+    .when(Boolean(d?.cut), (e) => e.child(div().text_size(11).text_color(t.dim).child("… earlier output")))
+    .child(div().flex_1())
+    .when(Boolean(d?.stoppable), (e) => e.child(button(`bg-stop-${r.id}`, "Stop", `bg:stop:${r.id}`, t.ansi1)))
+    .when(Boolean(d?.outputFile), (e) => e.child(button(`bg-file-${r.id}`, "Whole output", `bg:output:${r.id}`)))
+    .child(button(`bg-close-${r.id}`, "Close", `bg:open:${r.id}`));
+  return v_flex().id(`bg-open-${r.id}`).mx(10).mt(2).mb(6).px(10).py(8).gap(6).rounded(8).bg(t.background).border_1().border_color(alpha(t.border, 0.8))
+    .when(Boolean(command), (e) => e.child(h_flex().gap(8).font_family(mono).text_size(11.5).line_height("17px")
+      .child(div().flex_none().text_color(t.dim).child("$")).child(div().flex_1().min_w(0).text_color(t.foreground).child(command))))
+    .child(div().id(`bg-body-${r.id}`).max_h(240).overflow_y_scroll().child(body))
+    .child(actions);
 }
 
 // The branch of the chat's folder (host git.ts, state.git), beside the folder under the composer; a

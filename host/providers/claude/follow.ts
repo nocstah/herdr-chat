@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason, EventOf } from "../types.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
 import { bashEvents, imageFile, promptText, queuedPrompt, readTranscript, sentImages } from "./sessions.ts";
+import { ReplScripts, endTexts, type Relabel } from "./repl.ts";
 
 type Rec = Record<string, any>;
 
@@ -51,6 +52,8 @@ export class TranscriptFollower {
   private bash: { callId: string | null } = { callId: null };
   /** The session's folder of subagent transcripts (`<id>/subagents/agent-<id>.jsonl`). */
   private sessionDir: string;
+  /** Code Mode's scripts, for what each Poll waits for (repl.ts). */
+  private repl = new ReplScripts();
 
   constructor(file: string) {
     this.sessionDir = join(file.replace(/\/[^/]*$/, ""), file.replace(/^.*\//, "").replace(/\.jsonl$/, ""));
@@ -60,9 +63,27 @@ export class TranscriptFollower {
   prime(records: Rec[]): void {
     for (const r of records) {
       if (typeof r.uuid === "string") this.seen.add(r.uuid);
+      this.track(r);
       if (r.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
       for (const b of r.message.content) if (b?.type === "tool_use") this.names.set(String(b.id), String(b.name ?? "tool"));
     }
+  }
+
+  /** A record's part in Code Mode's scripts (the history's records; live, `feed` does the same as it goes). */
+  private track(r: Rec): void {
+    if (!r || typeof r !== "object" || r.isSidechain) return;
+    const c = r.message?.content;
+    if (r.type === "assistant" && Array.isArray(c)) {
+      for (const b of c) if (b?.type === "tool_use") this.repl.call(String(b.id), String(b.name ?? "tool"), b.input);
+      return;
+    }
+    if (r.type === "user" && Array.isArray(c)) for (const b of c) if (b?.type === "tool_result") this.repl.result(String(b.tool_use_id), b.content);
+    for (const s of endTexts(r)) this.repl.text(s);
+  }
+
+  /** Polls' new labels as events. */
+  private relabel(xs: Relabel[]): NormalizedEvent[] {
+    return xs.map((x) => ({ type: "tool_label", callId: x.callId, label: x.label }));
   }
 
   /** Whether an assistant message is open (its end not seen yet). */
@@ -72,6 +93,8 @@ export class TranscriptFollower {
 
   /** One record's events. */
   feed(r: Rec): NormalizedEvent[] {
+    // A script's end can come in the session's queue (a record with no uuid).
+    if (r?.type === "queue-operation") return this.relabel(endTexts(r).flatMap((s) => this.repl.text(s)));
     if (!r || typeof r !== "object" || typeof r.uuid !== "string") return [];
     if (this.seen.has(r.uuid)) return [];
     this.seen.add(r.uuid);
@@ -82,6 +105,9 @@ export class TranscriptFollower {
     if (r.type === "system") return this.system(r, t);
     // A message typed while the agent worked, handed to it mid-turn (sessions.ts queuedPrompt).
     if (r.type === "attachment") {
+      // Events delivered beside a Poll (a script's end among them).
+      const ends = this.relabel(endTexts(r).flatMap((s) => this.repl.text(s)));
+      if (ends.length) return ends;
       const q = queuedPrompt(r);
       return q ? [...this.close(), typedMessage(q.text, q.content, t)] : [];
     }
@@ -97,9 +123,16 @@ export class TranscriptFollower {
         // A subagent's steps are in their own file, written by the time its result is: nested under its card, before it ends.
         const agentId = r.toolUseResult?.agentId;
         if ((name === "Agent" || name === "Task") && typeof agentId === "string") out.splice(out.length - 1, 0, ...this.subagent(agentId, String(b.tool_use_id)));
+        out.push(...this.relabel(this.repl.result(String(b.tool_use_id), b.content)));
       }
       return out;
     }
+    const ends = this.relabel(endTexts(r).flatMap((s) => this.repl.text(s)));
+    if (ends.length) return [...this.close(), ...ends, ...this.feedUser(r, c, t)];
+    return this.feedUser(r, c, t);
+  }
+
+  private feedUser(r: Rec, c: unknown, t: { ts?: number }): NormalizedEvent[] {
     // A `!` command the person ran in the TUI: a Bash card, as in history (sessions.ts bashEvents).
     const bash = bashEvents(r, this.bash, t);
     if (bash) return [...this.close(), ...bash];
@@ -154,7 +187,8 @@ export class TranscriptFollower {
         const name = String(b.name ?? "tool");
         this.names.set(String(b.id), name);
         o.content.push({ type: "toolCall", callId: String(b.id), name, args: b.input });
-        out.push({ type: "tool_call", index, callId: String(b.id), name, args: b.input });
+        const label = this.repl.call(String(b.id), name, b.input);
+        out.push({ type: "tool_call", index, callId: String(b.id), name, args: b.input, ...(label ? { label } : {}) });
       } else o.content.push(null);
     }
     if (o.stop || o.error) out.push(...this.close());

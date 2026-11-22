@@ -28,7 +28,9 @@ export type ToolDetail =
   | { type: "search"; tool: string; query?: string; path?: string }
   | { type: "web"; tool: "fetch" | "search"; url?: string; query?: string }
   | { type: "agent"; description: string; agentType?: string }
-  | { type: "generic"; server?: string; tool: string };
+  | { type: "generic"; server?: string; tool: string }
+  /** Claude Code's Code Mode REPL call: the script it handed over (its title is its description). */
+  | { type: "script"; code: string };
 
 /** Every item may carry `parent`: the id of the tool item (a subagent) whose run produced it. */
 type Nested = { parent?: string };
@@ -144,6 +146,8 @@ export class Timeline {
   dirty = new Set<string>();
   removed = new Set<string>();
   toolsByCall = new Map<string, string>(); // toolCallId -> item id
+  /** Titles an adapter gave (tool_call `label`, tool_label), by item id: they outlast a call's args shown again. */
+  private labels = new Map<string, string>();
   fullOutput = new Map<string, string>(); // tool item id -> full text (≤ 1 MiB)
   rawOutput = new Map<string, string>(); // tool item id -> output tail with its ANSI escapes, for `outputLines`
   /** Usage and time of assistant messages with no text item yet; added to the next one (so a run's items sum to its total). */
@@ -352,7 +356,7 @@ export class Timeline {
   private setToolArgs(item: ToolItem, args: unknown): void {
     if (args === undefined) return;
     const p = presentTool(this.tools, item.name, args, this.cwd);
-    item.title = p.title;
+    item.title = this.labels.get(item.id) ?? p.title;
     item.args = prettyArgs(args);
     const prevExit = item.detail.type === "bash" ? item.detail.exitCode : undefined;
     item.detail = p.detail;
@@ -459,7 +463,19 @@ export class Timeline {
       case "tool_call": {
         const t = this.toolItem(ev.callId, ev.name, ev.args, now);
         if (ev.index !== undefined) this.ctx().blocks.set(ev.index, t.id);
+        if (ev.label) this.labels.set(t.id, ev.label);
         this.setToolArgs(t, ev.args);
+        return true;
+      }
+      case "tool_label": {
+        const id = this.toolsByCall.get(ev.callId);
+        const t = id ? this.byId.get(id) : undefined;
+        if (!t || t.kind !== "tool") return true;
+        this.labels.set(t.id, ev.label);
+        if (t.title !== ev.label) {
+          t.title = ev.label;
+          this.dirty.add(t.id);
+        }
         return true;
       }
       case "assistant_end":
