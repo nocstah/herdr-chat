@@ -270,3 +270,80 @@ test("a fork's conversation shows its source's turns before its own", async () =
     r.done();
   }
 });
+
+test("the view's model picker: Codex's own catalog, a pick typed as /model with its effort, a refusal Codex prints, and the trip back from a screen", async () => {
+  const r = rig();
+  try {
+    const home = join(r.d, "codex");
+    const lv = (...e: string[]) => e.map((effort) => ({ effort, description: effort }));
+    writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [
+      { slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list", priority: 2, default_reasoning_level: "medium", supported_reasoning_levels: lv("low", "medium", "high") },
+      { slug: "gpt-6", display_name: "GPT-6", visibility: "list", priority: 1, default_reasoning_level: "high", supported_reasoning_levels: lv("high", "xhigh") },
+      { slug: "auto-review", display_name: "Auto Review", visibility: "hide", priority: 3, supported_reasoning_levels: [] },
+    ] }));
+    r.write(A, [
+      ["session_meta", { id: A, cwd: "/proj", source: "cli", originator: "codex-tui", cli_version: "0.171.0" }],
+      ["turn_context", { model: "gpt-5.5", effort: "medium", cwd: "/proj" }],
+    ]);
+    r.screen("› Ask Codex to do anything\n\n  ? for shortcuts      100% context left");
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4242, name: "codex", argv: ["codex"] }, status: { app: "codex", state: "idle" } }] });
+    await r.adapter.start(null, r.host);
+    await r.adapter.history();
+    // the model it runs with brings its levels for the effort chip
+    const levels = () => (r.events.filter((e) => e.type === "capabilities").pop() as any)?.capabilities.thinkingLevels;
+    assert.deepEqual(levels(), ["low", "medium", "high"]);
+    assert.deepEqual((await r.adapter.listModels()).map((m) => [m.id, m.name]), [["gpt-6", "GPT-6"], ["gpt-5.5", "GPT-5.5"]]);
+
+    // a model without the effort it has now: that model's default, typed in one line
+    await r.adapter.setModel("openai", "gpt-6");
+    assert.deepEqual(r.calls().pop(), ["send", "--json", "t5", "/model gpt-6 --reasoning=high"]);
+    assert.equal((r.events.filter((e) => e.type === "model").pop() as any).model.id, "gpt-6");
+    assert.equal((r.events.filter((e) => e.type === "thinking").pop() as any).level, "high");
+    assert.deepEqual(levels(), ["high", "xhigh"]);
+    // an effort the model has: typed alone; one it hasn't: refused before typing
+    await r.adapter.setThinking("xhigh");
+    assert.deepEqual(r.calls().pop(), ["send", "--json", "t5", "/model --reasoning=xhigh"]);
+    const sent = r.calls().length;
+    await assert.rejects(r.adapter.setThinking("low"), /GPT-6 has high, xhigh/);
+    await assert.rejects(r.adapter.setModel("openai", "gpt-9"), /no "gpt-9"/);
+    assert.equal(r.calls().length, sent);
+
+    // what Codex prints for the line is the pick's error
+    const refused = r.adapter.setModel("openai", "gpt-5.5");
+    await until("the /model line", () => r.calls().length > sent);
+    r.screen("› Ask Codex to do anything\n\n■ Session is still starting; try /model again in a moment.\n\n  ? for shortcuts");
+    await assert.rejects(refused, /Codex: Session is still starting/);
+
+    // a screen a command opened (Codex's own picker), Esc, and the prompt again: back
+    r.screen("› Ask Codex to do anything");
+    const trip = r.adapter.awaitPrompt();
+    r.screen("  Select Model and Effort\n\n› 1. GPT-6 (current)  Newest\n  2. GPT-5.5          Older\n\n  enter select · esc back");
+    await pause(500);
+    let back: { back: boolean } | null = null;
+    void trip.then((b) => (back = b));
+    await pause(500);
+    assert.equal(back, null, "still in the picker");
+    r.screen("› Ask Codex to do anything\n\n  ? for shortcuts      100% context left");
+    await until("back at the prompt", () => back !== null, 3000);
+    assert.deepEqual(back, { back: true });
+    // a newer trip replaces an older one
+    const first = r.adapter.awaitPrompt();
+    r.screen("  Select Model and Effort\n\n  enter select · esc back");
+    const second = r.adapter.awaitPrompt();
+    assert.deepEqual(await first, { back: false });
+    await pause(500); // the newer one has seen the picker
+    r.screen("› Ask Codex to do anything");
+    assert.deepEqual(await second, { back: true });
+
+    // while Codex asks something, a pick waits for the answer
+    r.status("blocked");
+    await until("blocked", () => (r.adapter as any).status === "blocked");
+    await assert.rejects(r.adapter.setModel("openai", "gpt-5.5"), /asking something/);
+    // the model it has already: nothing to type
+    const now = r.calls().length;
+    await r.adapter.setModel("openai", "gpt-6");
+    assert.equal(r.calls().length, now);
+  } finally {
+    r.done();
+  }
+});

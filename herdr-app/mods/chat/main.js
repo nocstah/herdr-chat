@@ -951,6 +951,11 @@ export default class HerdrChat extends View {
       const quietNow = quiet(this.store.state, hostTerminal(this.chat)?.address);
       return this.flash(quietNow ? `Restarting on ${this.updater.label()}` : `Restarts on ${this.updater.label()} when ${this.providerName()} is done`, cx);
     }
+    // The terminal view: /model alone opens the chat's picker where the host lists the TUI's models (Codex).
+    if (this.view && m?.[1] === "model" && !m[2].trim() && !images.length) {
+      this.composer.clear();
+      return this.openModelPicker(cx);
+    }
     if (m && !images.length) {
       const cmd = this.commandList().find((c) => c.name === m[1]);
       if (cmd?.handler === "client") {
@@ -965,16 +970,29 @@ export default class HerdrChat extends View {
     const bang = Boolean(this.view) && !images.length && /^!\s*[^\s=!]/.test(text.trim());
     this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}) }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
-      // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal).
-      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1])) this.showFace("terminal", cx);
+      // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
+      // and the chat comes back once the TUI is at its prompt again.
+      // `/model <name>` sets it in place in both TUIs (no picker opens there).
+      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1]) && !(m[1] === "model" && m[2].trim())) this.visitTerminal(cx);
     });
   }
 
   // ---- the terminal view (faces.js) -------------------------------------------------
 
-  // An agent's command the chat face has no picker for (/model, /resume): typed into the TUI, which shows it.
+  // An agent's command the chat face has no picker for (/resume; /model where the host lists no models): typed
+  // into the TUI, which shows it.
   viewCommand(name, cx) {
-    this.fire("send", { text: `/${name}`, mode: "auto" }, cx, (_d, cx) => this.showFace("terminal", cx));
+    this.fire("send", { text: `/${name}`, mode: "auto" }, cx, (_d, cx) => this.visitTerminal(cx));
+  }
+
+  // A trip to the terminal for a screen a command opened there (a picker, a list): the terminal shows, and once
+  // the TUI is back at its prompt (Esc, or a pick) the chat shows again, unless the faces were flipped meanwhile.
+  visitTerminal(cx) {
+    const trip = (this.trip = (this.trip ?? 0) + 1);
+    this.showFace("terminal", cx);
+    this.req("await_prompt", {}, cx, { timeout: 16 * 60_000 }).then((r) => {
+      if (r?.back && this.trip === trip && this.face === "terminal") this.showFace("chat", cx);
+    }, () => {});
   }
 
   // Shows the terminal (or this chat) in this pane's place: the other face hides.
@@ -1000,7 +1018,11 @@ export default class HerdrChat extends View {
   viewTick(me, cx) {
     let changed = false;
     const flipped = sharedFace(this.view);
-    if (flipped && flipped.at >= (this.faceDocAt ?? 0) && flipped.face !== this.face) { this.face = flipped.face; changed = true; }
+    if (flipped && flipped.at >= (this.faceDocAt ?? 0) && flipped.face !== this.face) {
+      this.face = flipped.face;
+      changed = true;
+      if (this.face === "chat") this.trip = (this.trip ?? 0) + 1; // back already: a trip's return isn't wanted
+    }
     const machine = machineOf(this.view);
     // Often while the keyboard is in this tab (another app's flip that hides this view reaches it only so:
     // a shown view learns it at once, on_size_change), else now and then.
@@ -1333,7 +1355,7 @@ export default class HerdrChat extends View {
     switch (a) {
       case "steer": return this.send(cx);
       case "followUp": return this.send(cx, "followUp");
-      case "model": return this.view ? this.viewCommand("model", cx) : toggle("model", () => this.openModelPicker(cx));
+      case "model": return toggle("model", () => this.openModelPicker(cx));
       case "effort":
         if (!this.hasThinking()) return this.flash(`${this.providerName()} has no thinking levels for this model`, cx);
         return toggle("thinking", () => this.openThinkingPicker(cx));
@@ -1438,6 +1460,8 @@ export default class HerdrChat extends View {
         const d = await this.req("models", {}, cx);
         const cur = this.store.state.model;
         const models = [...(d?.models ?? [])].sort((a, b) => Number(Boolean(b.enabled)) - Number(Boolean(a.enabled)));
+        // The terminal view of a TUI whose models the host can't list (Claude Code): its own picker, in the terminal.
+        if (this.view && !models.length) return this.viewCommand("model", cx);
         const rows = (provider) => models.filter((m) => !provider || m.provider === provider)
           .map((m) => ({ value: `${m.provider}/${m.id}`, label: m.name || m.id, detail: `${m.provider}/${m.id}${m.enabled ? "" : " · not enabled"}`, current: cur && cur.provider === m.provider && cur.id === m.id, m }));
         // One tab per provider, after All, so a model is picked from one account at a
@@ -2117,7 +2141,7 @@ export default class HerdrChat extends View {
     const what = name;
     const d = this.store.state.dialog;
     switch (what) {
-      case "chip:model": return this.view ? this.viewCommand("model", cx) : this.openModelPicker(cx);
+      case "chip:model": return this.openModelPicker(cx);
       case "view:terminal": return this.showFace("terminal", cx);
       case "chip:thinking": return this.openThinkingPicker(cx);
       case "chip:permission": return this.openModePicker(cx);

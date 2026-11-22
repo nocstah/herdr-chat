@@ -247,6 +247,7 @@ type ToolDetail =
 | `models` | | `{models: {provider,id,name,reasoning,enabled}[]}` | `enabled` = in the user's `enabledModels` |
 | `set_model` | `provider`, `modelId` (or `model: "provider/id"`) | `{}` | not `id`: that is the request's own id |
 | `set_thinking` | `level` | `{}` | |
+| `await_prompt` | | `{back: boolean}` | the terminal view: after a command the chat typed opened a screen in the TUI, answers once the TUI shows its prompt again (`back: true`); `false` when it opened nothing there, a newer wait replaced this one, or after 15 min. Other agents: `{back: false}` at once |
 | `compact` | `instructions?` | `{}` | |
 | `new_session` | | `{}` | then a new snapshot |
 | `set_name` | `name` | `{}` | |

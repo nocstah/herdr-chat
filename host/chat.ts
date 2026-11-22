@@ -1718,6 +1718,11 @@ export class Chat {
       case "set_thinking":
         await this.setThinking(String(a.level ?? ""));
         return {};
+      case "await_prompt": {
+        // The terminal view: until the TUI is back at its prompt after a screen a command opened.
+        const agent = this.requireAgent();
+        return agent.awaitPrompt ? await agent.awaitPrompt() : { back: false };
+      }
       case "set_permission_mode":
         await this.setPermissionMode(String(a.mode ?? ""));
         return {};

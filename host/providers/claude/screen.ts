@@ -285,3 +285,20 @@ export function movesTo(p: ScreenPrompt, to: Row): string[] {
   const d = to.stop - from;
   return Array.from({ length: Math.abs(d) }, () => (d > 0 ? "down" : "up"));
 }
+
+// A screen open over the prompt (the /model picker, /config, a list) ends in one of these hints.
+const OPEN_HINT_RE = /\b(?:Esc to (?:cancel|exit|go back|close)|Enter to (?:confirm|select|continue))\b/i;
+
+/**
+ * Whether Claude Code shows its prompt with nothing over it: its input line (`❯ ` and what's typed,
+ * never a list's `❯ 1. Yes`) right under a rule, and no dialog or picker on the screen.
+ */
+export function claudeAtPrompt(screen: string): boolean {
+  if (readPrompt(screen)) return false;
+  const tail = screenLines(screen).slice(-12);
+  if (tail.some((l) => OPEN_HINT_RE.test(l))) return false;
+  for (let i = 1; i < tail.length; i++) {
+    if (SOLID_RE.test(tail[i - 1]!) && /^\s*[❯>](?:\s|$)/.test(tail[i]!) && !/^\s*[❯>]\s*\d+\.\s/.test(tail[i]!)) return true;
+  }
+  return false;
+}

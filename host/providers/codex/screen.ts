@@ -135,3 +135,18 @@ export function codexMovesTo(p: CodexPrompt, to: CodexRow): string[] {
   const n = to.stop - at;
   return Array.from({ length: Math.abs(n) }, () => (n > 0 ? "down" : "up"));
 }
+
+// A screen open over the prompt ends in one of these key hints (the model and reasoning pickers'
+// "enter select · esc back", the questions' "enter to submit answer", an approval's "Press enter to
+// confirm"); a running turn's "esc to interrupt" isn't one: the prompt is still there.
+const OPEN_HINT_RE = /\b(?:esc back|esc to (?:cancel|go back|close|dismiss|exit)|enter (?:select|default)|enter to (?:confirm|select|submit|resume|continue)|press enter)\b/i;
+// The composer's line: `› ` and what's typed (or its placeholder), never a list's `› 3. High`.
+const COMPOSER_RE = /^›(?:\s|$)(?!\s*\d+\.\s)/;
+
+/** Whether Codex shows its prompt with nothing over it (no picker, list, pager or dialog): its composer near the bottom. */
+export function codexAtPrompt(screen: string): boolean {
+  if (readCodexPrompt(screen)) return false;
+  const tail = screenLines(screen).slice(-14);
+  if (tail.some((l) => OPEN_HINT_RE.test(l))) return false;
+  return tail.some((l) => COMPOSER_RE.test(l));
+}
