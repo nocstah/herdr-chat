@@ -132,7 +132,8 @@ for p in $PROVIDERS; do
   printf -v "BIN_$p" '%s' "$path"
   [ -z "$path" ] || AGENTS_FOUND+=("$p")
 done
-[ "${#AGENTS_FOUND[@]}" -gt 0 ] || die "no agent on PATH: install Pi (pi), Claude Code (claude) or Codex (codex) first"
+BIN_antigravity="$(command -v agy || true)"
+[ "${#AGENTS_FOUND[@]}" -gt 0 ] || [ -n "$BIN_antigravity" ] || die "no agent on PATH: install Pi (pi), Claude Code (claude), Codex (codex) or Antigravity (agy) first"
 APP="${HERDR_APP_BIN:-$(command -v herdr-app || true)}"
 [ -n "$APP" ] || for c in /Applications/*.app/Contents/MacOS/Herdr; do [ -x "$c" ] && APP="$c" && break; done
 [ -n "$APP" ] || die "herdr-app not found (set HERDR_APP_BIN)"
@@ -176,10 +177,10 @@ BUILD=$("$NODE" "$ROOT/host/main.$EXT" build | "$NODE" -e 'process.stdout.write(
 # clone: anything else (./install.sh in a checkout, an unpacked release run in place).
 CHANNEL=$([ -n "${HERDR_CHAT_INSTALL_CMD:-}" ] && [ "$EXT" = js ] && echo release || echo clone)
 # installedAt: a chat whose host started before it, on another build, runs older code.
-"$NODE" -e 'const [path, host, node, hc, version, build, channel, update, pi, claude, codex] = process.argv.slice(1);
-const agents = Object.fromEntries(Object.entries({ pi, claude, codex }).filter(([, v]) => v));
+"$NODE" -e 'const [path, host, node, hc, version, build, channel, update, pi, claude, codex, antigravity] = process.argv.slice(1);
+const agents = Object.fromEntries(Object.entries({ pi, claude, codex, antigravity }).filter(([, v]) => v));
 require("fs").writeFileSync(path, JSON.stringify({ host, node, hc, version, build, installedAt: Date.now(), channel, update, ...agents }, null, 2) + "\n")' \
-  "$STAGE/chat/config.json" "$LINK/bin/herdr-chat-host" "$NODE" "$HC" "$VERSION" "$BUILD" "$CHANNEL" "$INSTALL_CMD" "$BIN_pi" "$BIN_claude" "$BIN_codex"
+  "$STAGE/chat/config.json" "$LINK/bin/herdr-chat-host" "$NODE" "$HC" "$VERSION" "$BUILD" "$CHANNEL" "$INSTALL_CMD" "$BIN_pi" "$BIN_claude" "$BIN_codex" "$BIN_antigravity"
 for m in "${MODS[@]}"; do
   "$APP" check "$STAGE/$m" >/dev/null 2>&1 || { "$APP" check "$STAGE/$m" || true; die "mods/$m failed herdr-app check; nothing installed"; }
 done

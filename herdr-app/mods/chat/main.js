@@ -71,8 +71,8 @@ const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before t
 let VIEWS = 0;
 
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
-// The terminal view: Claude Code's and Codex's commands whose result shows in the chat (its records have it); any other opens a screen in the TUI.
-const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export", "new", "plan"]);
+// The terminal view: commands whose result shows in the chat (its records have it); any other opens a screen in the TUI.
+const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export", "new", "plan", "goal", "grill-me", "learn", "boost", "btw"]);
 
 // A model provider's name for the model picker's scope tabs: its id with the dashes
 // out. The agent names its providers (two Claude Code logins are two providers, so an
@@ -961,10 +961,15 @@ export default class HerdrChat extends View {
       const quietNow = quiet(this.store.state, hostTerminal(this.chat)?.address);
       return this.flash(quietNow ? `Restarting on ${this.updater.label()}` : `Restarts on ${this.updater.label()} when ${this.providerName()} is done`, cx);
     }
-    // The terminal view: /model alone opens the chat's picker where the host lists the TUI's models (Codex).
+    // The terminal view: /model alone opens the chat's picker where the host lists the TUI's models (Codex, Antigravity);
+    // /effort alone opens the chat's thinking picker where the model has adjustable levels.
     if (this.view && m?.[1] === "model" && !m[2].trim() && !images.length) {
       this.composer.clear();
       return this.openModelPicker(cx);
+    }
+    if (this.view && m?.[1] === "effort" && !m[2].trim() && !images.length && this.hasThinking()) {
+      this.composer.clear();
+      return this.openThinkingPicker(cx);
     }
     if (m && !images.length) {
       const cmd = this.commandList().find((c) => c.name === m[1]);
@@ -982,8 +987,8 @@ export default class HerdrChat extends View {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
       // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
       // and the chat comes back once the TUI is at its prompt again.
-      // `/model <name>` sets it in place in both TUIs (no picker opens there).
-      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1]) && !(m[1] === "model" && m[2].trim())) this.visitTerminal(cx);
+      // `/model <name>` and `/effort <level>` set it in place in the TUI (no picker opens there).
+      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1]) && !((m[1] === "model" || m[1] === "effort") && m[2].trim())) this.visitTerminal(cx);
     });
   }
 

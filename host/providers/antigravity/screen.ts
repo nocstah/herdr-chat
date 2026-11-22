@@ -1,0 +1,344 @@
+// Antigravity CLI's TUI screen reader for the terminal view (terminal.ts):
+// - status bar: execution mode (`default`, `accept-edits`, `auto`, `plan`),
+//   model display name and effort level;
+// - idle prompt detection (`agyAtPrompt`): for returning to the chat view once
+//   an interactive TUI overlay (/resume, /config, /permissions, /model…) closes;
+// - blocking dialogs (`readAgyPrompt`): workspace trust confirmation, numbered
+//   tool/edit/create permission prompts, and `ask_question` prompts.
+
+export type AgyMode = "default" | "accept-edits" | "auto" | "plan";
+
+export type AgyStatusBar = {
+  mode: AgyMode;
+  modelName: string | null;
+  effort: string | null;
+};
+
+export type AgyRow = {
+  n: number | null;
+  label: string;
+  description?: string;
+  /** Shortcut key if shown in parentheses or numbered row (e.g. "1", "2"). */
+  key?: string;
+  selected: boolean;
+  checked?: boolean;
+  input?: boolean;
+  stop: number;
+};
+
+export type AgyPrompt =
+  | { kind: "permission"; title: string; body: string; rows: AgyRow[]; stops: AgyRow[] }
+  | { kind: "question"; progress: string | null; question: string; rows: AgyRow[]; other: AgyRow | null; submit: AgyRow | null; multi: boolean; stops: AgyRow[] }
+  | { kind: "confirm"; title: string; body: string; rows: AgyRow[]; stops: AgyRow[] };
+
+const SOLID_RE = /^\s*─{8,}\s*$/;
+const COMPOSER_RE = /^>\s*(?:$|Auto mode:|Plan mode:|Accept-edits mode:|Type a message|Ask anything|[^\d])/i;
+const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel)\b/i;
+const STATUS_RIGHT_RE = /^(?:(auto|plan|accept-edits)\s*·\s*)?(.+?)(?:\s*·\s*(low|medium|high|xhigh|max))?$/i;
+
+// Overlays opened by slash commands (/model, /effort, /config, /permissions, /resume, /help…).
+const OVERLAY_HINT_RE = /(?:Keyboard:.*\besc\b|enter\s+Select\s+esc\b|\besc\s+Go\s+Back\b|\besc\s+to\s+(?:go\s+back|close)\b)/i;
+
+// Dialog footers when `agy` is blocked waiting for a confirmation or answer.
+const DIALOG_FOOTER_RE = /(?:↑\/↓\s*Navigate\s*·\s*enter\s*Confirm|enter\s*(?:to\s*)?(?:confirm|select|submit)|esc\s*(?:to\s*)?(?:cancel|deny|reject)|tab\s*(?:to\s*)?(?:add\s*(?:notes|feedback|instructions)|reject)|space\s*(?:to\s*)?toggle|press\s+1|f\s+to\s+view\s+full\s+diff)/i;
+const NUMBERED_ROW_RE = /^(\s*)([>›❯]\s*)?(\d+)\.\s+(.*)$/;
+const PLAIN_CURSOR_RE = /^(\s*)([>›❯])\s+(.+)$/;
+const BOX_RE = /^\[([ ✔✓xX])\]\s+(.*)$/;
+const SUBMIT_RE = /^\s*([>›❯]\s*)?Submit\s*$/i;
+const OTHER_RE = /^Other(?:\b|\s*\(|:|$)|^Type (?:your answer|something)/i;
+const QUESTION_HEADER_RE = /^(?:Question\s+\d+\/\d+.*|.*(?:\?|:))$/i;
+
+const blank = (l: string) => !l.trim();
+const indent = (l: string) => /^\s*/.exec(l)![0].length;
+
+function screenLines(screen: string): string[] {
+  const lines = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\s+$/, ""));
+  while (lines.length && blank(lines.at(-1)!)) lines.pop();
+  return lines;
+}
+
+/** Split `"Option A   Description text"` on two or more spaces. */
+function columns(text: string): { label: string; description?: string } {
+  const m = /^(.+?)\s{2,}(\S.*)$/.exec(text);
+  return m ? { label: m[1]!.trim(), description: m[2]!.trim() } : { label: text.trim() };
+}
+
+/**
+ * Parse Antigravity CLI's bottom status line, e.g.:
+ *   `? for shortcuts                                 auto · Gemini 4 Neon · xhigh`
+ *   `esc to cancel                                   accept-edits · Gemini 4 Neon · high`
+ *   `? for shortcuts                                        Gemini 4 Neon · xhigh`
+ */
+export function readAgyStatusBar(screen: string): AgyStatusBar | null {
+  const lines = screenLines(screen);
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 3); i--) {
+    const raw = lines[i]!;
+    if (SOLID_RE.test(raw) || OVERLAY_HINT_RE.test(raw)) continue;
+    // Right segment sits after 2+ spaces (or is the whole trimmed line when left side is empty).
+    const parts = raw.trim().split(/\s{2,}/);
+    const right = parts.at(-1)?.trim() ?? "";
+    if (!right || !right.includes("·") && !STATUS_LEFT_RE.test(parts[0] ?? "")) continue;
+    // Ignore status lines where the right part is clearly a hint rather than a model/mode line.
+    if (STATUS_LEFT_RE.test(right) || /Navigate|Confirm|shortcuts/i.test(right)) continue;
+    const m = STATUS_RIGHT_RE.exec(right);
+    if (!m) continue;
+    const mode = (m[1]?.toLowerCase() ?? "default") as AgyMode;
+    const modelName = m[2]?.trim() || null;
+    const effort = m[3]?.toLowerCase() ?? null;
+    if (!modelName) continue;
+    return { mode, modelName, effort };
+  }
+  return null;
+}
+
+/** Strip a trailing status bar line (if present) so dialog scanning looks at the dialog itself. */
+function stripStatusBar(lines: string[]): string[] {
+  if (!lines.length) return lines;
+  const last = lines.at(-1)!;
+  if (readAgyStatusBar(last)) return lines.slice(0, -1);
+  return lines;
+}
+
+/** Parse numbered dialog rows (1..N in order), returning them and their start/end line indices. */
+function parseNumberedDialog(lines: string[]): { rows: AgyRow[]; first: number; last: number; footer: number } | null {
+  // Scan from bottom up for either a dialog footer or the last numbered row.
+  let footer = lines.length;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+    if (DIALOG_FOOTER_RE.test(lines[i]!)) {
+      footer = i;
+      break;
+    }
+  }
+  let end = -1;
+  for (let i = footer - 1; i >= Math.max(0, footer - 50); i--) {
+    if (NUMBERED_ROW_RE.test(lines[i]!)) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) return null;
+
+  // Walk upwards from row N to row 1, checking strictly sequential numbering.
+  const at: number[] = [];
+  let want = Number(NUMBERED_ROW_RE.exec(lines[end]!)![3]);
+  if (want < 2) return null;
+  for (let i = end; i >= Math.max(0, end - 60) && want >= 1; i--) {
+    const m = NUMBERED_ROW_RE.exec(lines[i]!);
+    if (!m) continue;
+    if (Number(m[3]) !== want) return null;
+    at.unshift(i);
+    want--;
+  }
+  if (want !== 0) return null;
+
+  // Require either a cursor marker (`>` / `›` / `❯`) on one of the rows OR a recognized dialog footer
+  // so an ordinary numbered markdown list in assistant output is never mistaken for a prompt.
+  const hasCursor = at.some((idx) => Boolean(NUMBERED_ROW_RE.exec(lines[idx]!)![2]));
+  if (!hasCursor && footer === lines.length) return null;
+
+  const rows: AgyRow[] = [];
+  for (let k = 0; k < at.length; k++) {
+    const i = at[k]!;
+    const m = NUMBERED_ROW_RE.exec(lines[i]!)!;
+    const col = m[1]!.length + (m[2]?.length ?? 0) + m[3]!.length + 2;
+    let text = m[4]!.trim();
+    const notes: string[] = [];
+    const next = at[k + 1] ?? footer;
+    let submit: AgyRow | null = null;
+    for (let j = i + 1; j < next; j++) {
+      const l = lines[j]!;
+      if (SUBMIT_RE.test(l)) {
+        submit = { n: null, label: "Submit", selected: Boolean(SUBMIT_RE.exec(l)![1]), stop: 0 };
+        break;
+      }
+      if (blank(l) || SOLID_RE.test(l) || DIALOG_FOOTER_RE.test(l)) break;
+      if (indent(l) < col - 2) break;
+      notes.push(l.trim());
+    }
+    const box = BOX_RE.exec(text);
+    const checked = box ? box[1] !== " " : undefined;
+    if (box) text = box[2]!.trim();
+    const split = columns(text);
+    const desc = [split.description, ...notes].filter(Boolean).join(" ");
+    rows.push({
+      n: Number(m[3]),
+      label: split.label,
+      ...(desc ? { description: desc } : {}),
+      key: m[3]!,
+      selected: Boolean(m[2]),
+      ...(checked !== undefined ? { checked } : {}),
+      stop: rows.length,
+    });
+    if (submit) rows.push({ ...submit, stop: rows.length });
+  }
+  return { rows, first: at[0]!, last: end, footer };
+}
+
+/** Parse an unnumbered cursor confirm dialog (e.g. Workspace trust: `> Yes, I trust this folder` / `  No, exit`). */
+function parseConfirmDialog(lines: string[]): AgyPrompt | null {
+  let footer = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
+    if (DIALOG_FOOTER_RE.test(lines[i]!)) {
+      footer = i;
+      break;
+    }
+  }
+  if (footer < 0) return null;
+
+  // Find the contiguous block of choice rows right above the footer, one of which has a cursor `>`.
+  let cur = -1;
+  for (let i = footer - 1; i >= Math.max(0, footer - 15); i--) {
+    if (PLAIN_CURSOR_RE.test(lines[i]!)) {
+      cur = i;
+      break;
+    }
+  }
+  if (cur < 0) return null;
+  const curMatch = PLAIN_CURSOR_RE.exec(lines[cur]!)!;
+  const textCol = curMatch[1]!.length + 2; // column where the option text starts after `> `
+
+  // Collect options around `cur` at matching text indent (no blank/rule boundaries).
+  let first = cur;
+  while (first > 0) {
+    const prev = lines[first - 1]!;
+    if (blank(prev) || SOLID_RE.test(prev)) break;
+    if (PLAIN_CURSOR_RE.test(prev) || (indent(prev) === textCol && prev.trim().length <= 80 && !/[?:]$/.test(prev.trim()))) first--;
+    else break;
+  }
+  let last = cur;
+  while (last + 1 < footer) {
+    const next = lines[last + 1]!;
+    if (blank(next) || SOLID_RE.test(next)) break;
+    if (PLAIN_CURSOR_RE.test(next) || (indent(next) === textCol && next.trim().length <= 80)) last++;
+    else break;
+  }
+
+  const rows: AgyRow[] = [];
+  for (let i = first; i <= last; i++) {
+    const l = lines[i]!;
+    const m = PLAIN_CURSOR_RE.exec(l);
+    rows.push({ n: null, label: (m ? m[3]! : l).trim(), selected: Boolean(m), stop: rows.length });
+  }
+  if (rows.length < 2) return null;
+
+  // Gather title & body lines above `first` back to top or horizontal rule.
+  let top = first - 1;
+  while (top >= 0 && !SOLID_RE.test(lines[top]!)) top--;
+  const above = lines.slice(top + 1, first).map((l) => l.trim()).filter(Boolean);
+  const qIdx = above.findIndex((l) => /\?$/.test(l));
+  const title = qIdx >= 0 ? above[qIdx]! : above[0] ?? "Antigravity needs confirmation";
+  const body = above.filter((_, idx) => idx !== (qIdx >= 0 ? qIdx : 0)).join("\n");
+  return { kind: "confirm", title, body, rows, stops: rows };
+}
+
+/**
+ * The interactive blocking dialog currently shown on Antigravity's screen,
+ * or null when none is shown (or the screen shows an unrecognized overlay).
+ */
+export function readAgyPrompt(screen: string): AgyPrompt | null {
+  const lines = stripStatusBar(screenLines(screen));
+  if (!lines.length) return null;
+  // Don't treat the slash-command pickers (/model, /effort, /config) as blocking asks.
+  if (lines.slice(-6).some((l) => OVERLAY_HINT_RE.test(l))) return null;
+
+  const num = parseNumberedDialog(lines);
+  if (num) {
+    // Gather lines above row 1 up to a horizontal rule (or at most 40 lines).
+    let top = num.first - 1;
+    const minTop = Math.max(-1, num.first - 40);
+    while (top > minTop && !SOLID_RE.test(lines[top]!)) top--;
+    const above = lines.slice(top + 1, num.first);
+    while (above.length && blank(above[0]!)) above.shift();
+    while (above.length && blank(above.at(-1)!)) above.pop();
+
+    const submit = num.rows.find((r) => r.n === null && r.label === "Submit") ?? null;
+    const optRows = num.rows.filter((r) => r !== submit);
+    const multi = optRows.some((r) => r.checked !== undefined);
+    const other = optRows.find((r) => OTHER_RE.test(r.label)) ?? null;
+    if (other) other.input = true;
+
+    const looksApproval = optRows.some((r) => /^(?:Yes|Allow|Approve|Run|Accept)\b/i.test(r.label))
+      && optRows.some((r) => /^(?:No|Deny|Reject|Cancel)\b/i.test(r.label));
+
+    if (!looksApproval && (multi || other || above.some((l) => /^Question\s+\d+\/\d+/i.test(l.trim())))) {
+      const progressLine = above.find((l) => /^Question\s+\d+\/\d+/i.test(l.trim()))?.trim() ?? null;
+      const qLines = above.filter((l) => l.trim() !== progressLine).map((l) => l.trim()).filter(Boolean);
+      const question = qLines.at(-1) ?? "Antigravity has a question";
+      return {
+        kind: "question",
+        progress: progressLine,
+        question,
+        rows: optRows.filter((r) => r !== other),
+        other,
+        submit,
+        multi,
+        stops: num.rows,
+      };
+    }
+
+    // Permission / approval dialog: last question line above rows is the title; everything before it is the body.
+    let qIdx = -1;
+    for (let i = above.length - 1; i >= 0; i--) {
+      if (QUESTION_HEADER_RE.test(above[i]!.trim())) {
+        qIdx = i;
+        break;
+      }
+    }
+    const title = qIdx >= 0 ? above[qIdx]!.trim() : above.at(-1)?.trim() || "Antigravity needs approval";
+    const bodyLines = qIdx >= 0 ? above.slice(0, qIdx) : above.slice(0, -1);
+    const body = bodyLines.join("\n").trim();
+    return { kind: "permission", title, body, rows: optRows, stops: num.rows };
+  }
+
+  return parseConfirmDialog(lines);
+}
+
+/** Stable identity of a dialog: stays the same as the cursor moves between choices. */
+export function agyPromptKey(p: AgyPrompt): string {
+  const head = p.kind === "question" ? `${p.progress ?? ""}\n${p.question}` : `${p.title}\n${p.body}`;
+  return `${p.kind}\n${head}\n${p.stops.map((r) => r.label).join("\n")}`;
+}
+
+/** ↑/↓ arrow key presses from the currently selected row to `to`. */
+export function agyMovesTo(p: AgyPrompt, to: AgyRow): string[] {
+  const at = p.stops.find((r) => r.selected)?.stop ?? 0;
+  const n = to.stop - at;
+  return Array.from({ length: Math.abs(n) }, () => (n > 0 ? "down" : "up"));
+}
+
+/**
+ * Whether `agy` is at its main prompt with no overlay/picker/dialog open over it.
+ * In `agy`, the composer sits between two `────` rules right above the single
+ * bottom status line; when an overlay (/model, /effort, /config, /permissions,
+ * /resume…) is open, the overlay's rows and `Keyboard: … esc Go Back` appear
+ * BELOW the bottom rule.
+ */
+export function agyAtPrompt(screen: string): boolean {
+  if (readAgyPrompt(screen)) return false;
+  const lines = screenLines(screen);
+  if (lines.length < 3) return false;
+  const tail = lines.slice(-12);
+  // Find the last horizontal rule near the bottom.
+  let bottomRule = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (SOLID_RE.test(tail[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  if (bottomRule < 1) return false;
+  const below = tail.slice(bottomRule + 1).filter((l) => !blank(l));
+  // At prompt: at most 1 status-bar line below the bottom rule, and no overlay hints.
+  if (below.length > 1) return false;
+  if (below.some((l) => OVERLAY_HINT_RE.test(l))) return false;
+  // Find the top rule of the prompt box and verify the `>` prompt line lies between them.
+  let topRule = -1;
+  for (let i = bottomRule - 1; i >= 0; i--) {
+    if (SOLID_RE.test(tail[i]!)) {
+      topRule = i;
+      break;
+    }
+  }
+  const box = tail.slice(topRule >= 0 ? topRule + 1 : Math.max(0, bottomRule - 4), bottomRule);
+  return box.some((l) => COMPOSER_RE.test(l));
+}

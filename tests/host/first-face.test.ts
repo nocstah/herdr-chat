@@ -55,15 +55,19 @@ test("faceOf and withFace: the chat view unless set to the terminal; the rest of
   assert.deepEqual(withFace([], "chat"), { claude: { face: "chat" } });
 });
 
-test("Codex has its own face: codex.face, the same default, written beside Claude Code's", () => {
+test("Codex and Antigravity have their own faces: codex.face, antigravity.face, the same default, written beside Claude Code's", () => {
   // @ts-expect-error: as above
   return import("../../herdr-app/mods/new-chat/first-face.js").then(({ VIEW_AGENTS }) => {
-    assert.deepEqual(VIEW_AGENTS, ["claude", "codex"]);
+    assert.deepEqual(VIEW_AGENTS, ["claude", "codex", "antigravity"]);
     assert.equal(faceOf(null, "codex"), DEFAULT_FACE);
+    assert.equal(faceOf(null, "antigravity"), DEFAULT_FACE);
     assert.equal(faceOf({ claude: { face: "terminal" } }, "codex"), "chat", "Claude Code's face isn't Codex's");
+    assert.equal(faceOf({ claude: { face: "terminal" } }, "antigravity"), "chat", "Claude Code's face isn't Antigravity's");
     assert.equal(faceOf({ codex: { face: "terminal" } }, "codex"), "terminal");
+    assert.equal(faceOf({ antigravity: { face: "terminal" } }, "antigravity"), "terminal");
     assert.equal(faceOf({ codex: { face: "terminal" } }), "chat", "without an agent: Claude Code's");
     assert.deepEqual(withFace({ claude: { face: "chat" }, codex: { tui: ["x"] } }, "terminal", "codex"), { claude: { face: "chat" }, codex: { tui: ["x"], face: "terminal" } });
+    assert.deepEqual(withFace({ claude: { face: "chat" } }, "terminal", "antigravity"), { claude: { face: "chat" }, antigravity: { face: "terminal" } });
   });
 });
 
@@ -108,7 +112,7 @@ test("REMOTE_CHECK, run by sh: the setting's file, the app's socket (live, stale
     const own = readFileSync(new URL("../../herdr-app/mods/new-chat/first-face.js", import.meta.url), "utf8");
     writeFileSync(join(home, "mods/new-chat/first-face.js"), own);
     writeFileSync(join(home, "mods/chat/config.json"), JSON.stringify({ host: "/x/herdr-chat-host", node: process.execPath }, null, 2) + "\n");
-    assert.deepEqual(check(), { herdrChat: true, app: false, agents: ["claude", "codex"], faces: { claude: "chat", codex: "chat" } }, "no app socket: its app isn't running");
+    assert.deepEqual(check(), { herdrChat: true, app: false, agents: ["claude", "codex", "antigravity"], faces: { claude: "chat", codex: "chat", antigravity: "chat" } }, "no app socket: its app isn't running");
     // the app runs: its socket answers
     const app = spawn(process.execPath, ["-e", `require("net").createServer((c) => c.end()).listen(${JSON.stringify(sock)}, () => console.log("up"))`], { stdio: ["ignore", "pipe", "inherit"] });
     await new Promise((r) => app.stdout.once("data", r));
@@ -124,7 +128,7 @@ test("REMOTE_CHECK, run by sh: the setting's file, the app's socket (live, stale
     writeFileSync(join(home, "mods/chat/config.json"), JSON.stringify({ node: process.execPath }, null, 2) + "\n");
     assert.equal(check()?.app, false, "a stale socket");
     writeFileSync(join(home, "data/herdr-chat/settings.json"), '{"claude":{"face":"terminal"}}');
-    assert.deepEqual(check()?.faces, { claude: "terminal", codex: "chat" });
+    assert.deepEqual(check()?.faces, { claude: "terminal", codex: "chat", antigravity: "chat" });
     writeFileSync(join(home, "data/herdr-chat/settings.json"), "{not json");
     writeFileSync(join(home, "mods/new-chat/first-face.js"), "// a build from before DEFAULT_FACE and VIEW_AGENTS\n");
     assert.deepEqual(check()?.faces, { claude: "terminal" });

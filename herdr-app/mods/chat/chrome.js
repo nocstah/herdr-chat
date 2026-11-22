@@ -46,7 +46,7 @@ export function footerTier(width) {
 
 // The Claude app's words for the permission modes and effort levels: an agent's own labels (its
 // capabilities) win; the terminal view, where the TUI owns them, has only the ids.
-const MODE_LABELS = { default: "Manual", acceptEdits: "Accept edits", plan: "Plan", auto: "Auto", bypassPermissions: "Bypass", dontAsk: "Don't ask" };
+const MODE_LABELS = { default: "Manual", acceptEdits: "Accept edits", "accept-edits": "Accept edits", plan: "Plan", auto: "Auto", bypassPermissions: "Bypass", dontAsk: "Don't ask" };
 const EFFORT_LABELS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 const cap = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
 export const effortLabel = (level) => (level && level !== "default" ? EFFORT_LABELS[level] ?? cap(level) : null);
