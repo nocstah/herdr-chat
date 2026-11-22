@@ -233,7 +233,7 @@ export function thinking(it, c) {
       .text_color(t.dim).italic().child(prose(`th-${it.id}`, it.text || " "))));
 }
 
-const TOOL_ICON = { bash: "terminal", read: "file-text", edit: "pencil", write: "file-plus", search: "search", web: "globe", agent: "bot", generic: "wrench" };
+const TOOL_ICON = { bash: "terminal", read: "file-text", edit: "pencil", write: "file-plus", search: "search", web: "globe", agent: "bot", script: "code", generic: "wrench" };
 const VERB = { read: "Read", edit: "Edit", write: "Write" };
 
 export function statusIcon(status, t, size = 13) {
@@ -328,6 +328,8 @@ function toolBody(it, d, c, flat = false) {
     parts.push(h_flex().gap(8).font_family(c.mono).text_size(12.5).line_height("19px")
       .child(div().flex_none().text_color(t.dim).child("$")).child(div().flex_1().min_w(0).text_color(t.foreground).child(d.command ?? "")));
   }
+  // Code Mode's REPL call: the script it handed over (its title is its description).
+  if (d.type === "script" && d.code) parts.push(outputBox(`${it.id}-code`, asLines(d.code), c, { cap: MAX_LINES, color: t.foreground }));
   const isDiff = d.type === "edit" && (d.diffLines?.length || d.diff);
   if (d.type === "edit") {
     if (d.diffLines?.length) parts.push(diffView(it.id, d.diffLines, c));
@@ -335,7 +337,7 @@ function toolBody(it, d, c, flat = false) {
     else parts.push(mono(d.path ?? "", c));
   }
   if (d.type === "write" && d.bytes != null) parts.push(div().text_size(11.5).text_color(t.dim).child(`${count(d.bytes)} bytes`));
-  if (d.type === "generic" || (d.type !== "bash" && d.type !== "edit" && !out)) {
+  if (d.type === "generic" || (d.type !== "bash" && d.type !== "edit" && d.type !== "script" && !out)) {
     if (it.args && it.args !== "{}") parts.push(mono(it.args, c, t.dim));
   }
   if (out && !isDiff) {

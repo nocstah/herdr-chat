@@ -1760,6 +1760,16 @@ export class Chat {
         return this.timeline.search(String(a.query ?? ""), typeof a.limit === "number" && a.limit > 0 ? Math.min(a.limit, 5000) : 2000);
       case "tool_output":
         return this.toolOutput(a.item);
+      case "background_detail": {
+        // A strip row opened (v3.9): null when it left the strip.
+        const id = String(a.task ?? "");
+        return { detail: this.adapter.backgroundDetail?.(id) ?? null };
+      }
+      case "background_stop": {
+        const id = String(a.task ?? "");
+        if (!this.adapter.backgroundStop) throw new Error(`${this.agent} can't stop that from here`);
+        return { stopped: this.adapter.backgroundStop(id) };
+      }
       case "handoff":
         return this.handoff();
       case "handoff_started":

@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { bashEvents, imageFile, readTranscript, promptText, queuedPrompt, sentImages } from "./sessions.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
+import { ReplScripts, endTexts, scriptEndTimes, type Relabel } from "./repl.ts";
 import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason, EventOf } from "../types.ts";
 
 type Rec = Record<string, any>;
@@ -51,7 +52,16 @@ function typedMessage(typed: string, content: unknown, t: { ts?: number }): Even
   return { type: "user_message", text: sent.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t };
 }
 
-type Ctx = { names: Map<string, string>; out: NormalizedEvent[]; sessionDir: string; bash: { callId: string | null } };
+type Ctx = {
+  names: Map<string, string>; out: NormalizedEvent[]; sessionDir: string; bash: { callId: string | null }; repl: ReplScripts;
+  /**
+   * Tool results off the active branch, by call id. Code Mode writes a REPL call's "(dispatched #N)" result beside the
+   * branch (the branch goes on from the Poll made in the same message), so its row ends from here.
+   */
+  offBranch: Map<string, { b: Rec; r: Rec }>;
+};
+
+const relabel = (xs: Relabel[]): NormalizedEvent[] => xs.map((x) => ({ type: "tool_label", callId: x.callId, label: x.label }));
 
 function emitAssistant(group: Rec[], ctx: Ctx, parent?: string): void {
   const first = group[0]!;
@@ -90,7 +100,20 @@ function emitAssistant(group: Rec[], ctx: Ctx, parent?: string): void {
     type: "assistant_end", content, stopReason: isError ? "error" : stop, ...(isError ? { error: textOf(blocks) || String(first.error) } : {}),
     ...(usage ? { usage } : {}), ...(!synthetic && typeof m.model === "string" ? { model: m.model } : {}), ...(ts ? { ts } : {}),
   });
-  for (const b of blocks) if (b.type === "tool_use") ctx.out.push({ type: "tool_call", callId: String(b.id), name: String(b.name ?? "tool"), args: b.input, ...(ts ? { ts } : {}) });
+  for (const b of blocks) {
+    if (b.type !== "tool_use") continue;
+    const id = String(b.id);
+    const name = String(b.name ?? "tool");
+    const label = ctx.repl.call(id, name, b.input, ts);
+    ctx.out.push({ type: "tool_call", callId: id, name, args: b.input, ...(label ? { label } : {}), ...(ts ? { ts } : {}) });
+    const off = name === "REPL" ? ctx.offBranch.get(id) : undefined;
+    if (off) {
+      ctx.offBranch.delete(id);
+      const at = tsOf(off.r);
+      ctx.out.push({ ...toolEnded(off.b, name, off.r.toolUseResult, false), ...(at ? { ts: at } : {}) });
+      ctx.out.push(...relabel(ctx.repl.result(id, off.b.content, at ?? 0)));
+    }
+  }
 }
 
 function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
@@ -107,6 +130,8 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
     }
     // A message typed while the agent worked, handed to it mid-turn (sessions.ts queuedPrompt): shown where it went in.
     if (r.type === "attachment") {
+      // Events delivered beside a Poll (a Code Mode script's end among them).
+      if (!parent) for (const s of endTexts(r)) ctx.out.push(...relabel(ctx.repl.text(s)));
       const q = parent ? null : queuedPrompt(r);
       if (!q) continue;
       flush();
@@ -158,10 +183,13 @@ function emitRecords(records: Rec[], ctx: Ctx, parent?: string): void {
             ctx.out.splice(at, 0, ...nested.out);
           }
         }
+        if (!parent) ctx.out.push(...relabel(ctx.repl.result(String(b.tool_use_id), b.content, ts ?? 0)));
       }
       continue;
     }
     if (parent) continue;
+    // A Code Mode script's end can come in a user message.
+    for (const s of endTexts(r)) ctx.out.push(...relabel(ctx.repl.text(s)));
     // A `!` command the person ran in the TUI: a Bash card (sessions.ts bashEvents).
     const bash = bashEvents(r, ctx.bash, t);
     if (bash) { ctx.out.push(...bash); continue; }
@@ -181,8 +209,19 @@ export function historyEvents(path: string, upTo?: string): NormalizedEvent[] {
 /** The same, from records already read (the terminal view reads the file once for the history and its follower). */
 export function historyOf(records: Rec[], path: string, upTo?: string): NormalizedEvent[] {
   if (!records.length) return [];
-  const ctx: Ctx = { names: new Map(), out: [], sessionDir: join(dirname(path), path.replace(/^.*\//, "").replace(/\.jsonl$/, "")), bash: { callId: null } };
-  emitRecords(activeBranch(records, upTo), ctx);
+  const branch = activeBranch(records, upTo);
+  const on = new Set(branch.map((r) => r.uuid));
+  const offBranch = new Map<string, { b: Rec; r: Rec }>();
+  for (const r of records) {
+    const c = r.message?.content;
+    if (r.type !== "user" || r.isSidechain || on.has(r.uuid) || !Array.isArray(c)) continue;
+    for (const b of c) if (b?.type === "tool_result") offBranch.set(String(b.tool_use_id), { b, r });
+  }
+  const ctx: Ctx = {
+    names: new Map(), out: [], sessionDir: join(dirname(path), path.replace(/^.*\//, "").replace(/\.jsonl$/, "")), bash: { callId: null },
+    repl: new ReplScripts(scriptEndTimes(records)), offBranch,
+  };
+  emitRecords(branch, ctx);
   return ctx.out;
 }
 

@@ -38,8 +38,8 @@ import { processTree } from "../tui.ts";
 import { CLAUDE_TOOLS } from "./tools.ts";
 import { AgentError } from "../types.ts";
 import type {
-  AdapterHost, AdapterOptions, AgentCommand, AgentModel, Ask, AskAnswer, Capabilities, Disposition, ImageBlock, NormalizedEvent,
-  PromptMode, ProviderAdapter, SessionSource, StartInfo, UsageInfo,
+  AdapterHost, AdapterOptions, AgentCommand, AgentModel, Ask, AskAnswer, BackgroundDetail, Capabilities, Disposition, ImageBlock,
+  NormalizedEvent, PromptMode, ProviderAdapter, SessionSource, StartInfo, UsageInfo,
 } from "../types.ts";
 
 type Rec = Record<string, any>;
@@ -583,7 +583,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     this.quitSaid = false;
     const file = sessionPath(r.cwd, r.id, r.dir);
     // Background work dies with its process: what started before this one's start isn't running.
-    this.background.follow(file, r.startedAt);
+    this.background.follow(file, r.startedAt, r.pid);
     if (file === this.file) return;
     const first = this.file === null;
     this.log(`session ${r.id} (pid ${r.pid})`);
@@ -800,6 +800,18 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   async clearQueue(): Promise<string[]> {
     return []; // typed already: the TUI has it
+  }
+
+  /** A strip row opened: what it did so far (background.ts detail). */
+  backgroundDetail(id: string): BackgroundDetail | null {
+    return this.background.detail(id);
+  }
+
+  /** A running command's Stop: as the TUI's tasks list stops one. */
+  backgroundStop(id: string): boolean {
+    const ok = this.background.stopTask(id);
+    this.log(ok ? `stopped background task ${id}` : `background task ${id}: nothing to stop`);
+    return ok;
   }
 
   abort(): void {

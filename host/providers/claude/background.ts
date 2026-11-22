@@ -15,18 +15,26 @@
 //   agents that answered, total the agents started (the TUI also counts those its script queued, which no file names),
 //   tokens the sum of each agent's last call.
 // - Shells and monitors: a `Bash` call's result with `backgroundTaskId`, a `Monitor` call's with `taskId` and
-//   `timeoutMs`, in the session's transcript.
+//   `timeoutMs`, in the session's transcript; and, given the Claude Code process, the commands it runs now (shells.ts:
+//   its children writing to `tasks/<id>.output`), each a row with its command, as under the TUI's ↓. In Code Mode every
+//   command a script runs is one (the TUI counts them all as background tasks); otherwise only the backgrounded ones.
 // - An end: a `<task-notification>` (`<task-id>`, `<status>`) the session's queue gets (a `queue-operation` record,
 //   an attachment or a user record), a `TaskStop` call's result, or the files above.
 //
 // Only what started after `since` (the Claude Code process's start: background work dies with its process) counts.
 // Of the files, only these fields are read: never a prompt, an answer or a result (a run's `result` rows and its
-// `<run id>.json` are read for their type and id only, a notification for its id and status).
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+// `<run id>.json` are read for their type and id only, a notification for its id and status). A running command's
+// last output line is its row's activity, as an agent's last call is. What one task did (a command's output, an
+// agent's steps and words) is read only when the person opens it (`detail`), for their own view; never logged.
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Background, BackgroundState, BackgroundTask } from "../types.ts";
+import type { Background, BackgroundDetail, BackgroundState, BackgroundTask } from "../types.ts";
+import { presentTool } from "../../tools.ts";
+import { CLAUDE_TOOLS } from "./tools.ts";
+import { shownBlock } from "./mapper.ts";
+import { outputTail, shellsOf, type ShellProc } from "./shells.ts";
 
-export type { Background, BackgroundState, BackgroundTask };
+export type { Background, BackgroundDetail, BackgroundState, BackgroundTask };
 
 type Rec = Record<string, any>;
 
@@ -41,6 +49,13 @@ const AGENT_TAIL_BYTES = 64 * 1024;
 const ACTIVITY_MAX = 160;
 /** A clock's slack between a process start and its first files. */
 const SLACK_MS = 5_000;
+/** A command shows once it has run this long (a script's quick commands never do), and stays this long after it ends. */
+export const SHELL_SHOW_MS = 2_000;
+export const SHELL_LINGER_MS = 4_000;
+/** Of an agent's transcript, the end read for its steps when it is opened; how many steps. */
+const DETAIL_TAIL_BYTES = 256 * 1024;
+const DETAIL_STEPS = 40;
+const STEP_TEXT_MAX = 600;
 
 const ENDS: Record<string, BackgroundState> = { completed: "done", failed: "failed", killed: "stopped", stopped: "stopped", cancelled: "stopped", timeout: "stopped" };
 
@@ -111,7 +126,9 @@ function notifications(s: string, out: Map<string, BackgroundState>): void {
   for (const m of s.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
     const id = /<task-id>([^<]*)<\/task-id>/.exec(m[1]!)?.[1]?.trim();
     const status = /<status>([^<]*)<\/status>/.exec(m[1]!)?.[1]?.trim();
-    if (id && status && ENDS[status]) out.set(id, ENDS[status]);
+    // A command's end says its exit code in its summary ("… completed (exit code 1)").
+    const code = /\(exit code (\d+)\)/.exec(/<summary>([^<]*)<\/summary>/.exec(m[1]!)?.[1] ?? "")?.[1];
+    if (id && status && ENDS[status]) out.set(id, status === "completed" && code && code !== "0" ? "failed" : ENDS[status]);
   }
 }
 
@@ -127,6 +144,8 @@ function stringsOf(r: Rec): string[] {
 }
 
 type FileMark = { size: number; mtime: number };
+/** A command seen running (shells.ts), and when it was first seen ended. */
+type Shell = ShellProc & { seen: number; endedAt: number | null; shown: boolean; tail: { size: number; line: string | null } | null };
 type AgentTail = { tokens: number | null; activity: string | null; first: number | null };
 type Agent = { meta: Rec; mark: FileMark; tail: AgentTail | null; tailMark: FileMark | null };
 type Run = {
@@ -176,6 +195,43 @@ function agentTail(path: string): AgentTail | null {
   return { tokens, activity, first };
 }
 
+/** A command as shown: without terminal codes or other control characters (a row shows its first line). */
+export function shownCommand(cmd: string | null, firstLine = false): string | null {
+  if (cmd === null) return null;
+  const clean = cmd.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/[\x00-\x09\x0b-\x1f\x7f]/g, " ");
+  if (!firstLine) return clean;
+  const lines = clean.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.length > 1 ? `${lines[0]} …` : lines[0] ?? "";
+}
+
+/** An agent's last steps, from its transcript's end: each tool call's title, and its words. */
+export function agentSteps(path: string): { kind: "tool" | "text"; text: string }[] {
+  const head = readAt(path, 0, 0);
+  if (!head) return [];
+  const from = Math.max(0, head.size - DETAIL_TAIL_BYTES);
+  const got = readAt(path, from, DETAIL_TAIL_BYTES);
+  if (!got) return [];
+  const lines = got.text.split("\n");
+  if (from > 0) lines.shift(); // cut
+  const steps: { kind: "tool" | "text"; text: string }[] = [];
+  for (const l of lines) {
+    if (!l.includes('"assistant"')) continue;
+    const r = parse(l);
+    if (r?.type !== "assistant" || !Array.isArray(r.message?.content)) continue;
+    for (const b of r.message.content) {
+      if (b?.type === "tool_use") {
+        if (b.name === "StructuredOutput") continue; // its input is the answer
+        steps.push({ kind: "tool", text: presentTool(CLAUDE_TOOLS, String(b.name ?? "tool"), b.input, "").title });
+      } else if (b?.type === "text") {
+        const s = shownBlock(b);
+        const text = s?.text?.trim();
+        if (text) steps.push({ kind: "text", text: text.length > STEP_TEXT_MAX ? text.slice(0, STEP_TEXT_MAX - 1) + "…" : text });
+      }
+    }
+  }
+  return steps.slice(-DETAIL_STEPS);
+}
+
 /**
  * One session's background work, read anew at each `read()` (only what changed since the last: the files' sizes and
  * times say). No timers: the caller looks as often as it likes.
@@ -195,24 +251,154 @@ export class BackgroundWatch {
   private seenRunning = new Set<string>();
   private endedAt = new Map<string, number>();
 
+  /** The commands the process runs, by task id (only with `pid`). */
+  private procs = new Map<string, Shell>();
+  /** Code Mode (the transcript's `repl-mode` record): every command counts. Null: not said. */
+  private replMode: boolean | null = null;
+
   readonly file: string;
   readonly since: number;
+  /** The Claude Code process, when known: its running commands are read from it. */
+  readonly pid: number | null;
+  private readonly list: (pid: number) => ShellProc[];
 
-  constructor(file: string, since: number) {
+  constructor(file: string, since: number, pid: number | null = null, list: (pid: number) => ShellProc[] = shellsOf) {
     this.file = file;
     this.since = since;
+    this.pid = pid;
+    this.list = list;
     this.dir = file.replace(/\.jsonl$/, "");
   }
 
   read(now = Date.now()): Background | null {
     this.readTranscript();
-    const tasks = [...this.readRuns(now), ...this.readAgents(now)].sort((a, b) => a.startedAt - b.startedAt);
+    const commands = this.readShells(now);
+    const tasks = [...this.readRuns(now), ...this.readAgents(now), ...commands].sort((a, b) => a.startedAt - b.startedAt);
     let shells = 0;
-    for (const [id, at] of this.shells) if (at >= this.since - SLACK_MS && !this.ended.has(id)) shells++;
     let monitors = 0;
-    for (const [id, m] of this.monitors) if (m.at >= this.since - SLACK_MS && !this.ended.has(id) && (m.until === null || m.until > now)) monitors++;
+    if (this.pid !== null) {
+      // The processes say what runs.
+      for (const x of commands) if (x.state === "running") x.kind === "monitor" ? monitors++ : shells++;
+    } else {
+      for (const [id, at] of this.shells) if (at >= this.since - SLACK_MS && !this.ended.has(id)) shells++;
+      for (const [id, m] of this.monitors) if (m.at >= this.since - SLACK_MS && !this.ended.has(id) && (m.until === null || m.until > now)) monitors++;
+    }
     if (!tasks.length && !shells && !monitors) return null;
     return { at: now, tasks, shells, monitors };
+  }
+
+  /** The commands the process runs now, and those that just ended. */
+  private readShells(now: number): BackgroundTask[] {
+    if (this.pid === null) return [];
+    let live: ShellProc[] = [];
+    try {
+      live = this.list(this.pid);
+    } catch {}
+    const ids = new Set<string>();
+    for (const p of live) {
+      ids.add(p.id);
+      const known = this.procs.get(p.id);
+      if (known && known.pid === p.pid) continue;
+      this.procs.set(p.id, { ...p, seen: now, endedAt: null, shown: false, tail: null });
+    }
+    const out: BackgroundTask[] = [];
+    for (const [id, s] of this.procs) {
+      const running = ids.has(id);
+      if (!running && s.endedAt === null) s.endedAt = now;
+      const startedAt = s.startedAt ?? s.seen;
+      // Code Mode: every command (as the TUI counts them); else a backgrounded call's, or a monitor's.
+      const counts = this.codeMode() || this.shells.has(id) || this.monitors.has(id);
+      if (running && counts && now - startedAt >= SHELL_SHOW_MS) s.shown = true;
+      if (!running && (!s.shown || now - s.endedAt! >= SHELL_LINGER_MS)) {
+        this.procs.delete(id);
+        continue;
+      }
+      if (!s.shown) continue;
+      const state: BackgroundState = running ? "running" : this.ended.get(id) ?? "done";
+      const monitor = this.monitors.has(id);
+      out.push({
+        id, kind: monitor ? "monitor" : "shell", name: monitor ? "monitor" : "shell", title: shownCommand(s.command, true),
+        activity: running ? this.lastLine(s) : null, worktree: null, state, startedAt,
+        endedAt: running ? null : s.endedAt, done: null, failed: null, total: null, tokens: null,
+      });
+    }
+    return out;
+  }
+
+  private envMode: boolean | null = null;
+  /** Code Mode: as the transcript last said, else as the process was started (its environment). */
+  private codeMode(): boolean {
+    if (this.replMode !== null) return this.replMode;
+    if (this.envMode === null && this.pid !== null) {
+      try {
+        this.envMode = readFileSync(`/proc/${this.pid}/environ`, "utf8").split("\0").includes("CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1");
+      } catch {
+        this.envMode = false;
+      }
+    }
+    return this.envMode === true;
+  }
+
+  /** A running command's last line of output (read again only when its file grew). */
+  private lastLine(s: Shell): string | null {
+    let size: number;
+    try {
+      size = statSync(s.output).size;
+    } catch {
+      return null;
+    }
+    if (s.tail?.size === size) return s.tail.line;
+    const t = outputTail(s.output, 2048);
+    const line = t?.text.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) ?? null;
+    s.tail = { size, line: line && line.length > ACTIVITY_MAX ? line.slice(0, ACTIVITY_MAX - 1) + "…" : line };
+    return s.tail.line;
+  }
+
+  /** One task, opened: a command's output, an agent's steps, a run's agents. Null: not on the panel. */
+  detail(id: string): BackgroundDetail | null {
+    const base = { id, title: null, output: null, cut: false, outputFile: null, steps: [], agents: [], stoppable: false };
+    const s = this.procs.get(id);
+    if (s?.shown) {
+      const t = outputTail(s.output);
+      const running = s.endedAt === null;
+      return {
+        ...base, kind: this.monitors.has(id) ? "monitor" : "shell", state: running ? "running" : this.ended.get(id) ?? "done",
+        title: shownCommand(s.command), output: t?.text ?? "", cut: t?.cut ?? false, outputFile: s.output, stoppable: running,
+      };
+    }
+    const a = this.agents.get(id);
+    if (a && a.meta.requestShape === "background" && this.seenRunning.has(id)) {
+      const finished = a.meta.finished === true || this.ended.has(id);
+      return {
+        ...base, kind: "agent", state: finished ? this.ended.get(id) ?? "done" : "running",
+        title: typeof a.meta.description === "string" ? a.meta.description : null,
+        steps: agentSteps(join(this.dir, "subagents", `agent-${id}.jsonl`)),
+      };
+    }
+    const run = this.runs.get(id);
+    if (run && this.seenRunning.has(id)) {
+      const ended = this.endedAt.has(id);
+      return { ...base, kind: "workflow", state: ended ? "done" : "running", agents: [...run.agents.values()].map((x) => ({ label: x.label, state: x.state })) };
+    }
+    return null;
+  }
+
+  /** Stops a running command (its process group: the shell and what it started). False: not one that can be. */
+  stop(id: string): boolean {
+    const s = this.procs.get(id);
+    if (!s || s.endedAt !== null) return false;
+    try {
+      process.kill(-s.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(s.pid, "SIGTERM");
+      } catch {
+        return false;
+      }
+    }
+    // Stopped here: so it shows (Claude Code's own notice, when it comes, says the same).
+    if (!this.ended.has(id)) this.ended.set(id, "stopped");
+    return true;
   }
 
   /** The session transcript's new records: launches and ends. */
@@ -239,9 +425,13 @@ export class BackgroundWatch {
     this.offset += used;
     if (skipCut) lines.shift();
     for (const l of lines) {
-      if (!/task-notification|backgroundTaskId|"timeoutMs"|"task_id"|"runId"/.test(l)) continue;
+      if (!/task-notification|backgroundTaskId|"timeoutMs"|"task_id"|"runId"|"repl-mode"/.test(l)) continue;
       const r = parse(l);
       if (!r || r.isSidechain) continue;
+      if (r.type === "repl-mode") {
+        this.replMode = r.replMode === true;
+        continue;
+      }
       for (const s of stringsOf(r)) notifications(s, this.ended);
       const res = r.type === "user" ? r.toolUseResult : null;
       if (!res || typeof res !== "object") continue;
@@ -442,10 +632,10 @@ export class BackgroundPoller {
     this.everyMs = everyMs;
   }
 
-  /** Follow this session (null: none), whose process started at `since`. */
-  follow(file: string | null, since: number): void {
-    if (file === this.watch?.file && since === this.watch?.since) return;
-    this.watch = file ? new BackgroundWatch(file, since) : null;
+  /** Follow this session (null: none), whose process (`pid`, when known) started at `since`. */
+  follow(file: string | null, since: number, pid: number | null = null): void {
+    if (file === this.watch?.file && since === this.watch?.since && pid === this.watch?.pid) return;
+    this.watch = file ? new BackgroundWatch(file, since, pid) : null;
     if (!this.timer && file) {
       this.timer = setInterval(() => this.look(), this.everyMs);
       this.timer.unref();
@@ -465,6 +655,18 @@ export class BackgroundPoller {
     if (key === this.last) return;
     this.last = key;
     this.report(b);
+  }
+
+  /** One task opened (BackgroundWatch.detail). */
+  detail(id: string): BackgroundDetail | null {
+    return this.watch?.detail(id) ?? null;
+  }
+
+  /** Stops a running command; the panel follows at the next look. */
+  stopTask(id: string): boolean {
+    const ok = this.watch?.stop(id) ?? false;
+    if (ok) setTimeout(() => this.look(), 300).unref();
+    return ok;
   }
 
   stop(): void {
