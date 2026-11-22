@@ -40,7 +40,7 @@ if (cmd === "events") {
 const A = "019a0000-0000-7000-8000-0000000000a1";
 const B = "019a0000-0000-7000-8000-0000000000b2";
 
-function rig() {
+function rig(o: { sent?: boolean } = {}) {
   const d = mkdtempSync(join(tmpdir(), "herdr-chat-cv-"));
   const cwd = join(d, "proj");
   const home = join(d, "codex");
@@ -79,7 +79,7 @@ function rig() {
   const events: NormalizedEvent[] = [];
   const logs: string[] = [];
   const host = { emit: (ev: NormalizedEvent) => events.push(ev), log: (m: string) => logs.push(m), running: false, working: false };
-  const adapter = new CodexTerminalAdapter({ cwd, command: "codex", args: [], log: (m) => logs.push(m), terminal: "t5", hc, io });
+  const adapter = new CodexTerminalAdapter({ cwd, command: "codex", args: [], log: (m) => logs.push(m), terminal: "t5", hc, io, ...(o.sent ? { sentDir: join(d, "sent") } : {}) });
   const done = () => {
     adapter.kill();
     rmSync(d, { recursive: true, force: true });
@@ -227,7 +227,7 @@ test("the view: the TUI's conversation as history, a send typed in, the run with
     await pause();
 
     // Images: refused in words (Codex takes one only as a pasted path).
-    await assert.rejects(r.adapter.prompt({ id: "u-7", text: "this", images: [{ data: "AA==", mimeType: "image/png" }], mode: "steer", busy: false }), /Images can't be typed into Codex's terminal/);
+    await assert.rejects(r.adapter.prompt({ id: "u-7", text: "this", images: [{ data: "AA==", mimeType: "image/png" }], mode: "steer", busy: false }), /Images can't be sent from here/);
     // A command is the TUI's: handled, still typed.
     assert.equal((await r.adapter.prompt({ id: "u-8", text: "/model", images: [], mode: "steer", busy: false })).disposition, "handled");
 
@@ -343,6 +343,46 @@ test("the view's model picker: Codex's own catalog, a pick typed as /model with 
     const now = r.calls().length;
     await r.adapter.setModel("openai", "gpt-6");
     assert.equal(r.calls().length, now);
+  } finally {
+    r.done();
+  }
+});
+
+test("the view's images: saved as files and named in the message for Codex's image viewer; shown as the message's images again, from the echo and from history", async () => {
+  const r = rig({ sent: true });
+  try {
+    const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    // An earlier message whose image the host named (before the view took images): shown from its file
+    const old = join(r.d, "attachments-paste.png");
+    writeFileSync(old, Buffer.from(PNG, "base64"));
+    r.write(A, [
+      ["session_meta", { id: A, cwd: "/proj", source: "cli", originator: "codex-tui", cli_version: "0.171.0" }],
+      ["turn_context", { model: "gpt-5.5", effort: "medium", cwd: "/proj" }],
+      r.user("u1", `What is this?\n\n[Image available at: ${old}]`),
+      r.user("u2", "[Image available at: /nowhere/gone.png]"),
+    ]);
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4242, name: "codex", argv: ["codex"] }, status: { app: "codex", state: "idle" } }] });
+    await r.adapter.start(null, r.host);
+    const hist = (await r.adapter.history()).filter((e) => e.type === "user_message") as any[];
+    assert.deepEqual(hist.map((e) => [e.text, e.images, e.imageBlocks?.[0]?.data ?? null]), [["What is this?", 1, PNG], ["[Image available at: /nowhere/gone.png]", 0, null]]); // a file that's gone: its line stays, not an empty message
+    assert.equal(r.adapter.capabilities.images, true);
+
+    // A message with an image: the file in the sent folder, its line after the words
+    const sentDone = r.adapter.prompt({ id: "u-img", text: "And this one?", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false });
+    assert.equal((await sentDone).disposition, "started");
+    const typed = r.calls().filter((c: string[]) => c[0] === "send").pop()![3] as string;
+    const m = /^And this one\?\n\n\[Image available at: (\/.*\/sent\/herdr-chat-[0-9a-f]{16}\.png)\]$/.exec(typed);
+    assert.ok(m, typed);
+    assert.equal(readFileSync(m![1]!).toString("base64"), PNG);
+    // Codex's echo: the chat's message, its image shown, the line gone
+    r.write(A, [["event_msg", { type: "task_started", turn_id: "t2" }], r.user("u3", typed)]);
+    await until("the echo", () => r.events.some((e) => e.type === "user_message" && (e as any).clientId === "u-img"));
+    const echo = r.events.find((e) => e.type === "user_message" && (e as any).clientId === "u-img") as any;
+    assert.deepEqual([echo.text, echo.images, echo.imageBlocks[0].data], ["And this one?", 1, PNG]);
+    // an image alone; a command with one is refused
+    await r.adapter.prompt({ id: "u-only", text: "", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false });
+    assert.match(r.calls().filter((c: string[]) => c[0] === "send").pop()![3] as string, /^\[Image available at: \/.*\.png\]$/);
+    await assert.rejects(r.adapter.prompt({ id: "u-c", text: "/review", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false }), /Images go with a message/);
   } finally {
     r.done();
   }

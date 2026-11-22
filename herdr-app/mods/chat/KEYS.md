@@ -112,9 +112,10 @@ Codex runs its conversations in a shared background server, so its terminal
 doesn't say which conversation it shows: the view takes the one that server
 loaded for it, in its folder, since it started (or the one `codex resume <id>`
 named). With two Codex terminals in one folder it compares what each shows,
-and until a message tells, it says it can't tell rather than guess. Images
-can't be sent to a Codex terminal from the view yet: paste them in the
-terminal.
+and until a message tells, it says it can't tell rather than guess. An image
+sent from the view is saved as a file and named in the message, and Codex
+opens it with its image viewer; the chat shows it as the message's image (for
+a week, while the file is kept).
 
 macOS turns ⌘. into Esc before an app sees it, so `stop` uses ⌃C.
 
