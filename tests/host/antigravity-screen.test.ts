@@ -1,7 +1,7 @@
 // Antigravity CLI's TUI screen reader (host/providers/antigravity/screen.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyStatusBar } from "../../host/providers/antigravity/screen.ts";
+import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
 
 const IDLE_AUTO = `
 ────────────────────────────────────────────────────────────────────────
@@ -205,6 +205,49 @@ esc to cancel                                        Gemini 3.8 Flash · high`;
   assert.ok(mq.other && mq.other.input && mq.other.label === "Write-in...");
 });
 
+test("readAgyQuotaWarning reads active quota warning above idle composer and ignores stale/quoted/non-quota screens", () => {
+  const quotaScreen = `● Ran (bun test) (ctrl+o to expand)
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in
+1h50m10s.
+Error ID: 0b64d408-0b25-43c1-90a3-095569e7b843-235
+
+────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────
+? for shortcuts                               auto · Gemini 4 Neon · xhigh`;
+
+  const w = readAgyQuotaWarning(quotaScreen);
+  assert.ok(w);
+  assert.equal(w.title, "Quota reached");
+  assert.equal(w.message, "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h50m10s.");
+  assert.equal(w.errorId, "0b64d408-0b25-43c1-90a3-095569e7b843-235");
+
+  // Narrow wrapped Error ID and wrapped status row.
+  const narrow = `⚠ Individual quota reached. Please upgrade your
+subscription to increase your limits. Resets in
+1h50m10s.
+Error ID: 0b64d408-0b25-43c1-90a3-
+095569e7b843-235
+
+────────────────────────────────────────
+>
+────────────────────────────────────────
+? for shortcuts
+auto · Gemini 4 Neon · xhigh`;
+  const wn = readAgyQuotaWarning(narrow);
+  assert.ok(wn);
+  assert.equal(wn.errorId, "0b64d408-0b25-43c1-90a3-095569e7b843-235");
+  assert.equal(wn.id, w.id);
+
+  // Active turn (`esc to cancel`), stale warning before a newer turn, indented quote, and context window limit return null.
+  assert.equal(readAgyQuotaWarning(quotaScreen.replace("? for shortcuts", "esc to cancel")), null);
+  assert.equal(readAgyQuotaWarning(`${quotaScreen.split("────")[0]}\n> Try again\n\nAll good.\n${IDLE_DEFAULT}`), null);
+  assert.equal(readAgyQuotaWarning(`  ⚠ Individual quota reached.\n${IDLE_DEFAULT}`), null);
+  assert.equal(readAgyQuotaWarning(`⚠ Context window limit reached.\n${IDLE_DEFAULT}`), null);
+  assert.equal(readAgyQuotaWarning(EDIT_DIALOG), null);
+});
+
 test("parseAgyPermissionBody separates Reason from Requesting permission for command and unwraps mid-path breaks", () => {
   const systemdScreen = [
     "────────────────────────────────────────────────────────────────────────",
@@ -253,4 +296,100 @@ test("parseAgyPermissionBody separates Reason from Requesting permission for com
   const editParsed = parseAgyPermissionBody("Accept this file edit?", "Edit src/app.ts\n  - const a = 1;\n  + const a = 2;");
   assert.equal(editParsed.command, null);
   assert.equal(editParsed.reason, null);
+});
+
+test("readAgyWorkingStatus reads live braille-spinner status/thinking ticker and rejects idle, stale, dialog and overlay screens", () => {
+  const workingScreen = [
+    '● Ran (echo "PATH=$PATH" && ls -la /home/noc/.local/bin/agentctl 2>&1 || true) (ctrl+o to expand)',
+    "⣿ The `usage.test.ts` file seems crucial to understanding the path resolution logic as the tests configure environment variables directly. Reviewing the test cases provides critical insights into...",
+    "│ Tip: Use /settings to configure your preferred model",
+    "",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(
+    readAgyWorkingStatus(workingScreen),
+    "The `usage.test.ts` file seems crucial to understanding the path resolution logic as the tests configure environment variables directly. Reviewing the test cases provides critical insights into...",
+  );
+
+  // Narrow terminal with wrapped spinner text, wrapped Tip, and 2-row wrapped status bar.
+  const narrowWrapped = [
+    "● Ran (npm test) (ctrl+o to expand)",
+    "⣷ The `usage.test.ts` file seems crucial to understanding the path",
+    "  resolution logic as the tests configure environment variables",
+    "  directly...",
+    "│ Tip: Use /settings to configure your default model and",
+    "  effort settings at any time.",
+    "────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────",
+    "esc to cancel",
+    "auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(
+    readAgyWorkingStatus(narrowWrapped),
+    "The `usage.test.ts` file seems crucial to understanding the path resolution logic as the tests configure environment variables directly...",
+  );
+
+  // Compact layout without a composer box (spinner directly above status bar).
+  const noComposer = [
+    "● Read host/chat.ts",
+    "⠋ Thinking...",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyWorkingStatus(noComposer), "Thinking...");
+
+  // Idle prompt with stale braille spinner in scrollback -> null.
+  assert.equal(readAgyWorkingStatus(`⠋ Installing packages...\n${IDLE_AUTO}`), null);
+
+  // Stale spinner above a newer completed tool call -> null.
+  const staleAboveTool = [
+    "⠋ Checking tests...",
+    "● Ran (npm test) (ctrl+o to expand)",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyWorkingStatus(staleAboveTool), null);
+
+  // Collapsed finished thought (`▸ Thought for 6s`) without an active spinner -> null.
+  const collapsedThought = [
+    "▸ Thought for 6s, 492 tokens",
+    "  Initial hypothesis: The task requires determining the preferred file name...",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyWorkingStatus(collapsedThought), null);
+
+  // Blocking dialogs and overlays -> null.
+  assert.equal(readAgyWorkingStatus(EDIT_DIALOG), null);
+  assert.equal(readAgyWorkingStatus(QUESTION_DIALOG), null);
+  assert.equal(readAgyWorkingStatus(MODEL_OVERLAY), null);
+});
+
+test("agyInShellMode detects active `!` bash mode and rejects normal prompt, drafts, overlays and dialogs", () => {
+  const shellEmpty = `────────────────────────────────────────────────────────────────────────
+!
+────────────────────────────────────────────────────────────────────────
+ activated bash mode · esc to cancel        auto · Gemini 4 Neon · xhigh`;
+  const shellTyped = `────────────────────────────────────────────────────────────────────────
+! echo hello
+────────────────────────────────────────────────────────────────────────
+ activated bash mode · esc to cancel        auto · Gemini 4 Neon · xhigh`;
+  const normalDraft = `────────────────────────────────────────────────────────────────────────
+> !echo hello
+────────────────────────────────────────────────────────────────────────
+? for shortcuts                             auto · Gemini 4 Neon · xhigh`;
+  assert.equal(agyInShellMode(shellEmpty), true);
+  assert.equal(agyInShellMode(shellTyped), true);
+  assert.equal(agyInShellMode(IDLE_AUTO), false);
+  assert.equal(agyInShellMode(IDLE_DEFAULT), false);
+  assert.equal(agyInShellMode(normalDraft), false);
+  assert.equal(agyInShellMode(MODEL_OVERLAY), false);
+  assert.equal(agyInShellMode(EDIT_DIALOG), false);
 });

@@ -27,7 +27,7 @@ import { Renderer, diffLines } from "./render.ts";
 import { presentTool, prettyArgs } from "./tools.ts";
 import { AgentError } from "./providers/types.ts";
 import type {
-  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background,
+  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background, QuotaWarning,
 } from "./providers/types.ts";
 
 export type { ModelInfo, Capabilities };
@@ -90,9 +90,13 @@ export type ChatState = {
   git: GitState | null;
   /** What the agent runs in the background (Claude Code's agents panel); null: nothing. */
   background: Background | null;
+  /** Active non-blocking quota/usage-limit warning from the TUI screen (e.g. Antigravity); null: none. */
+  quotaWarning: QuotaWarning | null;
+  /** Live working status/thinking text from the agent's TUI (e.g. Antigravity); null: none. */
+  activityText: string | null;
 };
 
-const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "queue", "error", "editorText", "handoff", "conflict"]);
+const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "queue", "error", "editorText", "handoff", "conflict", "quotaWarning"]);
 
 /**
  * The two lanes above the composer. Steering is the agent's queue; the
@@ -235,7 +239,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null, background: null,
+      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null,
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -407,7 +411,7 @@ export class Chat {
       this.enterConflict(sessionFile!, conflict);
       return;
     }
-    this.set({ phase: "starting", error: null, sessionFile, conflict: null });
+    this.set({ phase: "starting", error: null, sessionFile, conflict: null, activityText: null });
     void this.boot(gen, sessionFile);
   }
 
@@ -438,7 +442,7 @@ export class Chat {
     this.releaseLock();
     if (file !== this.state.sessionFile && this.timeline.items.length) this.replaceTimeline(this.newTimeline());
     const again = this.state.phase === "conflict" && JSON.stringify(this.state.conflict) === JSON.stringify(c);
-    this.set({ phase: "conflict", conflict: c, sessionFile: file, error: null, handoff: null });
+    this.set({ phase: "conflict", conflict: c, sessionFile: file, error: null, handoff: null, activityText: null });
     this.dropQueue();
     if (!again) this.notice("warning", `${why ? why + "\n" : ""}${this.conflictText(c)} ${this.conflictWayOut(c)}`);
     this.terminalState("idle");
@@ -623,7 +627,7 @@ export class Chat {
     const tail = stripAnsi(ev.stderrTail).trim().split("\n").filter(Boolean).slice(-3).join("\n");
     const msg = tail ? `${why}: ${tail}` : why;
     this.opts.log(msg);
-    this.set({ phase: wasStarting || ev.spawnError ? "error" : "exited", error: msg });
+    this.set({ phase: wasStarting || ev.spawnError ? "error" : "exited", error: msg, activityText: null });
     this.dropQueue();
     this.onTerminalState("error", why);
     this.notice("error", `${msg}\nSend a message or use /reload to restart ${this.agent} on this session.`);
@@ -717,6 +721,12 @@ export class Chat {
         return;
       case "editor_text":
         this.set({ editorText: ev.text });
+        return;
+      case "quota_warning":
+        this.set({ quotaWarning: ev.warning });
+        return;
+      case "activity_text":
+        this.set({ activityText: ev.text });
         return;
       case "session": {
         const patch: Partial<ChatState> = {};
@@ -887,7 +897,7 @@ export class Chat {
       this.autonomousCause = null;
       this.autonomousNotice = this.timeline.addNotice("info", "host", `${this.agent} started a run on its own.`).id;
     }
-    this.set({ phase: "working" });
+    this.set({ phase: "working", quotaWarning: null });
     this.terminalState("working");
   }
 
@@ -931,7 +941,8 @@ export class Chat {
     this.autonomousNotice = null;
     const stopped = aborted || this.runAborted;
     this.timeline.closeOpen(stopped ? "aborted" : "settled", this.agent);
-    if (this.state.phase === "working" || this.state.phase === "starting") this.set({ phase: "idle" });
+    if (this.state.phase === "working" || this.state.phase === "starting") this.set({ phase: "idle", activityText: null });
+    else if (this.state.activityText !== null) this.set({ activityText: null });
     this.clearCommandHint();
     this.refreshStats();
     this.git.refresh(); // a repo the run made, or a switch the watcher missed
@@ -1151,7 +1162,7 @@ export class Chat {
     const counted = !working && shows;
     if (counted) {
       this.expectRun++;
-      this.set({ phase: "working" });
+      this.set({ phase: "working", quotaWarning: null });
       this.terminalState("working");
     }
     const isCommand = /^\/\S/.test(message);
@@ -1371,7 +1382,7 @@ export class Chat {
     t.load(this.historyWithSkills(events));
     // Extension statuses and widgets are UI state; they survive a session change like in the TUI.
     this.replaceTimeline(t);
-    this.set({ usage: null, editorText: null, phase: "idle" });
+    this.set({ usage: null, editorText: null, phase: "idle", activityText: null });
     this.refreshCommands();
     this.refreshStats();
   }
@@ -1634,7 +1645,7 @@ export class Chat {
       while (this.runActive && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
     }
     await this.stopAgent();
-    this.set({ phase: "handoff", error: null, handoff: { argv, terminal: null, since: Date.now() } });
+    this.set({ phase: "handoff", error: null, activityText: null, handoff: { argv, terminal: null, since: Date.now() } });
     this.watchHandoff();
     this.terminalState("idle");
     this.opts.onSessionFile?.(file);

@@ -34,6 +34,7 @@ import { BackgroundPoller } from "./background.ts";
 import { historyOf } from "./history.ts";
 import { ClaudePlans } from "./plans.ts";
 import { configDir, describeSession, promptText, queuedPrompt, sessionFiles, sessionIdOf, sessionPath } from "./sessions.ts";
+import { imageLines } from "../sent-images.ts";
 import { processTree } from "../tui.ts";
 import { CLAUDE_TOOLS } from "./tools.ts";
 import { AgentError } from "../types.ts";
@@ -710,7 +711,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     if (!this.running) this.runOn();
     const now = Date.now();
     this.sent = this.sent.filter((s) => now - s.at < SENT_TTL_MS);
-    const i = this.sent.findIndex((s) => norm(s.text) === norm(ev.text));
+    const i = this.sent.findIndex((s) => norm(s.text) === norm(ev.text) || norm(imageLines(s.text).text) === norm(ev.text));
     if (i < 0) return { ...ev, source: "external" };
     const [s] = this.sent.splice(i, 1);
     // An echo carries only its message's id: the core confirms the item it showed at send (chat.ts onUserEcho).

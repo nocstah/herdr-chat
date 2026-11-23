@@ -176,6 +176,8 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   private running = false;
   private settling = false;
   private sent: { id: string; text: string; at: number }[] = [];
+  /** Messages typed into Codex's TUI while it works, shown in the chat's steering lane until delivered or settled. */
+  private queued: { id: string; text: string }[] = [];
   private quitSaid = false;
   private unsureSaid = false;
   private binding = false;
@@ -281,11 +283,28 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     else this.closeAsk();
   }
 
+  private publishQueue(): void {
+    this.emit({
+      type: "queue_changed",
+      steering: this.queued.map((q) => q.text),
+      followUp: [],
+      steeringIds: this.queued.map((q) => q.id),
+      followUpIds: [],
+    });
+  }
+
+  private clearQueued(): void {
+    if (!this.queued.length) return;
+    this.queued = [];
+    this.publishQueue();
+  }
+
   private gone(why: string): void {
     if (!this.live) return;
     this.live = false;
     this.log(why);
     this.settle();
+    this.clearQueued();
     this.emit({ type: "notice", level: "warning", source: "host", text: "Codex's terminal has ended." });
   }
 
@@ -304,6 +323,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     } finally {
       this.settling = false;
     }
+    this.clearQueued();
     this.running = false;
     this.emit({ type: "run_settled", aborted: false });
   }
@@ -370,6 +390,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
       this.thread = b.id;
       this.follower = null;
       this.offset = 0;
+      this.clearQueued();
       if (!first) this.awaitingHistory = true;
       this.emit({ type: "session", id: b.id, file: b.path, ...(first ? {} : { reload: true }) });
     } catch (e) {
@@ -448,9 +469,14 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     if (!this.running) this.runOn();
     const now = Date.now();
     this.sent = this.sent.filter((s) => now - s.at < SENT_TTL_MS);
-    const i = this.sent.findIndex((s) => norm(s.text) === norm(ev.text));
+    const i = this.sent.findIndex((s) => norm(s.text) === norm(ev.text) || norm(imageLines(s.text).text) === norm(ev.text));
     if (i < 0) return { ...ev, source: "external" };
     const [s] = this.sent.splice(i, 1);
+    const qi = this.queued.findIndex((q) => q.id === s!.id);
+    if (qi >= 0) {
+      this.queued.splice(qi, 1);
+      this.publishQueue();
+    }
     const { source: _source, ...rest } = ev;
     return { ...rest, clientId: s!.id };
   }
@@ -667,9 +693,19 @@ export class CodexTerminalAdapter implements ProviderAdapter {
     const text = bang ? `!${bang[1]!.trim()}` : files.length ? withImageLines(p.text, files) : p.text;
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
+    const display = p.text.trim() || (p.images.length === 1 ? "[1 image]" : `[${p.images.length} images]`);
+    const queuedEntry = p.busy && !command ? { id: p.id, text: display } : null;
+    if (queuedEntry) {
+      this.queued.push(queuedEntry);
+      this.publishQueue();
+    }
     const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
+      if (queuedEntry) {
+        this.queued = this.queued.filter((q) => q.id !== queuedEntry.id);
+        this.publishQueue();
+      }
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
     }
     if (command) return { disposition: "handled" };
@@ -677,6 +713,7 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   }
 
   async clearQueue(): Promise<string[]> {
+    this.clearQueued();
     return [];
   }
 

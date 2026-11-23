@@ -143,7 +143,7 @@ function user(it, c) {
   // A skill: its pill, then the message: beside it when that is one short line,
   // else under it (as the bubble's own rows: a nested column sizes the text too narrow).
   let content;
-  if (!skill) content = [body("")];
+  if (!skill) content = text || !it.imagePaths?.length ? [body("")] : [];
   else if (!text) content = [h_flex().child(skillPill(it, c)), ...skillBody];
   else if (!text.includes("\n") && text.length <= 80) content = [h_flex().gap(8).items_center().child(skillPill(it, c)).child(body("-i").flex_1().min_w(0)), ...skillBody];
   else content = [h_flex().child(skillPill(it, c)), ...skillBody, body("-s")];
@@ -404,12 +404,19 @@ function activity(c) {
   const t = c.t;
   const a = c.activity;
   if (!a) return div();
-  return h_flex().h(30).gap(8).items_center().text_size(12.5).text_color(t.muted)
-    .child(a.waiting
-      ? div().flex_none().w(8).h(8).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1200 })
-      : spinner(12, t.working))
-    .child(div().flex_none().child(a.text))
-    .when(a.since != null, (e) => e.child(div().flex_none().text_color(t.dim).child(`· ${secsSince(a.since, c)}s`)));
+  const lead = a.waiting
+    ? div().flex_none().pt(5).child(div().w(8).h(8).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1200 }))
+    : div().flex_none().pt(3).child(spinner(12, t.working));
+  if (a.since != null) {
+    return h_flex().min_h(30).py(6).gap(8).items_start().text_size(12.5).line_height("18px").text_color(t.muted)
+      .child(lead)
+      .child(h_flex().flex_1().min_w(0).gap(8).items_center()
+        .child(div().min_w(0).truncate().child(a.text))
+        .child(div().flex_none().text_color(t.dim).child(`· ${secsSince(a.since, c)}s`)));
+  }
+  return h_flex().min_h(30).py(6).gap(8).items_start().text_size(12.5).line_height("18px").text_color(t.muted)
+    .child(lead)
+    .child(div().flex_1().min_w(0).child(a.text));
 }
 
 function notice(it, c) {

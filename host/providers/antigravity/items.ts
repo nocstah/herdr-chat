@@ -117,6 +117,7 @@ export class AgyTranscriptFollower {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
     const r = raw as Rec;
     const step = typeof r.step_index === "number" ? r.step_index : null;
+    if (r.type === "SHELL_EXEC" && r.status === "RUNNING") return [];
     if (step !== null) {
       if (this.seen.has(step)) return [];
       this.seen.add(step);
@@ -240,6 +241,33 @@ export class AgyTranscriptFollower {
           output,
           ...t,
         });
+        return out;
+      }
+
+      case "SHELL_EXEC": {
+        // User-initiated `! <command>` run in Antigravity's TUI: rendered as a standalone
+        // Bash card (`you-` prefix keeps rows.js from folding it into an agent work group).
+        const cmd = typeof r.command === "string" ? r.command.trim() : "";
+        if (!cmd) return out;
+        const stepTag = step ?? ++this.seq;
+        const callId = `you-bash-${stepTag}`;
+        const rawOut = typeof r.output === "string" ? cleanToolOutput(r.output) : typeof r.content === "string" ? cleanToolOutput(r.content) : "";
+        const err = typeof r.error === "string" && r.error.trim()
+          ? r.error.trim()
+          : typeof r.error_message === "string" && r.error_message.trim()
+            ? r.error_message.trim()
+            : "";
+        const exitCode = typeof r.exit_code === "number" && Number.isFinite(r.exit_code) ? r.exit_code : null;
+        const isError = r.status === "ERROR" || Boolean(err) || (exitCode !== null && exitCode !== 0);
+        const body = [rawOut, err].filter((s) => s.trim()).join("\n");
+        const output = exitCode !== null && !/Command exited with code \d+/i.test(body)
+          ? `Command exited with code ${exitCode}.${body ? `\n\nCommand output:\n${body}` : ""}`
+          : body;
+        const args = { CommandLine: cmd };
+        out.push(
+          { type: "tool_call", callId, name: "run_command", args, ...t },
+          { type: "tool_ended", callId, name: "run_command", args, isError, output, ...t },
+        );
         return out;
       }
 

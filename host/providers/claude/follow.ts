@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import type { AssistantBlock, ImageBlock, NormalizedEvent, StopReason, EventOf } from "../types.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
 import { bashEvents, imageFile, promptText, queuedPrompt, readTranscript, sentImages } from "./sessions.ts";
+import { imageLines } from "../sent-images.ts";
 import { ReplScripts, endTexts, type Relabel } from "./repl.ts";
 
 type Rec = Record<string, any>;
@@ -34,11 +35,12 @@ function localStdout(text: string): string | null {
   return m ? m[1]!.trim() : null;
 }
 
-/** A message the person typed: images the terminal view sent as @ mentions are shown as its images, as in history. */
+/** A message the person typed: images sent as @ mentions (from this view or outside, e.g. OmaRelay) are shown as its images, as in history. */
 function typedMessage(typed: string, content: unknown, t: { ts?: number }): EventOf<"user_message"> {
   const sent = sentImages(typed);
-  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
-  return { type: "user_message", text: sent.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t };
+  const mentioned = imageLines(sent.text);
+  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null), ...mentioned.images];
+  return { type: "user_message", text: mentioned.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), ...t };
 }
 
 export class TranscriptFollower {

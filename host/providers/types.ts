@@ -26,6 +26,8 @@ export type SkillRef = { name: string; command: string; path?: string; body?: st
 export type ModelInfo = { provider: string; id: string; name: string; reasoning: boolean; contextWindow: number | null; input: string[] };
 
 export type PermissionMode = { id: string; label: string; description?: string };
+/** Non-blocking quota/usage-limit warning read from a TUI screen (e.g. Antigravity's idle screen). */
+export type QuotaWarning = { id: string; title: string; message: string; errorId?: string | null };
 
 /** protocol.md v3 "ChatState additions". */
 export type Capabilities = {
@@ -248,6 +250,10 @@ export type NormalizedEvent = Common &
     | { type: "widget"; key: string; placement: "aboveEditor" | "belowEditor"; lines: string[] | null }
     | { type: "title"; text: string | null }
     | { type: "editor_text"; text: string | null }
+    /** `warning: null` clears an active quota/usage-limit card above the composer. */
+    | { type: "quota_warning"; warning: QuotaWarning | null }
+    /** Live working status/thinking text from the agent's TUI (e.g. Antigravity); null clears it. */
+    | { type: "activity_text"; text: string | null }
     /** `once: "run"`: at most one such notice per run. */
     | { type: "notice"; level: NoticeItem["level"]; source: NoticeItem["source"]; text: string; once?: "run" }
 

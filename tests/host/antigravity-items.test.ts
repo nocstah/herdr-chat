@@ -157,4 +157,21 @@ test("AgyTranscriptFollower maps a full turn, pairs tool calls across history->l
   });
   assert.equal(f.turn, "ended");
   assert.ok(evFinal.some((e) => e.type === "assistant_end" && (e as any).stopReason === "stop"));
+
+  // User-initiated `!` shell command (SHELL_EXEC): ignored while RUNNING, then shown as a standalone you-bash card.
+  assert.deepEqual(f.feed({ step_index: 8, type: "SHELL_EXEC", status: "RUNNING", command: "echo hi" }), []);
+  const evShell = f.feed({ step_index: 8, type: "SHELL_EXEC", status: "DONE", command: "echo hi", exit_code: 0, output: "hi\n" });
+  assert.equal(evShell.length, 2);
+  assert.equal(evShell[0]!.type, "tool_call");
+  assert.equal((evShell[0] as any).callId, "you-bash-8");
+  assert.equal((evShell[0] as any).name, "run_command");
+  assert.deepEqual((evShell[0] as any).args, { CommandLine: "echo hi" });
+  assert.equal(evShell[1]!.type, "tool_ended");
+  assert.equal((evShell[1] as any).isError, false);
+  assert.match((evShell[1] as any).output, /Command exited with code 0/);
+  assert.match((evShell[1] as any).output, /hi/);
+
+  const evShellFail = f.feed({ step_index: 9, type: "SHELL_EXEC", status: "DONE", command: "false", exit_code: 1, error_message: "failed" });
+  assert.equal((evShellFail[1] as any).isError, true);
+  assert.match((evShellFail[1] as any).output, /Command exited with code 1/);
 });

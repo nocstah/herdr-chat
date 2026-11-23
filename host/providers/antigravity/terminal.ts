@@ -27,8 +27,9 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyStatusBar } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
+import { sendAgyBang } from "./bang.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
 import { imageLines, pruneImages, saveImages, withImageLines } from "../sent-images.ts";
 import { waitForPrompt } from "../prompt-wait.ts";
@@ -36,7 +37,7 @@ import type { PromptWait } from "../prompt-wait.ts";
 import { AgentError } from "../types.ts";
 import type {
   AdapterHost, AdapterOptions, AgentCommand, AgentModel, Ask, AskAnswer, Capabilities, Disposition, ImageBlock,
-  NormalizedEvent, PermissionMode, PromptMode, ProviderAdapter, SessionSource, StartInfo, UsageInfo,
+  NormalizedEvent, PermissionMode, PromptMode, ProviderAdapter, QuotaWarning, SessionSource, StartInfo, UsageInfo,
 } from "../types.ts";
 
 type Rec = Record<string, any>;
@@ -46,6 +47,7 @@ const num = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v
 const TAIL_MS = () => num(process.env.HERDR_CHAT_TAIL_MS, 150);
 const SESSION_MS = () => num(process.env.HERDR_CHAT_SESSION_MS, 1500);
 const ASK_MS = () => num(process.env.HERDR_CHAT_ASK_MS, 500);
+const WORK_STATUS_MS = () => num(process.env.HERDR_CHAT_WORK_STATUS_MS, 500);
 const ASK_SETTLE_MS = 700;
 const SENT_TTL_MS = 10 * 60_000;
 const MODELS_TTL_MS = 60_000;
@@ -68,7 +70,6 @@ function formatAgyChoiceLabel(raw: string): { label: string; description?: strin
   }
   return { label: raw };
 }
-
 
 const NOT_HERE = "Do that in Antigravity's terminal: Ctrl+Shift+J flips to it.";
 const BUSY = "Antigravity is working: run the command when it's done, or in a new tab.";
@@ -174,6 +175,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private running = false;
   private settling = false;
   private sent: { id: string; text: string; at: number }[] = [];
+  /** Messages typed into Antigravity's TUI while it works, shown in the chat's steering lane until delivered or settled. */
+  private queued: { id: string; text: string; raw: string }[] = [];
   private quitSaid = false;
   private binding = false;
   private usageNow: { contextTokens: number | null; contextWindow: number | null } = { contextTokens: null, contextWindow: null };
@@ -185,6 +188,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private modelNow: string | null = null;
   private effortNow: string | null = null;
   private modeNow: AgyMode | null = null;
+  private quotaWarningNow: QuotaWarning | null = null;
+  private activityTextNow: string | null = null;
+  private workTimer: NodeJS.Timeout | null = null;
   private catalog: AgyModelGroup[] = [];
   private catalogAt = 0;
   private catalogLoading: Promise<AgyModelGroup[]> | null = null;
@@ -302,37 +308,109 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (state === this.status) return;
     this.status = state;
     if (!this.host) return;
-    if (state === "working" || state === "blocked") this.runOn();
-    else {
+    if (state === "working" || state === "blocked") {
+      this.setQuotaWarning(null);
+      this.runOn();
+    } else {
+      this.stopWorkStatus();
       this.settle();
       void this.syncFromScreen();
     }
-    if (state === "blocked") this.watchAsk();
-    else this.closeAsk();
+    if (state === "blocked") {
+      this.stopWorkStatus();
+      this.watchAsk();
+    } else {
+      this.closeAsk();
+      if (state === "working") this.watchWorkStatus();
+    }
+  }
+
+  private setQuotaWarning(next: QuotaWarning | null): void {
+    if ((this.quotaWarningNow?.id ?? null) === (next?.id ?? null)
+      && (this.quotaWarningNow?.message ?? null) === (next?.message ?? null)) return;
+    this.quotaWarningNow = next;
+    this.emit({ type: "quota_warning", warning: next });
+  }
+
+  private setActivityText(next: string | null): void {
+    const clean = next?.trim() || null;
+    if (clean === this.activityTextNow) return;
+    this.activityTextNow = clean;
+    this.emit({ type: "activity_text", text: clean });
+  }
+
+  private watchWorkStatus(): void {
+    if (this.workTimer || this.disposed) return;
+    this.workTimer = setTimeout(() => void this.pollWorkStatus(), 0);
+    this.workTimer.unref();
+  }
+
+  private stopWorkStatus(): void {
+    if (this.workTimer) clearTimeout(this.workTimer);
+    this.workTimer = null;
+    this.setActivityText(null);
+  }
+
+  private async pollWorkStatus(): Promise<void> {
+    const active = () => !this.disposed && this.running && this.status !== "blocked";
+    if (active() && !this.answering && this.agyRuns()) {
+      const text = await this.screenText();
+      if (active() && !this.answering && text !== null) {
+        this.setActivityText(readAgyWorkingStatus(text));
+      }
+    }
+    this.workTimer = null;
+    if (active()) {
+      this.workTimer = setTimeout(() => void this.pollWorkStatus(), WORK_STATUS_MS());
+      this.workTimer.unref();
+    }
+  }
+
+  private publishQueue(): void {
+    this.emit({
+      type: "queue_changed",
+      steering: this.queued.map((q) => q.text),
+      followUp: [],
+      steeringIds: this.queued.map((q) => q.id),
+      followUpIds: [],
+    });
+  }
+
+  private clearQueued(): void {
+    if (!this.queued.length) return;
+    this.queued = [];
+    this.publishQueue();
   }
 
   private gone(why: string): void {
     if (!this.live) return;
     this.live = false;
     this.log(why);
+    this.setQuotaWarning(null);
+    this.stopWorkStatus();
     this.settle();
+    this.clearQueued();
     this.emit({ type: "notice", level: "warning", source: "host", text: "Antigravity's terminal has ended." });
   }
 
   private runOn(): void {
     if (this.running) return;
     this.running = true;
+    this.setQuotaWarning(null);
     this.emit({ type: "run_started" });
+    if (this.status !== "blocked") this.watchWorkStatus();
   }
 
   private settle(): void {
     if (!this.running || this.settling) return;
+    this.stopWorkStatus();
     this.settling = true;
     try {
       this.tail();
     } finally {
       this.settling = false;
     }
+    this.clearQueued();
     this.running = false;
     this.emit({ type: "run_settled", aborted: false });
   }
@@ -367,11 +445,16 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
   }
 
-  /** Sync model, effort and execution mode from the TUI's bottom status bar (e.g. after Shift+Tab or /model in terminal). */
+  /** Sync model, effort, execution mode and any idle quota warning from the TUI screen. */
   private async syncFromScreen(): Promise<void> {
     if (this.disposed || !this.live || !this.agyRuns()) return;
     const text = await this.screenText();
     if (!text || this.disposed) return;
+    if (this.status !== "working" && this.status !== "blocked") {
+      const warn = readAgyQuotaWarning(text);
+      if (warn && this.running) this.settle();
+      this.setQuotaWarning(warn);
+    }
     const bar = readAgyStatusBar(text);
     if (!bar) return;
     if (bar.mode !== this.modeNow) this.emit({ type: "permission_mode", mode: bar.mode });
@@ -403,6 +486,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
         if (b.why === "not_running") {
           if (!this.quitSaid && this.file) {
             this.quitSaid = true;
+            this.stopWorkStatus();
             this.settle();
             this.emit({ type: "notice", level: "info", source: "host", text: "Antigravity quit in its terminal. Start it there again and this view follows it." });
           }
@@ -419,6 +503,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.conversationId = b.id;
       this.follower = null;
       this.offset = 0;
+      this.setQuotaWarning(null);
+      this.setActivityText(null);
+      this.clearQueued();
       if (!first) this.awaitingHistory = true;
       this.emit({ type: "session", id: b.id, file: b.path, ...(first ? {} : { reload: true }) });
     } catch (e) {
@@ -487,11 +574,59 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (!this.running) this.runOn();
     const now = Date.now();
     this.sent = this.sent.filter((s) => now - s.at < SENT_TTL_MS);
-    const i = this.sent.findIndex((s) => norm(s.text) === norm(ev.text));
-    if (i < 0) return { ...ev, source: "external" };
-    const [s] = this.sent.splice(i, 1);
-    const { source: _source, ...rest } = ev;
-    return { ...rest, clientId: s!.id };
+    const target = norm(ev.text);
+    const i = this.sent.findIndex((s) => norm(s.text) === target || norm(imageLines(s.text).text) === target);
+    if (i >= 0) {
+      const [s] = this.sent.splice(i, 1);
+      const qi = this.queued.findIndex((q) => q.id === s!.id);
+      if (qi >= 0) {
+        this.queued.splice(qi, 1);
+        this.publishQueue();
+      }
+      const { source: _source, ...rest } = ev;
+      return { ...rest, clientId: s!.id };
+    }
+    // Antigravity concatenates multiple queued messages with "\n" into one USER_INPUT record.
+    for (let start = 0; start < this.sent.length; start++) {
+      let joined = "";
+      for (let end = start; end < this.sent.length; end++) {
+        const part = imageLines(this.sent[end]!.text).text || this.sent[end]!.text;
+        joined = end === start ? part : `${joined}\n${part}`;
+        if (end > start && norm(joined) === target) {
+          const matched = this.sent.splice(start, end - start + 1);
+          const ids = new Set(matched.map((m) => m.id));
+          const before = this.queued.length;
+          this.queued = this.queued.filter((q) => !ids.has(q.id));
+          if (this.queued.length !== before) this.publishQueue();
+          const { source: _source, ...rest } = ev;
+          return { ...rest, clientId: matched[0]!.id };
+        }
+      }
+    }
+    // Mixed merge (e.g. a chat-queued message combined with a terminal-typed one).
+    if (this.queued.length) {
+      const evLines = ev.text.split("\n").map(norm).filter(Boolean);
+      const matchedIds = new Set<string>();
+      for (const q of this.queued) {
+        const qLines = (imageLines(q.raw).text || q.raw).split("\n").map(norm).filter(Boolean);
+        if (!qLines.length) continue;
+        for (let k = 0; k <= evLines.length - qLines.length; k++) {
+          if (qLines.every((l, j) => evLines[k + j] === l)) {
+            matchedIds.add(q.id);
+            break;
+          }
+        }
+      }
+      if (matchedIds.size) {
+        const firstId = this.queued.find((q) => matchedIds.has(q.id))!.id;
+        this.queued = this.queued.filter((q) => !matchedIds.has(q.id));
+        this.sent = this.sent.filter((s) => !matchedIds.has(s.id));
+        this.publishQueue();
+        const { source: _source, ...rest } = ev;
+        return { ...rest, clientId: firstId };
+      }
+    }
+    return { ...ev, source: "external" };
   }
 
   // ---------------------------------------------------------------- its dialogs
@@ -796,6 +931,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     const streaming = this.status === "working" || this.status === "blocked";
     if (streaming) this.running = true;
     if (this.status === "blocked") this.watchAsk();
+    else if (this.status === "working") this.watchWorkStatus();
     const hasHistory = Boolean(this.file && existsSync(this.file));
     this.awaitingHistory = Boolean(session) || hasHistory;
     return { streaming, hasHistory };
@@ -839,14 +975,31 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (bang && this.status === "working") throw new Error(BUSY);
     const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
     if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
+    if (bang) {
+      // `hc send` bracketed-pastes `!cmd`, which `agy` treats as a literal LLM prompt instead of
+      // opening bash mode; type raw `!` over `hc connect` (`terminal.attach`), verify bash mode,
+      // then paste the command and press Enter.
+      await sendAgyBang({ hc: this.opts.hc, terminal: this.opts.terminal, command: bang[1]!.trim() });
+      return { disposition: "handled" };
+    }
     if (p.images.length && !this.opts.sentDir) throw new Error(NO_IMAGES);
     const files = p.images.length ? saveImages(this.opts.sentDir!, p.images) : [];
-    const text = bang ? `!${bang[1]!.trim()}` : files.length ? withImageLines(p.text, files) : p.text;
+    const text = files.length ? withImageLines(p.text, files) : p.text;
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
+    const display = p.text.trim() || (p.images.length === 1 ? "[1 image]" : `[${p.images.length} images]`);
+    const queuedEntry = p.busy && !command ? { id: p.id, text: display, raw: p.text } : null;
+    if (queuedEntry) {
+      this.queued.push(queuedEntry);
+      this.publishQueue();
+    }
     const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
+      if (queuedEntry) {
+        this.queued = this.queued.filter((q) => q.id !== queuedEntry.id);
+        this.publishQueue();
+      }
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
     }
     if (command) return { disposition: "handled" };
@@ -854,6 +1007,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   }
 
   async clearQueue(): Promise<string[]> {
+    this.clearQueued();
     return [];
   }
 
@@ -887,7 +1041,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   kill(): void {
     this.disposed = true;
-    for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry, this.askTimer]) if (t) clearTimeout(t);
+    for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry, this.askTimer, this.workTimer]) if (t) clearTimeout(t);
     this.events?.kill();
     this.events = null;
   }

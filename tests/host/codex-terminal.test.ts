@@ -383,6 +383,23 @@ test("the view's images: saved as files and named in the message for Codex's ima
     await r.adapter.prompt({ id: "u-only", text: "", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false });
     assert.match(r.calls().filter((c: string[]) => c[0] === "send").pop()![3] as string, /^\[Image available at: \/.*\.png\]$/);
     await assert.rejects(r.adapter.prompt({ id: "u-c", text: "/review", images: [{ data: PNG, mimeType: "image/png" }], mode: "steer", busy: false }), /Images go with a message/);
+
+    // Queued messages while Codex works show in the steering lane and clear once echoed or settled.
+    r.events.length = 0;
+    r.status("working");
+    await until("working for codex queue", () => (r.adapter as any).status === "working");
+    const q = await r.adapter.prompt({ id: "u-q1", text: "steer while busy", images: [], mode: "auto", busy: true });
+    assert.equal(q.disposition, "queued");
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, ["steer while busy"]);
+    r.write(A, [r.user("u4", "steer while busy")]);
+    await until("codex queued echo", () => r.events.some((e) => e.type === "user_message" && (e as any).clientId === "u-q1"));
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, []);
+    // A queued message cancelled in the terminal clears when the run settles.
+    await r.adapter.prompt({ id: "u-q2", text: "cancelled codex steer", images: [], mode: "auto", busy: true });
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, ["cancelled codex steer"]);
+    r.status("idle");
+    await until("codex queue settled", () => r.events.some((e) => e.type === "run_settled"));
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, []);
   } finally {
     r.done();
   }

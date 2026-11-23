@@ -110,6 +110,7 @@ export default class HerdrChat extends View {
     this.expanded = new Set();
     this.full = new Map();
     this.dialog = new DialogCard((cx) => { this.debug?.mark(); cx?.notify(); }, () => this.composer.focus());
+    this.dismissedQuotaId = null;
     this.picker = null;
     this.handoff = null;
     this.transcript = false;
@@ -2095,6 +2096,41 @@ export default class HerdrChat extends View {
         .child(btn("run-ask-copy", "Copy", false, (cx) => { this.copy("run-ask", line ?? ask.commands.join("\n"), cx); this.runAsk = null; })));
   }
 
+  // Non-blocking quota/usage-limit warning card above the composer (e.g. Antigravity's idle screen warning).
+  /** @param {any} t */
+  quotaCard(t) {
+    const w = this.store.state.quotaWarning;
+    if (!w) {
+      this.dismissedQuotaId = null;
+      return null;
+    }
+    if (this.dismissedQuotaId === w.id) return null;
+    const btn = (/** @type {string} */ id, /** @type {string} */ label, /** @type {boolean} */ ghost, /** @type {string} */ what) =>
+      h_flex().id(id).h(28).px(10).gap(6).items_center().rounded(7).cursor_pointer()
+        .border_1().border_color(ghost ? t.border : t.input).bg(ghost ? t.surface : t.raised)
+        .text_color(t.foreground).text_size(12).font_medium()
+        .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.control(what, cx))
+        .when(ghost, (e) => e.child(icon("terminal", 12.5).text_color(t.muted)))
+        .child(label);
+    return v_flex().id("quota-warning-card").gap(6).p(12).rounded(10).border_1()
+      .border_color(alpha(t.ansi1, 0.45)).bg(alpha(t.ansi1, 0.08))
+      .child(h_flex().gap(8).items_center()
+        .child(icon("alert", 14).text_color(t.ansi1))
+        .child(div().flex_1().min_w(0).text_size(13).font_semibold().text_color(t.ansi1).child(w.title || "Quota reached"))
+        .child(div().id("quota-dismiss-x").p(3).rounded(5).cursor_pointer().text_color(t.dim)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => this.control("quota:dismiss", cx))
+          .child(icon("x", 12.5))))
+      .child(div().text_size(12.5).line_height("19px").text_color(t.foreground).child(w.message))
+      .when(Boolean(w.errorId), (e) => e.child(h_flex().gap(6).items_center().text_size(11.5).text_color(t.muted)
+        .child("Error ID:")
+        .child(div().font_family(monoFont()).child(w.errorId))))
+      .child(h_flex().gap(8).pt(2).items_center()
+        .when(Boolean(this.view), (e) => e.child(btn("quota-open-terminal", "Open terminal", true, "view:terminal")))
+        .child(div().flex_1())
+        .child(btn("quota-dismiss", "Dismiss", false, "quota:dismiss")));
+  }
+
   // A file a tool touched, in an editor (files.js). `mustExist`: a path an answer
   // named, checked first (in the chat's folder, on the space's machine).
   openFile(path, line, cx, { mustExist = false } = {}) {
@@ -2264,6 +2300,7 @@ export default class HerdrChat extends View {
         break;
       case "dialog:submit": return this.answer("submit", null, cx);
       case "dialog:cancel": return this.answer("cancel", null, cx);
+      case "quota:dismiss": this.dismissedQuotaId = this.store.state.quotaWarning?.id ?? null; break;
       default:
         if (what.startsWith("bg:open:")) return this.bgOpen(what.slice(8), cx);
         if (what.startsWith("bg:stop:")) return this.bgStop(what.slice(8), cx);
@@ -2666,6 +2703,7 @@ export default class HerdrChat extends View {
         opened: this.bgOpenId ?? null, detail: this.bgDetail ? { kind: this.bgDetail.kind ?? null, state: this.bgDetail.state ?? null, lines: bgDetailLines(this.bgDetail).length, stoppable: Boolean(this.bgDetail.stoppable), error: this.bgDetail.error ?? null } : null } : null,
       dialog: s.dialog ? { id: s.dialog.id, method: s.dialog.method, title: s.dialog.title, value: this.dialog.field ? this.dialog.value() : null,
         ...this.dialog.form?.debugState() } : null,
+      quotaWarning: s.quotaWarning ?? null,
       statuses: s.statuses.map((x) => ({ key: x.key, text: x.spans.map((y) => y.text).join("") })),
       widgets: s.widgets.map((w) => w.key), commands: s.commands.length, commandNames: s.commands.map((c) => c.name),
       items: this.store.items.map((it) => ({ id: it.id, kind: it.kind, ...(it.parent ? { parent: it.parent } : {}), ...(it.status ? { status: it.status } : {}), ...(it.streaming ? { streaming: true } : {}),
@@ -2769,6 +2807,7 @@ export default class HerdrChat extends View {
     if (s.dialog) return { text: "Waiting for you", waiting: true, since: null };
     if (s.phase === "compacting") return { text: "Compacting…", since: null };
     if (s.phase !== "working") return null;
+    const live = typeof s.activityText === "string" && s.activityText.trim() ? s.activityText.trim() : null;
     const items = this.store.items;
     for (let i = items.length - 1; i >= 0 && i >= items.length - 40; i--) {
       const it = items[i];
@@ -2779,11 +2818,11 @@ export default class HerdrChat extends View {
         return { text: `Running ${it.name}`, since: it.ts };
       }
       // Its row counts the seconds, or the live row of the folded card it's in (rows.js liveSteps).
-      if (it.kind === "thinking" && it.streaming) return { text: "Working", since: null };
-      if (it.kind === "assistant" && it.streaming) return { text: it.text ? "Writing" : "Working", since: null };
+      if (it.kind === "thinking" && it.streaming) return { text: live ?? "Working", since: null };
+      if (it.kind === "assistant" && it.streaming) return { text: it.text ? "Writing" : (live ?? "Working"), since: null };
       if (it.kind === "user") break;
     }
-    return { text: "Working", since: null };
+    return { text: live ?? "Working", since: null };
   }
 
   // The one column everything shares: ≤ 800 px, centered, 24 px padding (12 below 600 px).
@@ -2887,10 +2926,12 @@ export default class HerdrChat extends View {
       hint: hintText, hintColor: this.flashText ? t.blocked : t.dim, action: (a, cx) => this.action(a, cx) }))
       .anchor("bottom_left").w_full()
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
+    const quotaCard = !s.dialog ? this.quotaCard(t) : null;
     // Its height is in the dump: an open menu must not change it (an overlay, not the flow).
     const bottom = v_flex().id("chat-bottom").w_full().gap(8)
       .on_size_change((sz, cx) => { if (sz.height !== this.bottomH) { this.bottomH = sz.height; this.debug.mark(); } })
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
+      .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
       .children([widgetTray(this, above, t), backgroundStrip(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)

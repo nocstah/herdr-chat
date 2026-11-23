@@ -40,6 +40,13 @@ export type AgyPermissionDetail = {
   body: string;
 };
 
+export type AgyQuotaWarning = {
+  id: string;
+  title: string;
+  message: string;
+  errorId: string | null;
+};
+
 const SOLID_RE = /^\s*─{8,}\s*$/;
 const COMPOSER_RE = /^>\s*(?:$|Auto mode:|Plan mode:|Accept-edits mode:|Type a message|Ask anything|[^\d])/i;
 const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel|Press up to edit queued messages)\b/i;
@@ -467,4 +474,260 @@ export function agyAtPrompt(screen: string): boolean {
   }
   const box = tail.slice(topRule >= 0 ? topRule + 1 : Math.max(0, bottomRule - 4), bottomRule);
   return box.some((l) => COMPOSER_RE.test(l));
+}
+
+/**
+ * Whether `agy` is currently in `!` bash/shell mode: its composer chevron switched
+ * from `>` to `!` between the horizontal rules and/or the status line below the
+ * composer shows `activated bash mode`.
+ */
+export function agyInShellMode(screen: string): boolean {
+  if (readAgyPrompt(screen)) return false;
+  const lines = screenLines(screen);
+  if (lines.length < 3) return false;
+  const tail = lines.slice(-12);
+  let bottomRule = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (SOLID_RE.test(tail[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  if (bottomRule < 1) return false;
+  const below = tail.slice(bottomRule + 1).filter((l) => !blank(l));
+  if (below.some((l) => OVERLAY_HINT_RE.test(l))) return false;
+  let topRule = -1;
+  for (let i = bottomRule - 1; i >= 0; i--) {
+    if (SOLID_RE.test(tail[i]!)) {
+      topRule = i;
+      break;
+    }
+  }
+  const box = tail.slice(topRule >= 0 ? topRule + 1 : Math.max(0, bottomRule - 4), bottomRule);
+  const first = box.find((l) => !blank(l));
+  if (first && /^!(?:\s|$)/.test(first)) return true;
+  if (first && /^>/.test(first)) return false;
+  return below.some((l) => /\bactivated\s+bash\s+mode\b/i.test(l));
+}
+
+const QUOTA_SIGNAL_RE = /\b(?:individual\s+quota|quota\s+(?:reached|exceeded|exhausted|limit)|out\s+of\s+(?:quota|credits)|insufficient\s+(?:quota|credits)|credits?\s+(?:exhausted|depleted|reached)|usage\s+limit(?:\s+(?:reached|exceeded))?|hit\s+your\s+(?:limit|quota|usage\s+limit)|reached\s+(?:your|the)\s+(?:daily|weekly|hourly|monthly|plan|usage|rate|message|request)?\s*(?:quota|limit)|rate\s+limit(?:\s+(?:reached|exceeded))?|too\s+many\s+requests|upgrade\s+your\s+(?:subscription|plan)\s+to\s+increase\s+your\s+limits?)\b/i;
+const QUOTA_EXCLUDE_RE = /\b(?:context\s+(?:window|length)\s+(?:limit|reached|exceeded)|token\s+limit\s+(?:reached|exceeded)|max(?:imum)?\s+(?:output\s+)?tokens?\s+(?:limit|reached|exceeded)|rate[- ]limit\s+retry|retrying\s+in)\b/i;
+const QUOTA_TITLE_RE = /\b(?:rate\s+limit|too\s+many\s+requests)\b/i;
+const ERROR_ID_RE = /^Error\s+ID:\s*(\S*)\s*$/i;
+const ERROR_ID_CONT_RE = /^[A-Za-z0-9._:-]+$/;
+const NEWER_TURN_RE = /^(?:[>›❯]\s+\S|[●•✦◆]\s+\S)/;
+
+function stableId(key: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0xcbf29ce4;
+  for (let i = 0; i < key.length; i++) {
+    const c = key.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (c + i), 0x01000193) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, "0")}${h2.toString(16).padStart(8, "0")}`;
+}
+
+function joinWrapped(lines: string[]): string {
+  let out = "";
+  for (const raw of lines) {
+    const part = raw.trim();
+    if (!part) continue;
+    if (!out) out = part;
+    else if (out.endsWith("-") && /^[A-Za-z0-9]/.test(part)) out += part;
+    else out += ` ${part}`;
+  }
+  return out;
+}
+
+/**
+ * Reads an active quota/usage-limit warning printed directly above Antigravity's idle composer
+ * (e.g. `⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h50m10s.`
+ * followed by `Error ID: …`). Antigravity prints this on the terminal screen without writing an
+ * error step to `transcript.jsonl`, so the terminal view surfaces it from the screen instead.
+ */
+export function readAgyQuotaWarning(screen: string): AgyQuotaWarning | null {
+  if (readAgyPrompt(screen)) return null;
+  const lines = screenLines(screen);
+  if (lines.length < 4) return null;
+
+  // Locate Antigravity's idle composer (`────` / `> ...` / `────` / status line(s) without `esc to cancel`).
+  let bottomRule = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
+    if (SOLID_RE.test(lines[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  if (bottomRule < 2) return null;
+  const below = lines.slice(bottomRule + 1).filter((l) => !blank(l));
+  // Allow up to 2 wrapped status rows below the bottom rule on narrow panes; reject overlays and active turns.
+  if (below.length === 0 || below.length > 2) return null;
+  if (below.some((l) => OVERLAY_HINT_RE.test(l) || /^esc to cancel\b/i.test(l.trim()))) return null;
+  if (!below.some((l) => STATUS_LEFT_RE.test(l.trim()) || Boolean(readAgyStatusBar(l)))) return null;
+
+  let topRule = -1;
+  for (let i = bottomRule - 1; i >= Math.max(0, bottomRule - 8); i--) {
+    if (SOLID_RE.test(lines[i]!)) {
+      topRule = i;
+      break;
+    }
+  }
+  if (topRule < 1) return null;
+  const box = lines.slice(topRule + 1, bottomRule);
+  if (!box.some((l) => COMPOSER_RE.test(l))) return null;
+
+  // Scan up to 16 lines above the composer's top rule for an unindented column-0 `⚠ ` warning.
+  let end = topRule - 1;
+  while (end >= 0 && blank(lines[end]!)) end--;
+  if (end < 0) return null;
+
+  let start = -1;
+  const minLine = Math.max(0, end - 16);
+  for (let i = end; i >= minLine; i--) {
+    const raw = lines[i]!;
+    if (SOLID_RE.test(raw)) break;
+    if (/^⚠\s+\S/.test(raw)) {
+      start = i;
+      break;
+    }
+    if (NEWER_TURN_RE.test(raw)) return null;
+  }
+  if (start < 0) return null;
+
+  const block = lines.slice(start, end + 1);
+  let errorId: string | null = null;
+  const bodyLines: string[] = [];
+  for (let i = 0; i < block.length; i++) {
+    const raw = block[i]!;
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      if (errorId !== null) break;
+      continue;
+    }
+    const errMatch = ERROR_ID_RE.exec(trimmed);
+    if (errMatch) {
+      let idVal = errMatch[1] ?? "";
+      while (i + 1 < block.length) {
+        const cont = block[i + 1]!.trim();
+        if (!cont || !ERROR_ID_CONT_RE.test(cont) || /^Error$/i.test(cont)) break;
+        idVal += cont;
+        i++;
+      }
+      errorId = idVal.trim() || null;
+      continue;
+    }
+    if (errorId !== null) return null; // newer output below Error ID -> warning is stale
+    bodyLines.push(i === 0 ? trimmed.replace(/^⚠\s+/, "") : trimmed);
+  }
+
+  const message = joinWrapped(bodyLines);
+  if (!message || QUOTA_EXCLUDE_RE.test(message) || !QUOTA_SIGNAL_RE.test(message)) return null;
+  const title = QUOTA_TITLE_RE.test(message) && !/\bquota\b/i.test(message) ? "Usage limit reached" : "Quota reached";
+  const key = errorId ? `agy:err:${errorId}` : `agy:msg:${message.toLowerCase().replace(/\s+/g, " ")}`;
+  return { id: `agy-quota-${stableId(key)}`, title, message, errorId };
+}
+
+const SPINNER_LINE_RE = /^\s{0,2}[\u2801-\u28FF]{1,2}\s+(\S.*)$/u;
+const IDLE_STATUS_RE = /^\s*\?\s+for shortcuts\b/i;
+const TIP_START_RE = /^\s*(?:[│┃]\s*)?Tip:\s/i;
+const CALLOUT_LINE_RE = /^\s*(?:[│┃](?:\s|$)|esc to dismiss\s*$)/i;
+const WORK_BLOCK_START_RE = /^\s*(?:[●•✦◆▸▾▶▼⚠✓✗✕?]|>\s|[›❯]\s)/;
+
+/**
+ * Reads Antigravity CLI's live updating working/thinking status line (prefixed by
+ * a braille spinner, e.g. `⣿ The \`usage.test.ts\` file seems crucial…` or
+ * `⠋ Thinking…`) sitting directly above the optional `│ Tip:` line and composer.
+ * Returns null when idle, blocked on a dialog, in a slash overlay, or when no
+ * active spinner sits at the bottom of the transcript area.
+ */
+export function readAgyWorkingStatus(screen: string): string | null {
+  if (readAgyPrompt(screen)) return null;
+  const lines = screenLines(screen);
+  if (!lines.length) return null;
+  if (lines.slice(-6).some((l) => OVERLAY_HINT_RE.test(l))) return null;
+  if (lines.slice(-3).some((l) => IDLE_STATUS_RE.test(l))) return null;
+
+  // Locate the bottom of the live transcript area (above the composer box if drawn, else above the status bar).
+  let scanEnd = lines.length - 1;
+  let bottomRule = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+    if (SOLID_RE.test(lines[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  if (bottomRule >= 1) {
+    const below = lines.slice(bottomRule + 1).filter((l) => !blank(l));
+    if (below.some((l) => OVERLAY_HINT_RE.test(l) || IDLE_STATUS_RE.test(l))) return null;
+    const isComposerFooter = below.length <= 2
+      && !below.some((l) => SPINNER_LINE_RE.test(l))
+      && (below.length === 0 || below.some((l) => STATUS_LEFT_RE.test(l.trim()) || Boolean(readAgyStatusBar(l))));
+    if (isComposerFooter) {
+      let topRule = -1;
+      for (let i = bottomRule - 1; i >= Math.max(0, bottomRule - 14); i--) {
+        if (SOLID_RE.test(lines[i]!)) {
+          topRule = i;
+          break;
+        }
+      }
+      if (topRule >= 0) {
+        const box = lines.slice(topRule + 1, bottomRule);
+        if (!box.some((l) => SPINNER_LINE_RE.test(l))) scanEnd = topRule - 1;
+      }
+    }
+  }
+  if (scanEnd === lines.length - 1) {
+    while (scanEnd >= 0) {
+      const raw = lines[scanEnd]!;
+      const trimmed = raw.trim();
+      if (blank(raw) || STATUS_LEFT_RE.test(trimmed) || Boolean(readAgyStatusBar(raw))) {
+        scanEnd--;
+        continue;
+      }
+      break;
+    }
+  }
+
+  // Skip trailing blank lines, callout/tip lines (`│ Tip: …`, `┃ …`), and wrapped `Tip:` blocks right above the composer.
+  while (scanEnd >= 0) {
+    const raw = lines[scanEnd]!;
+    if (blank(raw) || CALLOUT_LINE_RE.test(raw) || TIP_START_RE.test(raw)) {
+      scanEnd--;
+      continue;
+    }
+    let tipAt = -1;
+    for (let j = scanEnd - 1; j >= Math.max(0, scanEnd - 4); j--) {
+      const prev = lines[j]!;
+      if (TIP_START_RE.test(prev)) {
+        tipAt = j;
+        break;
+      }
+      if (blank(prev) || SOLID_RE.test(prev) || SPINNER_LINE_RE.test(prev) || WORK_BLOCK_START_RE.test(prev)) break;
+    }
+    if (tipAt >= 0) {
+      scanEnd = tipAt - 1;
+      continue;
+    }
+    break;
+  }
+  if (scanEnd < 0) return null;
+
+  // The bottommost active block must start with a braille spinner line (possibly wrapped across a few lines).
+  let start = -1;
+  for (let i = scanEnd; i >= Math.max(0, scanEnd - 6); i--) {
+    const raw = lines[i]!;
+    if (SPINNER_LINE_RE.test(raw)) {
+      start = i;
+      break;
+    }
+    if (blank(raw) || SOLID_RE.test(raw) || CALLOUT_LINE_RE.test(raw) || TIP_START_RE.test(raw) || WORK_BLOCK_START_RE.test(raw)) {
+      return null;
+    }
+  }
+  if (start < 0) return null;
+
+  const first = SPINNER_LINE_RE.exec(lines[start]!)![1]!;
+  const text = joinWrapped([first, ...lines.slice(start + 1, scanEnd + 1)]).replace(/\s+/g, " ").trim();
+  return text || null;
 }

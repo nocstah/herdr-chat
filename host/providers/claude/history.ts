@@ -6,6 +6,7 @@
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { bashEvents, imageFile, readTranscript, promptText, queuedPrompt, sentImages } from "./sessions.ts";
+import { imageLines } from "../sent-images.ts";
 import { imagesOf, shownBlock, textOf, toolEnded, usageOf } from "./mapper.ts";
 import { ReplScripts, endTexts, scriptEndTimes, type Relabel } from "./repl.ts";
 import type { ImageBlock, NormalizedEvent, AssistantBlock, StopReason, EventOf } from "../types.ts";
@@ -45,11 +46,12 @@ function localStdout(text: string): string | null {
   return m ? m[1]!.trim() : null;
 }
 
-/** A message the person typed: images the terminal view sent as @ mentions are shown as its images. */
+/** A message the person typed: images sent as @ mentions (from this view or outside, e.g. OmaRelay) are shown as its images. */
 function typedMessage(typed: string, content: unknown, t: { ts?: number }): EventOf<"user_message"> {
   const sent = sentImages(typed);
-  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null)];
-  return { type: "user_message", text: sent.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t };
+  const mentioned = imageLines(sent.text);
+  const images = [...imagesOf(content), ...sent.files.map(imageFile).filter((b): b is ImageBlock => b !== null), ...mentioned.images];
+  return { type: "user_message", text: mentioned.text, images: images.length, ...(images.length ? { imageBlocks: images } : {}), source: "composer", ...t };
 }
 
 type Ctx = {

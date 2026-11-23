@@ -31,6 +31,75 @@ if (cmd === "events") {
   let text = "";
   try { text = fs.readFileSync(dir + "/screen.txt", "utf8"); } catch {}
   process.stdout.write(JSON.stringify({ complete: true, how: "screen", text }) + "\\n");
+} else if (cmd === "connect") {
+  const enc = (ch, kind, payload) => {
+    const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
+    const out = Buffer.allocUnsafe(9 + body.length);
+    out.writeUInt32LE(ch, 0);
+    out[4] = kind;
+    out.writeUInt32LE(body.length, 5);
+    body.copy(out, 9);
+    return out;
+  };
+  let framed = false;
+  let buf = Buffer.alloc(0);
+  const handle = (ch, kind, payload) => {
+    if (ch === 0 && kind === 0) {
+      const m = JSON.parse(payload.toString("utf8"));
+      const reply = (result) => process.stdout.write(enc(0, 0, JSON.stringify({ jsonrpc: "2.0", id: m.id, result })));
+      if (m.method === "terminal.get") {
+        let state = "idle";
+        try {
+          const evs = fs.readFileSync(dir + "/events.jsonl", "utf8").trim().split("\\n").filter(Boolean);
+          for (const l of evs) {
+            const e = JSON.parse(l);
+            if (e.params && e.params.type === "status" && e.params.data && e.params.data.status) state = e.params.data.status.state || state;
+          }
+        } catch {}
+        reply({ address: m.params.terminal, state: "live", cols: 100, rows: 30, status: { app: "antigravity", state } });
+      } else if (m.method === "terminal.read") {
+        let text = "";
+        try { text = fs.readFileSync(dir + "/screen.txt", "utf8"); } catch {}
+        reply({ complete: true, how: "screen", text });
+      } else if (m.method === "terminal.attach") {
+        reply({ channel: 7, terminal: { address: m.params.terminal, cols: 100, rows: 30 } });
+      }
+    } else if (ch === 7 && kind === 0) {
+      const s = payload.toString("utf8");
+      fs.appendFileSync(dir + "/attach.jsonl", JSON.stringify(s) + "\\n");
+      if (s === "!") {
+        if (fs.existsSync(dir + "/no-shell-mode")) {
+          if (fs.existsSync(dir + "/draft-mode")) {
+            fs.writeFileSync(dir + "/screen.txt", "────────────────────────────────────\\n> my draft!\\n────────────────────────────────────\\n? for shortcuts        auto · Gemini 4 Neon · xhigh\\n");
+          }
+        } else {
+          fs.writeFileSync(dir + "/screen.txt", "────────────────────────────────────\\n!\\n────────────────────────────────────\\n activated bash mode · esc to cancel        auto · Gemini 4 Neon · xhigh\\n");
+        }
+      }
+    } else if (ch === 7 && kind === 2) {
+      process.stdout.write(enc(7, 2, Buffer.alloc(0)));
+    }
+  };
+  process.stdin.on("data", (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    if (!framed) {
+      const nl = buf.indexOf(10);
+      if (nl < 0) return;
+      const m = JSON.parse(buf.subarray(0, nl).toString("utf8"));
+      buf = buf.subarray(nl + 1);
+      framed = true;
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { generation: 1, framed: true, version: "0.1.21", core: { id: "c1", name: "test" }, methods: [], features: ["framed"] } }) + "\\n");
+    }
+    while (buf.length >= 9) {
+      const len = buf.readUInt32LE(5);
+      if (buf.length < 9 + len) break;
+      const ch = buf.readUInt32LE(0);
+      const kind = buf[4];
+      const payload = buf.subarray(9, 9 + len);
+      buf = buf.subarray(9 + len);
+      handle(ch, kind, payload);
+    }
+  });
 } else {
   fs.appendFileSync(dir + "/calls.jsonl", JSON.stringify([cmd, ...rest]) + "\\n");
   if (cmd === "keys" && rest.includes("shift+tab") && fs.existsSync(dir + "/modes.json")) {
@@ -247,6 +316,99 @@ test("the Antigravity view: history, live send/echo, tools, dialogs, images, pic
     await until("idle screen sync", () => r.events.some((e) => e.type === "permission_mode" && (e as any).mode === "accept-edits")
       && r.events.some((e) => e.type === "thinking" && (e as any).level === "max"));
 
+    // External screenshot uploaded via OmaRelay (`@<cwd>/.ovis/paste-….jpg`): shown as an image block without raw path text.
+    const ovisDir = join(r.d, "proj", ".ovis");
+    mkdirSync(ovisDir, { recursive: true });
+    const ovisShot = join(ovisDir, "paste-20261123-031336-81ae7966.jpg");
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+    writeFileSync(ovisShot, JPEG);
+    r.events.length = 0;
+    r.write(A, [
+      { step_index: 6, type: "USER_INPUT", status: "DONE", content: `<USER_REQUEST>\n@${ovisShot}\n</USER_REQUEST>` },
+    ]);
+    await until("external screenshot message", () => r.events.some((e) => e.type === "user_message"));
+    const extShot = r.events.find((e) => e.type === "user_message") as any;
+    assert.equal(extShot.source, "external");
+    assert.equal(extShot.text, "");
+    assert.equal(extShot.images, 1);
+    assert.equal(extShot.imageBlocks?.[0]?.mimeType, "image/jpeg");
+    assert.equal(extShot.imageBlocks?.[0]?.data, JPEG.toString("base64"));
+
+    // Quota warning printed above idle composer emits `quota_warning`, updates on new Error ID, and clears on run_started.
+    r.events.length = 0;
+    r.screen(`⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in\n1h50m10s.\nError ID: 0b64d408-0b25-43c1-90a3-095569e7b843-235\n\n${IDLE_SCREEN}`);
+    await until("quota_warning emitted", () => r.events.some((e) => e.type === "quota_warning" && (e as any).warning !== null));
+    const qw = (r.events.find((e) => e.type === "quota_warning" && (e as any).warning !== null) as any).warning;
+    assert.equal(qw.title, "Quota reached");
+    assert.equal(qw.errorId, "0b64d408-0b25-43c1-90a3-095569e7b843-235");
+    r.events.length = 0;
+    r.status("working");
+    await until("quota_warning cleared on working", () => r.events.some((e) => e.type === "quota_warning" && (e as any).warning === null));
+    r.screen(IDLE_SCREEN);
+    r.status("idle");
+    await pause();
+
+    // Bang command (`! <cmd>`): enters Antigravity's bash mode via raw `!` over `hc connect`
+    // (not bracketed-pasted via `hc send`, which agy would submit to the LLM), pastes the command,
+    // presses Enter, refuses when bash mode does not open (undoing `!` on a draft without sending
+    // the command or Enter), and refuses while working.
+    const callsBeforeBang = r.calls().length;
+    const bangRes = await r.adapter.prompt({ id: "u-bang", text: "! echo hello", images: [], mode: "auto", busy: false });
+    assert.equal(bangRes.disposition, "handled");
+    assert.equal(r.calls().length, callsBeforeBang);
+    const attached = readFileSync(join(r.d, "attach.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(attached, ["!", "\x1b[200~echo hello\x1b[201~", "\r"]);
+    // If Antigravity already has a draft and doesn't enter shell mode, `!` is undone and cmd/Enter are never sent.
+    writeFileSync(join(r.d, "attach.jsonl"), "");
+    r.screen("────────────────────────────────────\n> my draft\n────────────────────────────────────\n? for shortcuts        auto · Gemini 4 Neon · xhigh");
+    writeFileSync(join(r.d, "no-shell-mode"), "");
+    writeFileSync(join(r.d, "draft-mode"), "");
+    await assert.rejects(
+      r.adapter.prompt({ id: "u-bang-draft", text: "! echo never-sent", images: [], mode: "auto", busy: false }),
+      /didn't enter shell mode/,
+    );
+    const aborted = readFileSync(join(r.d, "attach.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(aborted, ["!", "\x7f"]);
+    rmSync(join(r.d, "no-shell-mode"));
+    rmSync(join(r.d, "draft-mode"));
+    r.screen(IDLE_SCREEN);
+    r.events.length = 0;
+    r.status("working");
+    await until("working before bang refusal", () => r.events.some((e) => e.type === "run_started"));
+    await assert.rejects(r.adapter.prompt({ id: "u-bang-busy", text: "! echo busy", images: [], mode: "auto", busy: true }), /Antigravity is working/);
+    r.status("idle");
+    await until("settled after bang check", () => r.events.some((e) => e.type === "run_settled"));
+
+    // Queued messages while working show in the steering lane (`queue_changed`), clear when delivered
+    // (including when Antigravity concatenates multiple queued messages with "\n" into one USER_INPUT),
+    // and clear on settle if cancelled in the terminal.
+    r.events.length = 0;
+    r.status("working");
+    await until("working for queue test", () => r.events.some((e) => e.type === "run_started"));
+    const q1 = await r.adapter.prompt({ id: "u-q1", text: "first queued note", images: [], mode: "auto", busy: true });
+    const q2 = await r.adapter.prompt({ id: "u-q2", text: "second queued note", images: [], mode: "auto", busy: true });
+    assert.deepEqual([q1.disposition, q2.disposition], ["queued", "queued"]);
+    const qEvents = r.events.filter((e) => e.type === "queue_changed") as any[];
+    assert.deepEqual(qEvents.at(-1)?.steering, ["first queued note", "second queued note"]);
+    assert.deepEqual(qEvents.at(-1)?.steeringIds, ["u-q1", "u-q2"]);
+    r.events.length = 0;
+    r.write(A, [
+      { step_index: 7, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nfirst queued note\nsecond queued note\n</USER_REQUEST>" },
+    ]);
+    await until("merged queued echo", () => r.events.some((e) => e.type === "user_message"));
+    const mergedEcho = r.events.find((e) => e.type === "user_message") as any;
+    assert.equal(mergedEcho.clientId, "u-q1");
+    assert.equal(mergedEcho.source, undefined);
+    const clearedQ = r.events.filter((e) => e.type === "queue_changed").at(-1) as any;
+    assert.deepEqual(clearedQ?.steering, []);
+    // A queued message cancelled in the terminal clears when the run settles.
+    r.events.length = 0;
+    await r.adapter.prompt({ id: "u-q3", text: "cancelled in tui", images: [], mode: "auto", busy: true });
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, ["cancelled in tui"]);
+    r.status("idle");
+    await until("settled clears cancelled queue", () => r.events.some((e) => e.type === "run_settled"));
+    assert.deepEqual((r.events.filter((e) => e.type === "queue_changed").at(-1) as any)?.steering, []);
+
     // /new / /resume -> presence lock moves to B -> reload session emitted.
     r.events.length = 0;
     r.write(B, [{ step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nFresh\n</USER_REQUEST>" }]);
@@ -352,6 +514,76 @@ test("command approval cards emit structured run_command tool, separate reason, 
     r.adapter.answer(ask.id, { choice: ask.choices[1].id });
     await until("down enter sent", () => r.calls().some((c) => c[0] === "keys" && c.slice(-2).join(" ") === "down enter"));
   } finally {
+    r.done();
+  }
+});
+
+test("live working status ticker polls screen while working, deduplicates frame ticks, and clears on blocked and settle", async () => {
+  const prevPoll = process.env.HERDR_CHAT_WORK_STATUS_MS;
+  process.env.HERDR_CHAT_WORK_STATUS_MS = "40";
+  const r = rig();
+  try {
+    const workingScreen = (spinner: string, msg: string) => [
+      "● Ran (ls -la) (ctrl+o to expand)",
+      `${spinner} ${msg}`,
+      "│ Tip: Use /settings to configure",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nCheck usage.test.ts\n</USER_REQUEST>" },
+    ]);
+    // Start already working so initial poll kicks in immediately.
+    r.screen(workingScreen("⣿", "Reviewing usage.test.ts to understand path resolution..."));
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "working" } }] });
+    const info = await r.adapter.start(null, r.host);
+    assert.equal(info.streaming, true);
+    await r.adapter.history();
+
+    await until("initial activity_text emitted", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === "Reviewing usage.test.ts to understand path resolution..."),
+    );
+
+    // Changing only the braille spinner frame must NOT re-emit the same activity_text.
+    r.events.length = 0;
+    r.screen(workingScreen("⣷", "Reviewing usage.test.ts to understand path resolution..."));
+    await pause(120);
+    assert.equal(r.events.filter((e) => e.type === "activity_text").length, 0);
+
+    // Updating the status text emits the new message.
+    r.screen(workingScreen("⠋", "Verifying Antigravity status bar parsing..."));
+    await until("updated activity_text emitted", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === "Verifying Antigravity status bar parsing..."),
+    );
+
+    // Transitioning to blocked clears activity_text; returning to working resumes polling.
+    r.events.length = 0;
+    r.screen(EDIT_APPROVAL);
+    r.status("blocked");
+    await until("activity_text cleared on blocked", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === null),
+    );
+    r.events.length = 0;
+    r.screen(workingScreen("⠙", "Applying the edit and running tests..."));
+    r.status("working");
+    await until("activity_text resumed after blocked", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === "Applying the edit and running tests..."),
+    );
+
+    // Settling to done clears activity_text.
+    r.events.length = 0;
+    r.screen(IDLE_SCREEN);
+    r.status("done");
+    await until("activity_text cleared on done", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === null)
+      && r.events.some((e) => e.type === "run_settled"),
+    );
+  } finally {
+    if (prevPoll === undefined) delete process.env.HERDR_CHAT_WORK_STATUS_MS;
+    else process.env.HERDR_CHAT_WORK_STATUS_MS = prevPoll;
     r.done();
   }
 });
