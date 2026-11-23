@@ -1,7 +1,7 @@
-// A Claude Code or Codex terminal's two faces, as in Ovis: the terminal itself
-// and its chat view (the terminal view: a chat pane whose host reads the TUI's
+// A Claude Code, Codex or Antigravity terminal's two faces, as in Ovis: the terminal
+// itself and its chat view (the terminal view: a chat pane whose host reads the TUI's
 // session and types into it, never runs it; host/providers/claude/terminal.ts,
-// host/providers/codex/terminal.ts).
+// host/providers/codex/terminal.ts, host/providers/antigravity/terminal.ts).
 // Both are panes of the terminal's tab, in the same place: the view sits
 // right after the terminal in the tree, with its size, and one of the two is
 // marked `hidden: true` in the core's layout document. Herdr doesn't draw a

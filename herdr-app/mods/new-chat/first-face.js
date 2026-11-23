@@ -21,7 +21,7 @@
 export const RECENT_MS = 60_000;
 
 /** The agents with a chat view of their terminal (their ids in settings.json and herdr-chat's providers). */
-export const VIEW_AGENTS = ["claude", "codex"];
+export const VIEW_AGENTS = ["claude", "codex", "antigravity"];
 
 /** The face without a `claude.face` (or `codex.face`, or with one that's neither): its chat view. Other mods read this line as it is
  *  (OmaRelay's Settings window, to show the face a file without one gives): keep it one line. */

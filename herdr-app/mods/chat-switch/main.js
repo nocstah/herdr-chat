@@ -18,7 +18,7 @@ import { focused, keys, run, shared, terminals, theme, window as appWindow } fro
 
 const VIEWS = "herdr-chat.views";
 // Herdr's names for the agents with a chat view → how the switch names them.
-const AGENTS = { claude: "Claude Code", "claude-code": "Claude Code", codex: "Codex" };
+const AGENTS = { claude: "Claude Code", "claude-code": "Claude Code", codex: "Codex", antigravity: "Antigravity", agy: "Antigravity" };
 const agentName = (t) => [t?.program?.key, t?.app, t?.status?.app, t?.report?.app, t?.agent].map((a) => AGENTS[a]).find(Boolean) ?? null;
 const stop = (_e, cx) => cx.stop_propagation();
 

@@ -58,12 +58,12 @@ async function openChat(provider) {
 const term = (addr) => terminals().find((t) => t.address === addr);
 const word = (s) => (typeof s === "string" ? s : s?.state ?? null);
 const base = (p) => String(p ?? "").split("/").pop();
-const NAMES = Object.fromEntries(CHOICES.map((c) => [c.id, c.label]));
+const NAMES = { ...Object.fromEntries(CHOICES.map((c) => [c.id, c.label])), antigravity: "Antigravity" };
 
 // Herdr's names for the agents (its status reports Claude Code as claude-code) → ours.
-const HERDR_AGENTS = { pi: "pi", claude: "claude", "claude-code": "claude", codex: "codex" };
+const HERDR_AGENTS = { pi: "pi", claude: "claude", "claude-code": "claude", codex: "codex", antigravity: "antigravity", agy: "antigravity" };
 
-/** The agent a terminal runs, as Herdr reports it (an id of CHOICES), else null. */
+/** The agent a terminal runs, as Herdr reports it (an id of CHOICES or VIEW_AGENTS), else null. */
 export function agentOf(t) {
   for (const a of [t?.program?.key, t?.app, t?.status?.app, t?.report?.app, t?.agent]) if (HERDR_AGENTS[a]) return HERDR_AGENTS[a];
   return null;
@@ -79,7 +79,8 @@ export function agentOf(t) {
 export function cantContinue(t) {
   if (!t || t.state !== "live") return { why: "not live" };
   if (t.labels?.["herdr-chat.chat"]) return { why: "already a chat" };
-  if (!agentOf(t)) return { why: "not an agent's TUI" };
+  const agent = agentOf(t);
+  if (!agent || !CHOICES.some((c) => c.id === agent)) return { why: "not an agent's TUI" };
   const st = word(t.status);
   if (st === "working" || st === "blocked") return { why: "Wait for the run to end", working: true };
   if (!["idle", "done"].includes(st)) return { why: `status ${st}` };
@@ -253,7 +254,7 @@ async function flipFace(addr, cx) {
   const f = focused();
   // A chat view's pane whose keyboard isn't in the chat (its own key didn't take it): its terminal.
   const terminal = addr || f?.terminal || (f?.pane ? await viewTerminal(f.pane) : null);
-  if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code or Codex terminal to its chat view: focus one first.");
+  if (!terminal) throw new Error("Ctrl+Shift+J flips a Claude Code, Codex or Antigravity terminal to its chat view: focus one first.");
   const t = term(terminal);
   if (!t || t.state !== "live") throw new Error(`Terminal ${terminal} isn't running.`);
   const agent = agentOf(t);
@@ -264,7 +265,7 @@ async function flipFace(addr, cx) {
     r = await flip(cx, terminal, "toggle", props);
   } catch (/** @type {any} */ e) {
     if (!viewable && /no chat view yet/.test(String(e?.message))) {
-      throw new Error(agent ? `The chat view is for Claude Code and Codex terminals for now (this one runs ${NAMES[agent] ?? agent}).` : "No agent runs here: the chat view is for a Claude Code or Codex terminal.");
+      throw new Error(agent ? `The chat view is for Claude Code, Codex and Antigravity terminals for now (this one runs ${NAMES[agent] ?? agent}).` : "No agent runs here: the chat view is for a Claude Code, Codex or Antigravity terminal.");
     }
     throw e;
   }

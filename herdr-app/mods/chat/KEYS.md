@@ -33,7 +33,7 @@ fields; Esc stops the run anywhere.
 | `find` | ⌘F (`cmd-f`) | Opens find in the chat (Linux: Ctrl+F). It looks through the whole conversation, older messages too: your messages, the answers, notices and a tool's title. It starts at the latest match and marks its row; Enter or ↑ goes to the match before, Shift+Enter or ↓ to the one after, and Esc closes it. A match in folded work opens its group. On macOS ⌘F is also Herdr's terminal find, which a chat pane has no terminal for. |
 | `focusComposer` | ⌘L (`cmd-l`) | Puts the keyboard back in the composer and closes an open picker. |
 | `newChat` | ⇧⌘N (`cmd-shift-n`) | Opens a new chat tab with the same agent in the same folder. |
-| `flip` | ⇧⌘J (`cmd-shift-j`) | In a terminal's chat view: shows the Claude Code or Codex terminal in its place (as Ovis's Mod+Shift+J). The same chord in that terminal, Herdr's global `flip` key, shows the chat again. |
+| `flip` | ⇧⌘J (`cmd-shift-j`) | In a terminal's chat view: shows the Claude Code, Codex or Antigravity terminal in its place (as Ovis's Mod+Shift+J). The same chord in that terminal, Herdr's global `flip` key, shows the chat again. |
 
 `steer` and `followUp` work in the composer only. In a menu Enter picks, and
 on an approval card with nothing typed it answers. Shift+Enter is always a new
@@ -92,7 +92,7 @@ had it, and uninstall puts that back. In the launcher, P, C and X pick.
 
 ## The terminal view
 
-A Claude Code or Codex terminal can show as a chat, in the same place, the way
+A Claude Code, Codex or Antigravity terminal can show as a chat, in the same place, the way
 Ovis flips between a pane's terminal and its chat. Ctrl+Shift+J (⌘⇧J) in the
 terminal shows its chat view; the same key in the view, or its Chat | Terminal
 switch, shows the terminal again. Nothing restarts: the agent you started stays
@@ -101,11 +101,11 @@ what you send into it. A slash command that opens a screen in the TUI
 (`/resume`, `/config`, `/permissions`) shows the terminal for it, and the chat
 comes back by itself once the TUI is at its prompt again (Esc there, or a
 pick); a command that only prints something (`/status`) leaves you in the
-terminal to read it. Codex's model and effort chips (and `/model`) open the
-chat's own pickers, filled from Codex's model list: a pick is typed into the
-TUI as `/model <model> --reasoning=<level>`, and Codex's answer shows in the
-chat. Claude Code's `/model` still opens its picker in the terminal, and comes
-back the same way. Its permission prompts and questions show as cards above
+terminal to read it. Codex's and Antigravity's model and effort chips (and `/model`) open the
+chat's own pickers: Codex types `/model <model> --reasoning=<level>`, Antigravity types
+`/model <id>` or `/effort <level>` (and cycles execution modes via `Shift+Tab`), and the
+TUI's answer shows in the chat. Claude Code's `/model` still opens its picker in the terminal,
+and comes back the same way. Its permission prompts and questions show as cards above
 the composer; an answer is the keys you would press in the terminal.
 
 Codex runs its conversations in a shared background server, so its terminal
