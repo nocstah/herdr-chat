@@ -33,7 +33,7 @@ if (cmd === "events") {
   process.stdout.write(JSON.stringify({ complete: true, how: "screen", text }) + "\\n");
 } else {
   fs.appendFileSync(dir + "/calls.jsonl", JSON.stringify([cmd, ...rest]) + "\\n");
-  if (cmd === "keys" && rest.includes("shift-tab") && fs.existsSync(dir + "/modes.json")) {
+  if (cmd === "keys" && rest.includes("shift+tab") && fs.existsSync(dir + "/modes.json")) {
     const m = JSON.parse(fs.readFileSync(dir + "/modes.json", "utf8"));
     m.i = (m.i + 1) % m.list.length;
     fs.writeFileSync(dir + "/modes.json", JSON.stringify(m));
@@ -233,11 +233,19 @@ test("the Antigravity view: history, live send/echo, tools, dialogs, images, pic
     r.screen("────────────────────────────────────\n> \n────────────────────────────────────\n? for shortcuts        auto · Gemini 3.8 Flash · low");
     await setEffP;
 
-    // Permission mode switch cycles Shift+Tab until status bar matches.
+    // Permission mode switch cycles Shift+Tab (hc `shift+tab`) until status bar matches.
     writeFileSync(join(r.d, "modes.json"), JSON.stringify({ i: 0, list: ["auto", "plan", "default", "accept-edits"] }));
     r.screen(IDLE_SCREEN);
     await r.adapter.setPermissionMode("plan");
     assert.ok(r.events.some((e) => e.type === "permission_mode" && (e as any).mode === "plan"));
+    assert.ok(r.calls().some((c) => c[0] === "keys" && c.includes("shift+tab")));
+    assert.ok(!r.calls().some((c) => c[0] === "keys" && c.includes("shift-tab")));
+
+    // Idle screen sync reflects terminal-side Shift+Tab and /effort changes.
+    r.events.length = 0;
+    r.screen("────────────────────────────────────\n> \n────────────────────────────────────\n? for shortcuts        accept-edits · Gemini 3.8 Flash · max");
+    await until("idle screen sync", () => r.events.some((e) => e.type === "permission_mode" && (e as any).mode === "accept-edits")
+      && r.events.some((e) => e.type === "thinking" && (e as any).level === "max"));
 
     // /new / /resume -> presence lock moves to B -> reload session emitted.
     r.events.length = 0;
@@ -254,5 +262,45 @@ test("the Antigravity view: history, live send/echo, tools, dialogs, images, pic
     await assert.rejects(r.adapter.prompt({ id: "u-q", text: "hi", images: [], mode: "steer", busy: false }), /isn't running in its terminal/);
   } finally {
     r.done();
+  }
+});
+
+test("uncataloged models still expose all five effort tiers and startup falls back to default mode when screen has no status bar", async () => {
+  const d = mkdtempSync(join(tmpdir(), "herdr-chat-agy-uncat-"));
+  const cwd = join(d, "proj");
+  const dataDir = join(d, "agy-data");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  const hc = join(d, "hc");
+  writeFileSync(hc, FAKE_HC(d));
+  chmodSync(hc, 0o755);
+  writeFileSync(join(d, "events.jsonl"), JSON.stringify({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4001, name: "antigravity", argv: ["antigravity"] }, status: { app: "antigravity", state: "idle" } }] }) + "\n");
+  writeFileSync(join(d, "screen.txt"), "scrolled output with no status bar\n");
+  const p = transcriptPath(dataDir, A);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ step_index: 0, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-high", content: "hi" }) + "\n");
+  const io: AgyBindIO = {
+    tree: (pid) => [pid],
+    argv: () => ["antigravity"],
+    cwd: () => cwd,
+    env: (_p, n) => (n === "ANTIGRAVITY_CLI_DATA_DIR" ? dataDir : null),
+    openFiles: () => [join(dataDir, "presence", `${A}.lock`)],
+    exists: existsSync,
+    mtime: () => Date.now(),
+  };
+  const events: NormalizedEvent[] = [];
+  const adapter = new AntigravityTerminalAdapter({
+    cwd, command: "agy", args: [], log: () => {}, terminal: "t5", hc, io,
+    fetchModels: async () => [],
+  });
+  try {
+    await adapter.start(null, { emit: (ev) => events.push(ev), log: () => {}, running: false, working: false });
+    assert.ok(events.some((e) => e.type === "permission_mode" && (e as any).mode === "default"));
+    await adapter.history();
+    const caps = [...events].reverse().find((e) => e.type === "capabilities") as any;
+    assert.deepEqual(caps?.capabilities?.thinkingLevels, ["low", "medium", "high", "xhigh", "max"]);
+  } finally {
+    adapter.kill();
+    rmSync(d, { recursive: true, force: true });
   }
 });

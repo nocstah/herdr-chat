@@ -33,7 +33,7 @@ export type AgyPrompt =
 
 const SOLID_RE = /^\s*─{8,}\s*$/;
 const COMPOSER_RE = /^>\s*(?:$|Auto mode:|Plan mode:|Accept-edits mode:|Type a message|Ask anything|[^\d])/i;
-const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel)\b/i;
+const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel|Press up to edit queued messages)\b/i;
 const STATUS_RIGHT_RE = /^(?:(auto|plan|accept-edits)\s*·\s*)?(.+?)(?:\s*·\s*(low|medium|high|xhigh|max))?$/i;
 
 // Overlays opened by slash commands (/model, /effort, /config, /permissions, /resume, /help…).

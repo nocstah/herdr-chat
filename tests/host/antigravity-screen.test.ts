@@ -86,6 +86,10 @@ test("readAgyStatusBar reads mode, model and effort across all modes", () => {
     readAgyStatusBar("esc to cancel            plan · Orchestrator (Neon)"),
     { mode: "plan", modelName: "Orchestrator (Neon)", effort: null },
   );
+  assert.deepEqual(
+    readAgyStatusBar("  Press up to edit queued messages                         Orchestrator (Neon)"),
+    { mode: "default", modelName: "Orchestrator (Neon)", effort: null },
+  );
 });
 
 test("agyAtPrompt distinguishes idle prompt from overlays and blocking dialogs", () => {

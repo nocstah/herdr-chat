@@ -213,7 +213,7 @@ export function newLines(before: string | null, after: string): string[] {
   });
 }
 
-const REFUSED_RE = /(Invalid model\b.*|Invalid effort\b.*|\S+ has no "[^"]*" effort\b.*|Effort (?:is not|isn't) adjustable\b.*|Model .* is (?:not available|unavailable)\b.*|Cannot change (?:model|effort)\b.*)/i;
+const REFUSED_RE = /(Invalid model\b.*|Invalid effort\b.*|--effort=\S+ is not supported for model\b.*|\S+ has no "[^"]*" effort\b.*|Effort (?:is not|isn't) adjustable\b.*|Model .* is (?:not available|unavailable)\b.*|Cannot change (?:model|effort)\b.*)/i;
 const CHANGED_RE = /(?:Model (?:changed|switched|set) to\b|Effort (?:changed|switched|set) to\b|Switched (?:model|effort) to\b)/i;
 
 /** What `agy` answered an inline `/model` or `/effort` command with, from new screen lines. */

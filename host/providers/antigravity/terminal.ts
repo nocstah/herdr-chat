@@ -199,14 +199,12 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   }
 
   private publishEfforts(): void {
-    if (!this.modelNow) return;
-    const g = findModelGroup(this.catalog, this.modelNow);
+    const g = this.modelNow ? findModelGroup(this.catalog, this.modelNow) : undefined;
     let efforts: string[];
     if (g) {
       efforts = g.efforts;
-    } else if (this.effortNow) {
-      const idx = EFFORT_ORDER.indexOf(this.effortNow as (typeof EFFORT_ORDER)[number]);
-      efforts = idx >= 0 ? [...EFFORT_ORDER.slice(0, Math.max(3, idx + 1))] : [];
+    } else if (this.effortNow || this.modelNow) {
+      efforts = [...EFFORT_ORDER];
     } else {
       efforts = [];
     }
@@ -360,11 +358,16 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (bar.mode !== this.modeNow) this.emit({ type: "permission_mode", mode: bar.mode });
     if (bar.modelName) {
       const g = findModelGroup(this.catalog, bar.modelName);
-      if (g && g.baseId !== this.modelNow) {
-        this.emit({ type: "model", model: { provider: g.provider, id: g.baseId, name: g.name, reasoning: g.efforts.length > 0 || Boolean(bar.effort), contextWindow: null, input: ["text", "image"] } });
-      } else if (!g && !this.modelNow) {
+      if (g) {
+        if (g.baseId !== this.modelNow) {
+          this.emit({ type: "model", model: { provider: g.provider, id: g.baseId, name: g.name, reasoning: g.efforts.length > 0 || Boolean(bar.effort), contextWindow: null, input: ["text", "image"] } });
+        }
+      } else {
         const clean = parseModelLabel(bar.modelName).name;
-        this.emit({ type: "model", model: { provider: "google", id: clean, name: clean, reasoning: Boolean(bar.effort), contextWindow: null, input: ["text", "image"] } });
+        const curName = this.modelNow ? modelInfoOf(this.modelNow, this.catalog).info.name : null;
+        if (!this.modelNow || (clean.toLowerCase() !== this.modelNow.toLowerCase() && clean.toLowerCase() !== (curName ?? "").toLowerCase())) {
+          this.emit({ type: "model", model: { provider: "google", id: clean, name: clean, reasoning: Boolean(bar.effort), contextWindow: null, input: ["text", "image"] } });
+        }
       }
     }
     if (bar.effort && bar.effort !== this.effortNow) this.emit({ type: "thinking", level: bar.effort });
@@ -717,24 +720,28 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.file = session;
       this.emit({ type: "session", id: this.conversationId, file: session });
     }
-    if (!this.file) {
-      this.log("no Antigravity conversation found yet: waiting for one");
+    if (!this.file) this.log("no Antigravity conversation found yet: waiting for one");
+    await this.syncFromScreen();
+    if (!this.modelNow || !this.effortNow || !this.modeNow) {
       const tui = this.tuiPid();
       const start = tui ? startingState(this.io.argv(tui), this.defaultDataDir()) : null;
-      if (start?.model) {
+      if (!this.modelNow && start?.model) {
         const parsed = parseModelLabel(start.model);
         const info = modelInfoOf(start.model, this.catalog);
         // If `settings.json` stored a display label like "Gemini 4 Neon (XHigh)", keep its clean name.
         const name = start.model.includes(" ") ? parsed.name : info.info.name;
         this.emit({ type: "model", model: { ...info.info, name } });
       }
-      if (start?.effort) this.emit({ type: "thinking", level: start.effort });
-      if (start?.mode) this.emit({ type: "permission_mode", mode: start.mode });
+      if (!this.effortNow && start?.effort) this.emit({ type: "thinking", level: start.effort });
+      if (!this.modeNow && start?.mode) this.emit({ type: "permission_mode", mode: start.mode });
+      else if (!this.modeNow && this.agyRuns()) this.emit({ type: "permission_mode", mode: "default" });
     }
-    await this.syncFromScreen();
     this.tailTimer = setInterval(() => this.tail(), TAIL_MS());
     this.tailTimer.unref();
-    this.sessionTimer = setInterval(() => void this.checkSession(), SESSION_MS());
+    this.sessionTimer = setInterval(() => {
+      void this.checkSession();
+      if (this.status !== "working" && this.status !== "blocked" && !this.answering) void this.syncFromScreen();
+    }, SESSION_MS());
     this.sessionTimer.unref();
     const streaming = this.status === "working" || this.status === "blocked";
     if (streaming) this.running = true;
@@ -885,7 +892,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
     let prev: AgyMode | null = cur?.mode ?? null;
     for (let step = 0; step < 4; step++) {
-      await this.pressKeys(["shift-tab"]);
+      await this.pressKeys(["shift+tab"]);
       for (let tries = 0; tries < 8; tries++) {
         await new Promise((r) => setTimeout(r, 100));
         const bar = readAgyStatusBar((await this.screenText()) ?? "");
