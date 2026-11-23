@@ -150,6 +150,18 @@ export function imageFile(path: string): ImageBlock | null {
  * (`commandMode: "task-notification"`), another session's message (`origin.kind: "peer"`), a subagent's.
  * A message the agent took only once its turn was over is a user record as before (promptText).
  */
+/**
+ * Claude Code (2.1.33x) writes a block pasted into its prompt in tags, the TUI showing it as "[Pasted text #1 +N lines]":
+ *   "<typed words>\n\n<pasted_content id=\"f4fa\">\n<the paste>\n</pasted_content id=\"f4fa\">\n"
+ * A long message this chat sends is typed into the terminal as a paste, so its record comes back that way. The text
+ * without the tags: the echo matches the message it confirms (not "from outside" beside it), and a paste reads as typed.
+ */
+export function unwrapPasted(text: string): string {
+  if (!text.includes("<pasted_content")) return text;
+  const out = text.replace(/<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content(?: id="\1")?>/g, (_m, _id, body: string) => body);
+  return out === text ? text : out.trim();
+}
+
 export function queuedPrompt(r: Rec): { text: string; content: unknown } | null {
   if (r.type !== "attachment" || r.isSidechain) return null;
   const a = r.attachment;
@@ -158,7 +170,7 @@ export function queuedPrompt(r: Rec): { text: string; content: unknown } | null 
   const p = a.prompt;
   const text = typeof p === "string" ? p : Array.isArray(p) ? p.filter((b: Rec) => b?.type === "text").map((b: Rec) => String(b.text ?? "")).join("\n") : "";
   if (!text.trim() && !(Array.isArray(p) && p.some((b: Rec) => b?.type === "image"))) return null;
-  return { text, content: p };
+  return { text: unwrapPasted(text), content: p };
 }
 
 export function promptText(r: Rec): string | null {
@@ -176,7 +188,7 @@ export function promptText(r: Rec): string | null {
   if (/^<local-command-(stdout|stderr|caveat)>/.test(text.trim())) return null;
   if (bashOf(r)) return null;
   if (/^\[Request interrupted by user/.test(text.trim())) return null;
-  return text;
+  return unwrapPasted(text);
 }
 
 export function describeSession(path: string): SessionInfo | null {
