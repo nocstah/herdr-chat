@@ -8,9 +8,10 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView } 
 import { alpha, icon } from "./util.js";
 import { SPACE } from "./space.js";
 import { toolIcon, toolTitle } from "./cards.js";
-import { diffView } from "./rich.js";
+import { copyButton, diffView } from "./rich.js";
 import { QuestionsForm } from "./questions.js";
 import { reasonPlaceholder } from "./reason.js";
+import { commandSteps } from "./perm-format.js";
 
 export class DialogCard {
   constructor(onChange, focusComposer) {
@@ -118,7 +119,7 @@ export class DialogCard {
 
   frame(d, pending, t, answer, iconName, cancelLabel) {
     const left = d.timeoutAt ? Math.max(0, Math.round((d.timeoutAt - Date.now()) / 1000)) : null;
-    return v_flex().gap(SPACE.block).p(12).rounded(14).border_1().border_color(alpha(t.blocked, 0.7)).bg(t.popover).shadow_md()
+    return v_flex().w_full().min_w(0).gap(SPACE.block).p(12).rounded(14).border_1().border_color(alpha(t.blocked, 0.7)).bg(t.popover).shadow_md()
       .child(h_flex().gap(8).items_center()
         .child(icon(iconName, 14).text_color(t.blocked))
         .child(div().flex_1().min_w(0).text_size(13).font_semibold().text_color(t.foreground).child(d.title || "The agent asks"))
@@ -129,28 +130,50 @@ export class DialogCard {
           .child(cancelLabel === "deny" ? "Esc deny" : "Esc")));
   }
 
-  // The agent wants to run a tool: what (like a tool card's header), why, and
-  // the choices (allow = primary, deny = destructive), keys 1–n.
+  // The agent wants to run a tool: what (like a tool card's header, or a full
+  // command block for shell approvals), why, and the choices (allow = primary,
+  // deny = destructive), keys 1–n.
   permissionView(d, pending, t, answer, c) {
     const tl = d.tool;
     const choices = d.choices ?? [];
     const hasDeny = choices.some((x) => x.kind === "deny");
-    const head = tl ? h_flex().h(34).px(10).gap(8).items_center().rounded(10).border_1().border_color(t.border).bg(t.surface)
+    const bashCmd = tl?.detail?.type === "bash" && typeof tl.detail.command === "string" && tl.detail.command.trim() ? tl.detail.command : null;
+    let cmdBlock = null;
+    if (bashCmd) {
+      const steps = commandSteps(bashCmd);
+      const multi = steps.length > 1;
+      const codeBg = c.codeBg ?? t.background;
+      const lineCol = c.line ?? t.border;
+      const label = multi && !bashCmd.includes("\n") ? `Command · ${steps.length} steps` : "Command";
+      cmdBlock = v_flex().w_full().min_w(0).rounded(10).overflow_hidden().border_1().border_color(t.border).bg(codeBg)
+        .child(h_flex().h(28).pl(10).pr(4).gap(6).items_center().bg(t.surface).border_b_1().border_color(lineCol)
+          .child(icon("terminal", 12).text_color(t.dim))
+          .child(div().flex_1().min_w(0).text_size(11.5).font_medium().text_color(t.muted).child(label))
+          .when(Boolean(c.copy && c.copied), (e) => e.child(copyButton(`perm-cmd-${d.id}`, bashCmd, c))))
+        .child(v_flex().id(`dlg-cmd-${d.id}`).w_full().min_w(0).max_h(220).overflow_y_scroll().px(12).py(9).gap(5)
+          .font_family(c.mono).text_size(12.5).line_height("19px")
+          .children(steps.map((s, i) => h_flex().w_full().min_w(0).gap(8).items_start()
+            .child(div().flex_none().w(18).text_color(i === 0 ? t.dim : t.accent).child(s.op))
+            .child(div().flex_1().min_w(0).text_color(t.foreground).child(s.text || " ")))));
+    }
+    const head = tl && !cmdBlock ? h_flex().h(34).px(10).gap(8).items_center().rounded(10).border_1().border_color(t.border).bg(t.surface)
       .child(icon(toolIcon(tl.detail), 13).text_color(t.dim))
       .child(toolTitle({ ...tl, id: `perm-${d.id}` }, tl.detail ?? { type: "generic", tool: tl.name }, c)) : null;
     // An edit to approve: its change, as an edit card shows it.
     const diff = tl?.detail?.diffLines?.length ? div().id(`dlg-diff-${d.id}`).max_h(240).overflow_y_scroll().child(diffView(`perm-${d.id}`, tl.detail.diffLines, c)) : null;
     const args = tl && !tl.detail && tl.args && tl.args !== "{}" ? div().px(10).py(6).rounded(8).bg(t.background).font_family(c.mono).text_size(11.5)
       .text_color(t.dim).max_h(120).overflow_hidden().child(tl.args) : null;
+    const labelMaxW = Math.max(180, (c?.colW ?? 600) - 84);
     const button = (ch, i) => {
       const allow = ch.kind === "allow", deny = ch.kind === "deny";
       const bg = allow ? t.solid : deny ? alpha(t.ansi1, 0.14) : t.raised;
       const fg = allow ? t.solid_foreground : deny ? t.ansi1 : t.foreground;
-      return h_flex().id(`dlg-choice-${ch.id}`).h(30).px(12).gap(8).items_center().rounded(10).cursor_pointer()
+      return h_flex().id(`dlg-choice-${ch.id}`).max_w_full().min_w(0).min_h(30).px(12).py(5).gap(8).items_center().rounded(10).cursor_pointer()
         .border_1().border_color(allow ? t.solid : deny ? alpha(t.ansi1, 0.45) : t.input).bg(bg).text_color(fg)
         .text_size(12.5).font_medium().hover((s) => s.opacity(0.88)).tooltip(ch.description ?? ch.label)
         .on_click((_e, cx) => answer("choice", this.choiceAnswer(ch), cx))
-        .child(div().text_size(10.5).opacity(0.65).child(String(i + 1))).child(ch.label);
+        .child(div().flex_none().text_size(10.5).opacity(0.65).child(String(i + 1)))
+        .child(div().min_w(0).max_w(labelMaxW).truncate().child(ch.label));
     };
     let wrap = null;
     if (hasDeny && this.field) {
@@ -159,15 +182,25 @@ export class DialogCard {
         .on_action("herdrchat_dialog_escape", (_e, cx) => answer("choice", this.choiceFor(d, "escape"), cx))
         .child(Input.new(this.field).h(30).px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(12.5));
     }
+    const reasonView = (msg) => {
+      if (/\n|^#|\*\*/.test(msg)) {
+        return div().id("dlg-message").max_h(260).overflow_y_scroll().px(10).py(8).rounded(8).bg(t.background).text_size(13).child(TextView.markdown(`dlg-md-${d.id}`, msg));
+      }
+      if (cmdBlock) {
+        return v_flex().w_full().min_w(0).gap(3).px(2)
+          .child(div().text_size(11).font_medium().text_color(t.dim).child("Reason"))
+          .child(div().text_size(12.5).line_height("18px").text_color(t.muted).child(msg));
+      }
+      return div().text_size(12.5).line_height("18px").text_color(t.muted).child(msg);
+    };
     return this.frame(d, pending, t, answer, "shield", hasDeny ? "deny" : "cancel")
+      .children(cmdBlock ? [cmdBlock] : [])
       .children(head ? [head] : [])
       .children(diff ? [diff] : [])
       // A plan to approve (Claude's ExitPlanMode) is markdown: render it as such, scrolling when long.
-      .when(Boolean(d.message), (e) => e.child(/\n|^#|\*\*/.test(d.message)
-        ? div().id("dlg-message").max_h(260).overflow_y_scroll().px(10).py(8).rounded(8).bg(t.background).text_size(13).child(TextView.markdown(`dlg-md-${d.id}`, d.message))
-        : div().text_size(12.5).text_color(t.muted).child(d.message)))
+      .when(Boolean(d.message), (e) => e.child(reasonView(d.message)))
       .children(args ? [args] : [])
-      .child(h_flex().gap(8).flex_wrap().children(choices.map(button)))
+      .child(h_flex().w_full().min_w(0).gap(8).flex_wrap().children(choices.map(button)))
       .children(wrap ? [wrap] : [])
       .child(div().text_size(11).text_color(t.dim).child(`1–${choices.length} choose · Enter ${choices.find((x) => x.kind === "allow")?.label ?? "the first"}${hasDeny ? " · Esc deny" : ""} (with the composer empty)`));
   }

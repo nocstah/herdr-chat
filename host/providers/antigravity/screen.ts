@@ -31,6 +31,15 @@ export type AgyPrompt =
   | { kind: "question"; progress: string | null; question: string; rows: AgyRow[]; other: AgyRow | null; submit: AgyRow | null; multi: boolean; stops: AgyRow[] }
   | { kind: "confirm"; title: string; body: string; rows: AgyRow[]; stops: AgyRow[] };
 
+export type AgyPermissionDetail = {
+  /** Shell command extracted from a command permission prompt, or null for non-command approvals. */
+  command: string | null;
+  /** Human explanation ("Reason: …"), cleanly separated from the command. */
+  reason: string | null;
+  /** Original body text (fallback for non-command prompts such as diffs or trust dialogs). */
+  body: string;
+};
+
 const SOLID_RE = /^\s*─{8,}\s*$/;
 const COMPOSER_RE = /^>\s*(?:$|Auto mode:|Plan mode:|Accept-edits mode:|Type a message|Ask anything|[^\d])/i;
 const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel|Press up to edit queued messages)\b/i;
@@ -313,6 +322,107 @@ export function readAgyPrompt(screen: string): AgyPrompt | null {
 export function agyPromptKey(p: AgyPrompt): string {
   const head = p.kind === "question" ? `${p.progress ?? ""}\n${p.question}` : `${p.title}\n${p.body}`;
   return `${p.kind}\n${head}\n${p.stops.map((r) => r.label).join("\n")}`;
+}
+
+/** Join terminal-wrapped prose paragraphs cleanly while keeping paragraph breaks. */
+function unwrapProse(text: string): string {
+  return text
+    .trim()
+    .split(/\n\s*\n/)
+    .map((para) => {
+      let out = "";
+      for (const raw of para.split("\n")) {
+        const part = raw.trim();
+        if (!part) continue;
+        if (!out) out = part;
+        else if (/[A-Za-z0-9]-$/.test(out) && /^[A-Za-z0-9]/.test(part)) out += part;
+        else out += ` ${part}`;
+      }
+      return out;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** Join terminal-wrapped single-command text without corrupting mid-path wraps like `/omarelay\n/scripts`. */
+function unwrapCommand(text: string): string {
+  const rawLines = text.replace(/\r/g, "").split("\n");
+  while (rawLines.length && blank(rawLines[0]!)) rawLines.shift();
+  while (rawLines.length && blank(rawLines.at(-1)!)) rawLines.pop();
+  if (rawLines.length <= 1) return (rawLines[0] ?? "").trim();
+  // Preserve intentional multi-line scripts (blank lines inside, or varying inner indentation).
+  const firstIndent = indent(rawLines[0]!);
+  const hasStructure = rawLines.some((l, i) => blank(l) || (i > 0 && indent(l) > firstIndent + 1));
+  if (hasStructure) {
+    const minIndent = Math.min(...rawLines.filter((l) => !blank(l)).map(indent));
+    return rawLines.map((l) => (blank(l) ? "" : l.slice(minIndent))).join("\n").trim();
+  }
+  let out = "";
+  for (const raw of rawLines) {
+    const part = raw.trim();
+    if (!part) continue;
+    if (!out) {
+      out = part;
+    } else if (out.endsWith("\\")) {
+      out += `\n${part}`;
+    } else if (
+      (part.startsWith("/") && /[A-Za-z0-9._~-]$/.test(out))
+      || (out.endsWith("/") && /^[A-Za-z0-9._~-]/.test(part))
+      || (/[A-Za-z0-9._]-$/.test(out) && /^[A-Za-z0-9]/.test(part))
+    ) {
+      out += part;
+    } else {
+      out += ` ${part}`;
+    }
+  }
+  return out;
+}
+
+const REQ_PERM_RE = /(?:^|\s)Requesting permission for:\s*/i;
+const REASON_PREFIX_RE = /^Reason:\s*/i;
+const CMD_LINE_RE = /(?:^|\n)\s*(?:Command:\s*|\$\s+)/i;
+
+/**
+ * Split an Antigravity permission prompt body into its structured `command` and
+ * `reason` when asking to run a command (e.g. `Reason: … Requesting permission
+ * for: <cmd>`), so the chat card can show the command in a dedicated monospace
+ * block separate from the explanation.
+ */
+export function parseAgyPermissionBody(title: string, body: string): AgyPermissionDetail {
+  const trimmed = body.trim();
+  if (!trimmed) return { command: null, reason: null, body: "" };
+
+  const req = REQ_PERM_RE.exec(trimmed);
+  if (req) {
+    const before = trimmed.slice(0, req.index).trim();
+    const after = trimmed.slice(req.index + req[0].length).trim();
+    if (after) {
+      const reason = before ? unwrapProse(before.replace(REASON_PREFIX_RE, "")) || null : null;
+      return { command: unwrapCommand(after), reason, body: trimmed };
+    }
+  }
+
+  if (/\bcommand\b/i.test(title) && !/^\s*[+-]\s/m.test(trimmed)) {
+    if (REASON_PREFIX_RE.test(trimmed)) {
+      const cmdMatch = CMD_LINE_RE.exec(trimmed);
+      if (cmdMatch && cmdMatch.index > 0) {
+        const reason = unwrapProse(trimmed.slice(0, cmdMatch.index).replace(REASON_PREFIX_RE, "")) || null;
+        const cmd = unwrapCommand(trimmed.slice(cmdMatch.index + cmdMatch[0].length));
+        if (cmd) return { command: cmd, reason, body: trimmed };
+      }
+      const paras = trimmed.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+      if (paras.length >= 2) {
+        const reason = unwrapProse(paras.slice(0, -1).join("\n\n").replace(REASON_PREFIX_RE, "")) || null;
+        const cmd = unwrapCommand(paras.at(-1)!.replace(/^(?:Command:\s*|\$\s+)/i, ""));
+        if (cmd) return { command: cmd, reason, body: trimmed };
+      }
+    } else {
+      const cmd = unwrapCommand(trimmed.replace(/^(?:Command:\s*|\$\s+)/i, ""));
+      if (cmd) return { command: cmd, reason: null, body: trimmed };
+    }
+  }
+
+  return { command: null, reason: null, body: trimmed };
 }
 
 /** ↑/↓ arrow key presses from the currently selected row to `to`. */

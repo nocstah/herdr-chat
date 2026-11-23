@@ -304,3 +304,54 @@ test("uncataloged models still expose all five effort tiers and startup falls ba
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("command approval cards emit structured run_command tool, separate reason, recover verbatim pending CommandLine, and compact always-allow labels", async () => {
+  const r = rig();
+  try {
+    const exactCmd = `python3 -c "import sys; sys.path.insert(0, '/home/noc/code/omarelay/scripts'); import ovis; print('OK')"`;
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nRun tests\n</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", tool_calls: [{ name: "run_command", args: { CommandLine: JSON.stringify(exactCmd) } }] },
+    ]);
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "idle" } }] });
+    await r.adapter.start(null, r.host);
+    await r.adapter.history();
+
+    r.events.length = 0;
+    r.screen([
+      "────────────────────────────────────────────────────────────────────────",
+      "Reason: Runs tests outside the workspace sandbox. Requesting permission for: python3 -c \"import sys; sys.path.insert(0, '/home/noc/code/oma",
+      "relay/scripts'); import ovis; print('OK')\"",
+      "",
+      "Run this command?",
+      "> 1. Yes, run command",
+      "  2. Yes, and always allow in this conversation for commands that start with 'python3 -c \"import sys; sys.path.insert(0, '/home/noc/code/omarelay/scripts'); i...'",
+      "  3. Yes, and always allow for commands that start with 'python3 -c \"import sys; sys.path.insert(0, '/home/noc/code/omarelay/scripts'); i...' (Persist to settings.json)",
+      "  4. No, cancel",
+      "  ↑/↓ Navigate · enter Confirm · esc Cancel",
+    ].join("\n"));
+    r.status("blocked");
+    await until("command permission ask", () => r.events.some((e) => e.type === "ask"));
+
+    const ask = (r.events.find((e) => e.type === "ask") as any).ask;
+    assert.equal(ask.kind, "permission");
+    assert.equal(ask.title, "Run this command?");
+    // Exact verbatim command recovered from pending tool_call despite mid-word screen wrap (`oma\nrelay`).
+    assert.deepEqual(ask.tool, { name: "run_command", args: { CommandLine: exactCmd } });
+    assert.equal(ask.message, "Runs tests outside the workspace sandbox.");
+    assert.deepEqual(ask.choices.map((c: any) => [c.kind, c.label]), [
+      ["allow", "Yes, run command"],
+      ["allow_always", `Always allow 'python3 -c "import sys; sys.path.…' (this chat)`],
+      ["allow_always", `Always allow 'python3 -c "import sys; sys.path.…' (Persist to settings.json)`],
+      ["deny", "No, cancel"],
+    ]);
+    assert.match(ask.choices[1].description, /Yes, and always allow in this conversation/);
+    assert.match(ask.choices[2].description, /Persist to settings\.json/);
+
+    // Answering the formatted always-allow option still navigates to row 2 cleanly.
+    r.adapter.answer(ask.id, { choice: ask.choices[1].id });
+    await until("down enter sent", () => r.calls().some((c) => c[0] === "keys" && c.slice(-2).join(" ") === "down enter"));
+  } finally {
+    r.done();
+  }
+});

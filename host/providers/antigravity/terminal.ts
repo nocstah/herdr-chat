@@ -27,7 +27,7 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, readAgyPrompt, readAgyStatusBar } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyStatusBar } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
 import { imageLines, pruneImages, saveImages, withImageLines } from "../sent-images.ts";
@@ -50,6 +50,25 @@ const ASK_SETTLE_MS = 700;
 const SENT_TTL_MS = 10 * 60_000;
 const MODELS_TTL_MS = 60_000;
 const AGENT_APPS = new Set(["antigravity", "agy"]);
+const COMPACT_WS = /\s+/g;
+
+/** Shorten Antigravity's verbose always-allow prefix choice labels while preserving the full text as tooltip description. */
+function formatAgyChoiceLabel(raw: string): { label: string; description?: string } {
+  const compact = (prefix: string) => {
+    const unquoted = prefix.trim().replace(/^(['"])(.*)\1$/, "$2").replace(/\s+/g, " ").trim();
+    const short = unquoted.length > 34 ? `${unquoted.slice(0, 33).trimEnd()}…` : unquoted;
+    return `'${short}'`;
+  };
+  const conv = /^Yes,\s+and\s+always\s+allow\s+in\s+this\s+conversation\s+for\s+commands\s+that\s+start\s+with\s+(.+)$/i.exec(raw);
+  if (conv) return { label: `Always allow ${compact(conv[1]!)} (this chat)`, description: raw };
+  const persist = /^Yes,\s+and\s+always\s+allow\s+for\s+commands\s+that\s+start\s+with\s+(.+?)(?:\s*\(([^)]+)\))?$/i.exec(raw);
+  if (persist) {
+    const scope = persist[2]?.trim() ? ` (${persist[2].trim()})` : "";
+    return { label: `Always allow ${compact(persist[1]!)}${scope}`, description: raw };
+  }
+  return { label: raw };
+}
+
 
 const NOT_HERE = "Do that in Antigravity's terminal: Ctrl+Shift+J flips to it.";
 const BUSY = "Antigravity is working: run the command when it's done, or in a new tab.";
@@ -500,6 +519,19 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     return text === null ? undefined : readAgyPrompt(text);
   }
 
+  private matchPendingCommand(screenCommand: string): string | null {
+    const pending = this.follower?.pendingCommands() ?? [];
+    if (!pending.length) return null;
+    const needle = screenCommand.replace(COMPACT_WS, "");
+    const truncated = /(?:…|\.\.\.)$/.test(needle) ? needle.replace(/(?:…|\.\.\.)$/, "") : null;
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const candidate = pending[i]!;
+      const norm = candidate.replace(COMPACT_WS, "");
+      if (norm === needle || (truncated && truncated.length >= 16 && norm.startsWith(truncated))) return candidate;
+    }
+    return null;
+  }
+
   private showAsk(p: AgyPrompt | null): void {
     const key = p ? agyPromptKey(p) : null;
     if (this.ask && key === this.ask.key) {
@@ -508,6 +540,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
     this.closeAsk();
     if (!p || !key) return;
+    // Pull any freshly-flushed pending tool call so command approvals can recover exact verbatim CommandLine text.
+    if (p.kind === "permission") this.tail();
     const id = `tv-ask-${++this.askSeq}`;
     this.ask = { id, key, prompt: p };
     this.emit({ type: "ask", ask: this.askOf(id, p) });
@@ -539,8 +573,24 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
         : yes && firstYes ? "allow" as const
           : /\b(?:always|don't ask|session|future)\b/i.test(r.label) ? "allow_always" as const : "other" as const;
       if (yes) firstYes = false;
-      return { id: `r${r.stop}`, label: r.label, kind, ...(r.description ? { description: r.description } : {}) };
+      const formatted = formatAgyChoiceLabel(r.label);
+      const desc = [formatted.description, r.description].filter(Boolean).join(" · ");
+      return { id: `r${r.stop}`, label: formatted.label, kind, ...(desc ? { description: desc } : {}) };
     };
+    if (p.kind === "permission") {
+      const parsed = parseAgyPermissionBody(p.title, p.body);
+      if (parsed.command) {
+        const command = this.matchPendingCommand(parsed.command) ?? parsed.command;
+        return {
+          id,
+          kind: "permission",
+          title: p.title,
+          ...(parsed.reason ? { message: parsed.reason } : {}),
+          tool: { name: "run_command", args: { CommandLine: command } },
+          choices: p.rows.map(choice),
+        };
+      }
+    }
     return {
       id,
       kind: "permission",

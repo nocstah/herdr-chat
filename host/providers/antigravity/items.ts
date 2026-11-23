@@ -96,6 +96,17 @@ export class AgyTranscriptFollower {
     return { contextTokens: this.contextTokens, contextWindow: null };
   }
 
+  /** Pending `run_command` tool-call command lines (for recovering exact unwrapped commands on approval screens). */
+  pendingCommands(): string[] {
+    const out: string[] = [];
+    for (const c of this.pending) {
+      if (c.name !== "run_command") continue;
+      const cmd = typeof c.args.CommandLine === "string" ? c.args.CommandLine : typeof c.args.command === "string" ? c.args.command : "";
+      if (cmd) out.push(cmd);
+    }
+    return out;
+  }
+
   /** Switch from history replay to live tailing while keeping seen steps and pending tool calls. */
   setLive(): void {
     this.history = false;

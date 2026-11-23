@@ -1,7 +1,7 @@
 // Antigravity CLI's TUI screen reader (host/providers/antigravity/screen.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, readAgyPrompt, readAgyStatusBar } from "../../host/providers/antigravity/screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyStatusBar } from "../../host/providers/antigravity/screen.ts";
 
 const IDLE_AUTO = `
 ────────────────────────────────────────────────────────────────────────
@@ -203,4 +203,54 @@ esc to cancel                                        Gemini 3.8 Flash · high`;
     ["Web", false, false],
   ]);
   assert.ok(mq.other && mq.other.input && mq.other.label === "Write-in...");
+});
+
+test("parseAgyPermissionBody separates Reason from Requesting permission for command and unwraps mid-path breaks", () => {
+  const systemdScreen = [
+    "────────────────────────────────────────────────────────────────────────",
+    "Reason: Restarting the pre-existing systemd user service omarelay.service stops and restarts a host-configured",
+    "service process that was not created by the agent in this session. Requesting permission for: systemctl --user restart",
+    "omarelay.service && systemctl --user status omarelay.service --no-pager -n 12 && systemctl --user list-units --all",
+    "--no-legend 'hc-shutdown-*'",
+    "",
+    "Run this command?",
+    "> 1. Yes, run command",
+    "  2. No, cancel",
+    "  ↑/↓ Navigate · enter Confirm · esc Cancel",
+  ].join("\n");
+  const p1 = readAgyPrompt(systemdScreen);
+  assert.ok(p1 && p1.kind === "permission");
+  assert.equal(p1.title, "Run this command?");
+  const d1 = parseAgyPermissionBody(p1.title, p1.body);
+  assert.equal(
+    d1.reason,
+    "Restarting the pre-existing systemd user service omarelay.service stops and restarts a host-configured service process that was not created by the agent in this session.",
+  );
+  assert.equal(
+    d1.command,
+    "systemctl --user restart omarelay.service && systemctl --user status omarelay.service --no-pager -n 12 && systemctl --user list-units --all --no-legend 'hc-shutdown-*'",
+  );
+
+  // Mid-path wrap (`/omarelay\n/scripts`) rejoins without inserting a stray space.
+  const wrappedPath = [
+    "Reason: Overriding ovis.SHUTDOWN_AT_START = set() causes ovis.stop_left_shutdown_units() to run systemctl --user",
+    "stop on pre-existing hc-shutdown-* transient systemd user units. Requesting permission for: python3 -c \"import sys; sys.path.insert(0, '/home/noc/code/omarelay",
+    "/scripts'); import ovis; print('OK')\"",
+  ].join("\n");
+  const d2 = parseAgyPermissionBody("Run this command?", wrappedPath);
+  assert.equal(d2.reason, "Overriding ovis.SHUTDOWN_AT_START = set() causes ovis.stop_left_shutdown_units() to run systemctl --user stop on pre-existing hc-shutdown-* transient systemd user units.");
+  assert.equal(d2.command, `python3 -c "import sys; sys.path.insert(0, '/home/noc/code/omarelay/scripts'); import ovis; print('OK')"`);
+
+  // Requesting permission without Reason, and bare command body under a command title.
+  assert.deepEqual(parseAgyPermissionBody("Run this command?", "Requesting permission for: git push origin main"), {
+    command: "git push origin main",
+    reason: null,
+    body: "Requesting permission for: git push origin main",
+  });
+  assert.equal(parseAgyPermissionBody("Run this command?", "rm -rf dist").command, "rm -rf dist");
+
+  // Non-command edit diff stays unstructured.
+  const editParsed = parseAgyPermissionBody("Accept this file edit?", "Edit src/app.ts\n  - const a = 1;\n  + const a = 2;");
+  assert.equal(editParsed.command, null);
+  assert.equal(editParsed.reason, null);
 });
