@@ -6,8 +6,8 @@
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover } from "gpui-base";
-import { MOD, alpha, count, icon, money, monoFont, providerIcon, spans, spansText, spinner, unwrapHc } from "./util.js";
-import { withKey } from "./shortcuts.js";
+import { MOD, alpha, count, icon, money, monoFont, plural, providerIcon, spans, spansText, spinner, unwrapHc } from "./util.js";
+import { keyHint, withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
 import { MAC } from "./platform.js";
 import { bgDetailEmpty, bgDetailLines, bgRows, bgSummary } from "./background.js";
@@ -324,6 +324,60 @@ export function planStrip(v, s, t) {
   return v_flex().w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
     .when(open, (e) => e.child(div().id("plan-steps").max_h(240).overflow_y_scroll().px(12).py(10).border_b_1().border_color(alpha(t.border, 0.6))
       .child(planSteps(plan, t))))
+    .child(head);
+}
+
+function clockTime(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Expandable live activity/info scrollback above the composer (Ctrl+O), preserving
+// every status/thinking update and tool call of the current or most recent run.
+export function activityDrawer(v, s, t) {
+  if (!v.activityOpen) return null;
+  const entries = Array.isArray(s.activityLog) ? s.activityLog : [];
+  const working = v.store.working();
+  if (!working && !entries.length) return null;
+  const mono = monoFont();
+  const hint = keyHint("expandInfo");
+  const f = flavorPalette(t);
+  const rows = entries.length
+    ? entries.map((e, i) => {
+      const newest = i === entries.length - 1;
+      const live = newest && working;
+      const isTool = e.kind === "tool";
+      const mark = live
+        ? div().flex_none().pt(3).child(spinner(10, t.working))
+        : isTool
+          ? div().flex_none().pt(3).child(icon("wrench", 10).text_color(t.ansi4 ?? t.dim))
+          : div().flex_none().pt(6).child(div().size(4).rounded(2).bg(newest ? f.bullet : t.dim));
+      return h_flex().id(`act-entry-${i}`).gap(8).items_start().text_size(12).line_height("17px")
+        .child(div().flex_none().font_family(mono).text_size(10.5).pt(1).text_color(t.dim).child(clockTime(e.ts)))
+        .child(mark)
+        .child(div().flex_1().min_w(0).whitespace_normal()
+          .when(isTool, (el) => el.font_family(mono).text_size(11.5))
+          .text_color(live ? t.foreground : isTool ? t.dim : t.muted)
+          .child(e.text));
+    })
+    : [div().text_size(12).text_color(t.dim).child(working ? "Waiting for activity updates…" : "No activity info recorded for this turn.")];
+  const head = h_flex().id("activity-strip").h(28).px(10).gap(8).items_center().text_size(12).cursor_pointer()
+    .hover((st) => st.bg(t.hover)).tooltip(withKey("Collapse activity log", "expandInfo"))
+    .on_click((_e, cx) => v.control("activity:toggle", cx))
+    .child(working ? spinner(11, t.working) : icon("info", 12).text_color(t.dim))
+    .child(div().flex_none().text_color(t.muted).child("Activity"))
+    .when(entries.length > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`· ${plural(entries.length, "update")}`)))
+    .child(div().flex_1())
+    .when(!v.activityFollow && entries.length > 1, (el) => el.child(div().id("activity-latest").px(6).py(1).rounded(5).text_size(11).text_color(t.accent)
+      .hover((st) => st.bg(t.hover)).on_click((_e, cx) => { cx.stop_propagation(); v.control("activity:latest", cx); }).child("↓ Latest")))
+    .when(Boolean(hint), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(hint)))
+    .child(icon("chevron-down", 11).text_color(t.dim));
+  return v_flex().id("activity-drawer").w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
+    .child(v_flex().id("activity-log").max_h(240).overflow_y_scrollbar().track_scroll(v.activityScroll).px(10).py(8).gap(4)
+      .border_b_1().border_color(alpha(t.border, 0.6))
+      .on_scroll_wheel((e, cx) => { if (e.delta.y > 0 && v.activityFollow) { v.activityFollow = false; cx.notify(); } })
+      .children(rows))
     .child(head);
 }
 

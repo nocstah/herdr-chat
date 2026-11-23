@@ -1,7 +1,7 @@
 // Antigravity CLI's TUI screen reader (host/providers/antigravity/screen.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
+import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
 
 const IDLE_AUTO = `
 ────────────────────────────────────────────────────────────────────────
@@ -366,10 +366,79 @@ test("readAgyWorkingStatus reads live braille-spinner status/thinking ticker and
   ].join("\n");
   assert.equal(readAgyWorkingStatus(collapsedThought), null);
 
+  // Box-corner `└ Tip:` callout under spinner must be skipped (Antigravity 1.5.15+).
+  const cornerTip = [
+    "○ Exploring 1 file (antigravity-terminal.test.ts) (ctrl+o to expand)",
+    "⣯  Running command...",
+    "└ Tip: Press ctrl+g to open an external editor for long prompts.",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyWorkingStatus(cornerTip), "Running command...");
+
   // Blocking dialogs and overlays -> null.
   assert.equal(readAgyWorkingStatus(EDIT_DIALOG), null);
   assert.equal(readAgyWorkingStatus(QUESTION_DIALOG), null);
   assert.equal(readAgyWorkingStatus(MODEL_OVERLAY), null);
+});
+
+test("readAgyInterrupted catches idle interruption banner and ignores active turns, user prompts and prose", () => {
+  const plain = [
+    "● Explored 6 files (antigravity-screen.test.ts, main.js, cards.js, +3) (ctrl+o to expand)",
+    "Interrupted · What should Antigravity CLI do instead?",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyInterrupted(plain), "Interrupted · What should Antigravity CLI do instead?");
+
+  const prefixedAndWrapped = [
+    "● Ran (npm test) (ctrl+o to expand)",
+    "⎿  Interrupted · What should Antigravity CLI",
+    "   do instead?",
+    "└ Tip: Press ctrl+g to open an external editor",
+    "────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────",
+    "? for shortcuts",
+    "auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyInterrupted(prefixedAndWrapped), "Interrupted · What should Antigravity CLI do instead?");
+
+  const userTypedIt = [
+    "────────────────────────────────────────────────────────────────────────",
+    "> Interrupted · What should Antigravity CLI do instead?",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyInterrupted(userTypedIt), null);
+
+  const prose = [
+    "The user interrupted the build earlier.",
+    "Interrupted · What should Antigravity CLI do instead?",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyInterrupted(prose), null);
+
+  const working = [
+    "Interrupted · What should Antigravity CLI do instead?",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgyInterrupted(working), null);
+  assert.equal(readAgyInterrupted(IDLE_AUTO), null);
+  assert.equal(readAgyInterrupted(EDIT_DIALOG), null);
+  assert.equal(readAgyInterrupted(MODEL_OVERLAY), null);
 });
 
 test("agyInShellMode detects active `!` bash mode and rejects normal prompt, drafts, overlays and dialogs", () => {

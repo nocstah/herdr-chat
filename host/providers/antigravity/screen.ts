@@ -630,9 +630,90 @@ export function readAgyQuotaWarning(screen: string): AgyQuotaWarning | null {
 
 const SPINNER_LINE_RE = /^\s{0,2}[\u2801-\u28FF]{1,2}\s+(\S.*)$/u;
 const IDLE_STATUS_RE = /^\s*\?\s+for shortcuts\b/i;
-const TIP_START_RE = /^\s*(?:[│┃]\s*)?Tip:\s/i;
-const CALLOUT_LINE_RE = /^\s*(?:[│┃](?:\s|$)|esc to dismiss\s*$)/i;
+const TIP_START_RE = /^\s*(?:[│┃└╰├⎿]\s*)?Tip:\s/i;
+const CALLOUT_LINE_RE = /^\s*(?:[│┃└╰├⎿](?:\s|$)|esc to dismiss\s*$)/i;
 const WORK_BLOCK_START_RE = /^\s*(?:[●•✦◆▸▾▶▼⚠✓✗✕?]|>\s|[›❯]\s)/;
+const INTERRUPT_START_RE = /^\s{0,4}(?:[⎿└╰■▪⚠✗✕]\ufe0f?\s+)?(Interrupted(?:\s*[·•—:-]\s*.*)?)$/i;
+const INTERRUPT_VALID_RE = /^Interrupted(?:\s*[·•—:-]\s*(?:What should\b|Esc\b|by user\b)|(?:\s+by user)?\s*$)/i;
+const INTERRUPT_ABOVE_OK_RE = /^(?:[●○•✦◆▸▾▶▼…│┃└╰├⎿─━═]|$)/;
+
+/**
+ * Reads an active interruption line printed directly above Antigravity's idle composer
+ * (e.g. `Interrupted · What should Antigravity CLI do instead?`), which Antigravity writes
+ * to the terminal screen without writing a record to `transcript.jsonl`.
+ * Returns null while working, in a blocking dialog or overlay, or when the text appears
+ * inside a user prompt (`> ...`) or normal assistant prose.
+ */
+export function readAgyInterrupted(screen: string): string | null {
+  if (readAgyPrompt(screen)) return null;
+  const lines = screenLines(screen);
+  if (lines.length < 4) return null;
+
+  let bottomRule = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
+    if (SOLID_RE.test(lines[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  if (bottomRule < 2) return null;
+  const below = lines.slice(bottomRule + 1).filter((l) => !blank(l));
+  if (below.length === 0 || below.length > 2) return null;
+  if (below.some((l) => OVERLAY_HINT_RE.test(l) || /^esc to cancel\b/i.test(l.trim()))) return null;
+  if (!below.some((l) => STATUS_LEFT_RE.test(l.trim()) || Boolean(readAgyStatusBar(l)))) return null;
+
+  let topRule = -1;
+  for (let i = bottomRule - 1; i >= Math.max(0, bottomRule - 8); i--) {
+    if (SOLID_RE.test(lines[i]!)) {
+      topRule = i;
+      break;
+    }
+  }
+  if (topRule < 1) return null;
+  const box = lines.slice(topRule + 1, bottomRule);
+  if (!box.some((l) => COMPOSER_RE.test(l))) return null;
+
+  let end = topRule - 1;
+  while (end >= 0) {
+    const raw = lines[end]!;
+    if (blank(raw) || TIP_START_RE.test(raw) || /^esc to dismiss\s*$/i.test(raw.trim())) {
+      end--;
+      continue;
+    }
+    if (/^\s*[│┃]\s*$/.test(raw)) {
+      end--;
+      continue;
+    }
+    break;
+  }
+  if (end < 0) return null;
+
+  // Walk upward at most 6 lines across a possibly-wrapped interruption banner.
+  let start = -1;
+  const minLine = Math.max(0, end - 6);
+  for (let i = end; i >= minLine; i--) {
+    const raw = lines[i]!;
+    if (SOLID_RE.test(raw) || SPINNER_LINE_RE.test(raw)) return null;
+    if (/^\s*[>›❯]\s/.test(raw)) return null;
+    if (INTERRUPT_START_RE.test(raw)) {
+      start = i;
+      break;
+    }
+    if (blank(raw) || NEWER_TURN_RE.test(raw)) return null;
+  }
+  if (start < 0) return null;
+
+  // Guard against matching a line embedded inside normal user/assistant prose.
+  if (start > 0) {
+    const above = lines[start - 1]!.trim();
+    if (!INTERRUPT_ABOVE_OK_RE.test(above)) return null;
+  }
+
+  const first = INTERRUPT_START_RE.exec(lines[start]!)![1]!;
+  const message = joinWrapped([first, ...lines.slice(start + 1, end + 1)]).replace(/\s+/g, " ").trim();
+  if (!message || !INTERRUPT_VALID_RE.test(message)) return null;
+  return message;
+}
 
 /**
  * Reads Antigravity CLI's live updating working/thinking status line (prefixed by

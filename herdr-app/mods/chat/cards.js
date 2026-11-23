@@ -414,23 +414,36 @@ function group(r, c) {
 }
 
 // While Pi works: what it's doing now, at the bottom of the timeline.
+// Clickable (or Ctrl+O) to expand the scrollable activity history drawer.
 function activity(c) {
   const t = c.t;
+  const f = flavorPalette(t);
   const a = c.activity;
   if (!a) return div();
+  if (c.activityOpen && !a.waiting) return div();
   const lead = a.waiting
     ? div().flex_none().pt(5).child(div().w(8).h(8).rounded_full().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1200 }))
     : div().flex_none().pt(3).child(spinner(12, t.working));
-  if (a.since != null) {
-    return h_flex().min_h(30).py(6).gap(8).items_start().text_size(12.5).line_height("18px").text_color(t.muted)
-      .child(lead)
-      .child(h_flex().flex_1().min_w(0).gap(8).items_center()
-        .child(div().min_w(0).truncate().child(a.text))
-        .child(div().flex_none().text_color(t.dim).child(`· ${secsSince(a.since, c)}s`)));
-  }
-  return h_flex().min_h(30).py(6).gap(8).items_start().text_size(12.5).line_height("18px").text_color(t.muted)
+  const countN = c.activityLogCount ?? 0;
+  const hintParts = [countN > 1 ? String(countN) : null, c.activityKey].filter(Boolean);
+  const expandHint = !a.waiting && (countN > 0 || c.activityKey)
+    ? h_flex().flex_none().gap(4).items_center().text_size(11).text_color(t.dim)
+      .when(hintParts.length > 0, (e) => e.child(hintParts.join(" · ")))
+      .child(icon("chevron-up", 11))
+    : null;
+  const body = a.since != null
+    ? h_flex().flex_1().min_w(0).gap(8).items_center()
+      .child(div().min_w(0).truncate().child(a.text))
+      .child(div().flex_none().text_color(f.lineRange).child(`· ${secsSince(a.since, c)}s`))
+    : div().flex_1().min_w(0).child(a.text);
+  return h_flex().id("activity-row").min_h(30).py(6).px(4).gap(8).items_start().rounded(6).text_size(12.5).line_height("18px")
+    .text_color(a.waiting ? t.blocked : t.foreground)
+    .when(!a.waiting, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))
+      .tooltip(c.activityKey ? `Expand activity log · ${c.activityKey}` : "Expand activity log")
+      .on_click((_e, cx) => c.toggleActivity?.(cx)))
     .child(lead)
-    .child(div().flex_1().min_w(0).child(a.text));
+    .child(body)
+    .when(Boolean(expandHint), (e) => e.child(expandHint));
 }
 
 function notice(it, c) {

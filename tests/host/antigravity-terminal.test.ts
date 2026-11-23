@@ -6,6 +6,8 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AntigravityTerminalAdapter } from "../../host/providers/antigravity/terminal.ts";
+import { Chat } from "../../host/chat.ts";
+import { Attachments } from "../../host/attachments.ts";
 import { transcriptPath } from "../../host/providers/antigravity/bind.ts";
 import type { AgyBindIO } from "../../host/providers/antigravity/bind.ts";
 import { parseModelsOutput } from "../../host/providers/antigravity/models.ts";
@@ -581,6 +583,138 @@ test("live working status ticker polls screen while working, deduplicates frame 
       r.events.some((e) => e.type === "activity_text" && (e as any).text === null)
       && r.events.some((e) => e.type === "run_settled"),
     );
+  } finally {
+    if (prevPoll === undefined) delete process.env.HERDR_CHAT_WORK_STATUS_MS;
+    else process.env.HERDR_CHAT_WORK_STATUS_MS = prevPoll;
+    r.done();
+  }
+});
+
+test("catches Interrupted banner while working (even without status transition) and deduplicates on idle polls", async () => {
+  const prevPoll = process.env.HERDR_CHAT_WORK_STATUS_MS;
+  process.env.HERDR_CHAT_WORK_STATUS_MS = "40";
+  const r = rig();
+  try {
+    const workingScreen = [
+      "● Ran (ls -la) (ctrl+o to expand)",
+      "⠋ Checking files...",
+      "└ Tip: Press ctrl+g to open an external editor",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+    const interruptedScreen = [
+      "● Ran (ls -la) (ctrl+o to expand)",
+      "Interrupted · What should Antigravity CLI do instead?",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "? for shortcuts      auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nDo work\n</USER_REQUEST>" },
+    ]);
+    r.screen(workingScreen);
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "working" } }] });
+    await r.adapter.start(null, r.host);
+    await r.adapter.history();
+
+    await until("initial status read", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === "Checking files..."),
+    );
+
+    // Antigravity interrupts on screen without herdr-core transitioning status away from working.
+    r.events.length = 0;
+    r.screen(interruptedScreen);
+    await until("interrupted settles as aborted and emits warning notice", () =>
+      r.events.some((e) => e.type === "run_settled" && (e as any).aborted === true)
+      && r.events.some((e) => e.type === "notice" && (e as any).text === "Interrupted · What should Antigravity CLI do instead?"),
+    );
+
+    // Subsequent status -> idle and idle polls must NOT duplicate the notice.
+    r.events.length = 0;
+    r.status("idle");
+    await pause(280);
+    assert.equal(r.events.filter((e) => e.type === "notice").length, 0);
+
+    // A new working turn clears the guard so a later interruption is caught again.
+    r.screen(workingScreen);
+    r.status("working");
+    await until("second turn working", () =>
+      r.events.some((e) => e.type === "activity_text" && (e as any).text === "Checking files..."),
+    );
+    r.events.length = 0;
+    r.screen(interruptedScreen);
+    r.status("done");
+    await until("second interruption caught on settle sync", () =>
+      r.events.some((e) => e.type === "notice" && (e as any).text === "Interrupted · What should Antigravity CLI do instead?"),
+    );
+  } finally {
+    if (prevPoll === undefined) delete process.env.HERDR_CHAT_WORK_STATUS_MS;
+    else process.env.HERDR_CHAT_WORK_STATUS_MS = prevPoll;
+    r.done();
+  }
+});
+
+test("Chat accumulates activityLog with prefix collapsing, keeps it after settle, and resets on the next run", async () => {
+  const prevPoll = process.env.HERDR_CHAT_WORK_STATUS_MS;
+  process.env.HERDR_CHAT_WORK_STATUS_MS = "40";
+  const r = rig();
+  try {
+    const workingScreen = (msg: string) => [
+      "● Ran (ls -la) (ctrl+o to expand)",
+      `⠋ ${msg}`,
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nTrack activity\n</USER_REQUEST>" },
+    ]);
+    r.screen(workingScreen("Reviewing usage.test.ts..."));
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "working" } }] });
+
+    const chat = new Chat({
+      chat: "c-act",
+      cwd: r.d,
+      session: null,
+      adapter: r.adapter,
+      terminal: null,
+      attachments: new Attachments(join(r.d, "att")),
+      view: "t5",
+      log: () => {},
+    });
+    chat.start(null);
+    await chat.whenReady(5000);
+
+    await until("first status recorded", () => chat.state.activityLog.some((e) => e.text === "Reviewing usage.test.ts..."));
+
+    // Progressive prefix extension replaces the latest status entry in place.
+    r.screen(workingScreen("Reviewing usage.test.ts to verify icon paths..."));
+    await until("prefix collapsed", () => chat.state.activityLog.some((e) => e.text === "Reviewing usage.test.ts to verify icon paths..."));
+    assert.equal(chat.state.activityLog.filter((e) => e.kind === "status").length, 1);
+
+    // Distinct new status appends a second entry.
+    r.screen(workingScreen("Running tests across both repos..."));
+    await until("second status appended", () => chat.state.activityLog.some((e) => e.text === "Running tests across both repos..."));
+    assert.equal(chat.state.activityLog.filter((e) => e.kind === "status").length, 2);
+
+    // Settling clears activityText but keeps activityLog readable for Ctrl+O inspection.
+    r.screen(IDLE_SCREEN);
+    r.status("done");
+    await until("settled with log preserved", () => chat.state.phase === "idle" && chat.state.activityText === null);
+    assert.equal(chat.state.activityLog.length, 2);
+
+    // Starting the next run clears the previous run's activityLog.
+    r.screen(workingScreen("Starting fresh task..."));
+    r.status("working");
+    await until("next run resets log", () => chat.state.activityLog.length === 1 && chat.state.activityLog[0]!.text === "Starting fresh task...");
+
+    await chat.shutdown();
   } finally {
     if (prevPoll === undefined) delete process.env.HERDR_CHAT_WORK_STATUS_MS;
     else process.env.HERDR_CHAT_WORK_STATUS_MS = prevPoll;

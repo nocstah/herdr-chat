@@ -27,7 +27,7 @@
 
 import { View, div } from "gpui-kit";
 import { fps_monitor } from "gpui-fps";
-import { v_flex, h_flex, Popup } from "gpui-base";
+import { v_flex, h_flex, Popup, ScrollHandle } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, layout, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
 
@@ -53,7 +53,7 @@ import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
-import { backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
+import { activityDrawer, backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
 import { bgDetailLines, bgTicking } from "./background.js";
 import { openFile } from "./files.js";
 import { Composer } from "./composer.js";
@@ -112,6 +112,10 @@ export default class HerdrChat extends View {
     this.full = new Map();
     this.dialog = new DialogCard((cx) => { this.debug?.mark(); cx?.notify(); }, () => this.composer.focus());
     this.dismissedQuotaId = null;
+    this.activityOpen = true;
+    this.activityFollow = true;
+    this.activityScroll = ScrollHandle.new();
+    this.activityScrollCount = 0;
     this.picker = null;
     this.handoff = null;
     this.transcript = false;
@@ -1402,7 +1406,23 @@ export default class HerdrChat extends View {
         this.composer.focus();
         break;
       case "newChat": return this.newChat(cx);
+      case "expandInfo": return this.toggleActivity(cx);
       default: this.log(`unknown shortcut ${a}`);
+    }
+    this.debug.mark();
+    cx.notify();
+  }
+
+  toggleActivity(cx) {
+    const entries = this.store.state.activityLog ?? [];
+    if (!this.store.working() && !entries.length) {
+      return this.flash("No activity info recorded for this turn", cx);
+    }
+    this.activityOpen = !this.activityOpen;
+    if (this.activityOpen) {
+      this.activityFollow = true;
+      this.activityScrollCount = entries.length;
+      if (entries.length > 0) this.activityScroll.scroll_to_item(entries.length - 1);
     }
     this.debug.mark();
     cx.notify();
@@ -1658,6 +1678,7 @@ export default class HerdrChat extends View {
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
       else if (this.runAsk) this.runAsk = null;
       else if (this.store.working()) this.abort(cx);
+      else if (this.activityOpen && (this.store.state.activityLog?.length ?? 0) > 0) this.activityOpen = false;
       else if (this.peekMode) return this.closePeek();
     }
     this.debug.mark();
@@ -2292,6 +2313,14 @@ export default class HerdrChat extends View {
       case "status:toggle-hidden": this.showHidden = !this.showHidden; break;
       case "plan": this.planOpen = !this.planOpen; break;
       case "background": this.bgClosed = !this.bgClosed; break;
+      case "activity:toggle": return this.toggleActivity(cx);
+      case "activity:latest": {
+        this.activityFollow = true;
+        const n = (this.store.state.activityLog ?? []).length;
+        this.activityScrollCount = n;
+        if (n > 0) this.activityScroll.scroll_to_item(n - 1);
+        break;
+      }
       case "latest": this.timeline.toBottom(); break;
       case "send": return this.send(cx);
       case "peek:tab": return this.openAsTab(cx);
@@ -2595,6 +2624,7 @@ export default class HerdrChat extends View {
 
   close() {
     if (this.viewer || this.termbar) return;
+    this.activityScroll?.release?.();
     owners.delete(this.uid);
     // A sub-agent's host is its parent's: closing its peek or its tab leaves it running.
     if (this.sub || hostTerminal(this.chat)?.parent) {
@@ -2743,7 +2773,7 @@ export default class HerdrChat extends View {
       width: this.width, colW: this.colW(), empty: this.isEmpty(),
       rows: space(rows).map((r) => ({ id: r.id, kind: r.kind, gap: r.gap, slot: r.slot, ...(r.kind === "group" ? group(r) : {}),
         ...(r.footer ? { footer: r.footer } : {}), ...(r.kind === "item" ? { item: r.item.kind } : {}) })),
-      activity: this.activity(), lastCopy: this.lastCopy ?? null,
+      activity: this.activity(), activityOpen: this.activityOpen, activityLogCount: (s.activityLog ?? []).length, lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
       statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
@@ -2852,6 +2882,8 @@ export default class HerdrChat extends View {
     return {
       t, mono: monoFont(), expanded: this.expanded, full: this.full, cwd: this.cwd, colW: this.colW(), now: Date.now(),
       codeBg: t.background, line: alpha(t.border, 0.7), hover: this.hover, activity: this.activity(),
+      activityOpen: this.activityOpen, activityLogCount: (this.store.state.activityLog ?? []).length,
+      activityKey: keyHint("expandInfo"), toggleActivity: (cx) => this.toggleActivity(cx),
       codeView: (key) => this.codeViews.get(key)?.entity ?? null,
       toggle: (id, cx) => this.toggle(id, cx), more: (id, cx) => this.more(id, cx),
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
@@ -2931,12 +2963,18 @@ export default class HerdrChat extends View {
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
     const quotaCard = !s.dialog ? this.quotaCard(t) : null;
     // Its height is in the dump: an open menu must not change it (an overlay, not the flow).
+    const actEntries = Array.isArray(s.activityLog) ? s.activityLog : [];
+    if (actEntries.length < this.activityScrollCount) this.activityScrollCount = actEntries.length;
+    else if (this.activityOpen && this.activityFollow && actEntries.length > this.activityScrollCount) {
+      this.activityScrollCount = actEntries.length;
+      this.activityScroll.scroll_to_item(actEntries.length - 1);
+    }
     const bottom = v_flex().id("chat-bottom").w_full().gap(8)
       .on_size_change((sz, cx) => { if (sz.height !== this.bottomH) { this.bottomH = sz.height; this.debug.mark(); } })
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
       .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
-      .children([widgetTray(this, above, t), backgroundStrip(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
+      .children([widgetTray(this, above, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
       // Under the card, as the Claude app has it: the folder and its branch; the model, its effort and the mode.

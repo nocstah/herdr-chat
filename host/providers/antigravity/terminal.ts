@@ -27,7 +27,7 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { sendAgyBang } from "./bang.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
@@ -190,6 +190,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private modeNow: AgyMode | null = null;
   private quotaWarningNow: QuotaWarning | null = null;
   private activityTextNow: string | null = null;
+  private interruptedNow: string | null = null;
+  private abortRequested = false;
+  private sawWorkingScreen = false;
   private workTimer: NodeJS.Timeout | null = null;
   private catalog: AgyModelGroup[] = [];
   private catalogAt = 0;
@@ -339,6 +342,19 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.emit({ type: "activity_text", text: clean });
   }
 
+  private handleScreenInterruption(text: string): boolean {
+    const msg = readAgyInterrupted(text);
+    if (!msg) {
+      if (this.status !== "working" && this.status !== "blocked") this.interruptedNow = null;
+      return false;
+    }
+    if (msg === this.interruptedNow) return false;
+    this.interruptedNow = msg;
+    if (this.running) this.settle(true);
+    this.emit({ type: "notice", level: "warning", source: "host", text: msg });
+    return true;
+  }
+
   private watchWorkStatus(): void {
     if (this.workTimer || this.disposed) return;
     this.workTimer = setTimeout(() => void this.pollWorkStatus(), 0);
@@ -356,7 +372,29 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (active() && !this.answering && this.agyRuns()) {
       const text = await this.screenText();
       if (active() && !this.answering && text !== null) {
-        this.setActivityText(readAgyWorkingStatus(text));
+        const status = readAgyWorkingStatus(text);
+        if (status) {
+          this.sawWorkingScreen = true;
+          this.interruptedNow = null;
+          this.setActivityText(status);
+        } else {
+          this.setActivityText(null);
+          if (this.handleScreenInterruption(text)) {
+            this.workTimer = null;
+            return;
+          }
+          const warn = readAgyQuotaWarning(text);
+          if (warn) {
+            this.settle();
+            this.setQuotaWarning(warn);
+            this.workTimer = null;
+            return;
+          }
+          if (/\besc to cancel\b/i.test(text)) {
+            this.sawWorkingScreen = true;
+            this.interruptedNow = null;
+          }
+        }
       }
     }
     this.workTimer = null;
@@ -396,13 +434,18 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private runOn(): void {
     if (this.running) return;
     this.running = true;
+    this.abortRequested = false;
+    this.sawWorkingScreen = false;
     this.setQuotaWarning(null);
     this.emit({ type: "run_started" });
     if (this.status !== "blocked") this.watchWorkStatus();
   }
 
-  private settle(): void {
+  private settle(aborted = false): void {
     if (!this.running || this.settling) return;
+    const wasAborted = aborted || this.abortRequested;
+    this.abortRequested = false;
+    this.sawWorkingScreen = false;
     this.stopWorkStatus();
     this.settling = true;
     try {
@@ -412,7 +455,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
     this.clearQueued();
     this.running = false;
-    this.emit({ type: "run_settled", aborted: false });
+    this.emit({ type: "run_settled", aborted: wasAborted });
   }
 
   // ---------------------------------------------------------------- the conversation
@@ -454,6 +497,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       const warn = readAgyQuotaWarning(text);
       if (warn && this.running) this.settle();
       this.setQuotaWarning(warn);
+      this.handleScreenInterruption(text);
     }
     const bar = readAgyStatusBar(text);
     if (!bar) return;
@@ -505,6 +549,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.offset = 0;
       this.setQuotaWarning(null);
       this.setActivityText(null);
+      this.interruptedNow = null;
+      this.abortRequested = false;
+      this.sawWorkingScreen = false;
       this.clearQueued();
       if (!first) this.awaitingHistory = true;
       this.emit({ type: "session", id: b.id, file: b.path, ...(first ? {} : { reload: true }) });
@@ -1012,6 +1059,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   }
 
   abort(): void {
+    this.abortRequested = true;
     void this.hc(["interrupt", "--json", this.opts.terminal], 10_000).then((r) => {
       if (r.code !== 0) this.log(`interrupt: ${(r.stderr || r.stdout).trim()}`);
     });

@@ -94,7 +94,13 @@ export type ChatState = {
   quotaWarning: QuotaWarning | null;
   /** Live working status/thinking text from the agent's TUI (e.g. Antigravity); null: none. */
   activityText: string | null;
+  /** Chronological history of live activity/status and tool lines for the current (or most recent) run. */
+  activityLog: ActivityEntry[];
 };
+
+export type ActivityEntry = { text: string; ts: number; kind?: "status" | "tool" };
+
+const MAX_ACTIVITY_LOG = 200;
 
 const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "queue", "error", "editorText", "handoff", "conflict", "quotaWarning"]);
 
@@ -239,7 +245,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null,
+      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [],
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -411,7 +417,7 @@ export class Chat {
       this.enterConflict(sessionFile!, conflict);
       return;
     }
-    this.set({ phase: "starting", error: null, sessionFile, conflict: null, activityText: null });
+    this.set({ phase: "starting", error: null, sessionFile, conflict: null, activityText: null, activityLog: [] });
     void this.boot(gen, sessionFile);
   }
 
@@ -442,7 +448,7 @@ export class Chat {
     this.releaseLock();
     if (file !== this.state.sessionFile && this.timeline.items.length) this.replaceTimeline(this.newTimeline());
     const again = this.state.phase === "conflict" && JSON.stringify(this.state.conflict) === JSON.stringify(c);
-    this.set({ phase: "conflict", conflict: c, sessionFile: file, error: null, handoff: null, activityText: null });
+    this.set({ phase: "conflict", conflict: c, sessionFile: file, error: null, handoff: null, activityText: null, activityLog: [] });
     this.dropQueue();
     if (!again) this.notice("warning", `${why ? why + "\n" : ""}${this.conflictText(c)} ${this.conflictWayOut(c)}`);
     this.terminalState("idle");
@@ -727,6 +733,7 @@ export class Chat {
         return;
       case "activity_text":
         this.set({ activityText: ev.text });
+        if (ev.text) this.pushActivity(ev.text, "status");
         return;
       case "session": {
         const patch: Partial<ChatState> = {};
@@ -769,8 +776,38 @@ export class Chat {
     }
     if (this.timeline.apply(ev)) {
       if (ev.type === "assistant_end" && ev.stopReason === "error") this.lastRunError = ev.error ?? "error";
+      if (ev.type === "tool_started") {
+        for (let i = this.timeline.items.length - 1; i >= 0; i--) {
+          const it = this.timeline.items[i]!;
+          if (it.kind === "tool" && it.toolCallId === ev.callId) {
+            this.pushActivity(it.title || it.name, "tool");
+            break;
+          }
+        }
+      }
       this.schedule();
     }
+  }
+
+  /** Appends a live activity/status or tool line to the current run's scrollback history, collapsing progressive streaming prefixes. */
+  private pushActivity(raw: string | null | undefined, kind: "status" | "tool" = "status"): void {
+    const text = raw?.trim();
+    if (!text) return;
+    const log = this.state.activityLog;
+    const last = log.length ? log[log.length - 1]! : null;
+    const now = Date.now();
+    if (last && last.text === text && (last.kind ?? "status") === kind) return;
+    if (kind === "status" && last && (last.kind ?? "status") === "status") {
+      const stem = last.text.replace(/(?:\.{3}|…)\s*$/, "").trim();
+      if (stem.length >= 8 && text.startsWith(stem)) {
+        this.set({ activityLog: [...log.slice(0, -1), { text, ts: last.ts, kind }] });
+        return;
+      }
+    }
+    const next = log.length >= MAX_ACTIVITY_LOG
+      ? [...log.slice(-(MAX_ACTIVITY_LOG - 1)), { text, ts: now, kind }]
+      : [...log, { text, ts: now, kind }];
+    this.set({ activityLog: next });
   }
 
   /** The lanes: the agent's queue, then the follow-ups the host holds, with each one's id, sender and whether it can be taken back. */
@@ -897,7 +934,7 @@ export class Chat {
       this.autonomousCause = null;
       this.autonomousNotice = this.timeline.addNotice("info", "host", `${this.agent} started a run on its own.`).id;
     }
-    this.set({ phase: "working", quotaWarning: null });
+    this.set({ phase: "working", quotaWarning: null, activityLog: [] });
     this.terminalState("working");
   }
 
@@ -1162,7 +1199,7 @@ export class Chat {
     const counted = !working && shows;
     if (counted) {
       this.expectRun++;
-      this.set({ phase: "working", quotaWarning: null });
+      this.set({ phase: "working", quotaWarning: null, activityLog: [] });
       this.terminalState("working");
     }
     const isCommand = /^\/\S/.test(message);
@@ -1382,7 +1419,7 @@ export class Chat {
     t.load(this.historyWithSkills(events));
     // Extension statuses and widgets are UI state; they survive a session change like in the TUI.
     this.replaceTimeline(t);
-    this.set({ usage: null, editorText: null, phase: "idle", activityText: null });
+    this.set({ usage: null, editorText: null, phase: "idle", activityText: null, activityLog: [] });
     this.refreshCommands();
     this.refreshStats();
   }
@@ -1645,7 +1682,7 @@ export class Chat {
       while (this.runActive && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
     }
     await this.stopAgent();
-    this.set({ phase: "handoff", error: null, activityText: null, handoff: { argv, terminal: null, since: Date.now() } });
+    this.set({ phase: "handoff", error: null, activityText: null, activityLog: [], handoff: { argv, terminal: null, since: Date.now() } });
     this.watchHandoff();
     this.terminalState("idle");
     this.opts.onSessionFile?.(file);

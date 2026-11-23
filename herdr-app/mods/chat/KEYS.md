@@ -34,6 +34,7 @@ fields; Esc stops the run anywhere.
 | `focusComposer` | ⌘L (`cmd-l`) | Puts the keyboard back in the composer and closes an open picker. |
 | `newChat` | ⇧⌘N (`cmd-shift-n`) | Opens a new chat tab with the same agent in the same folder. |
 | `flip` | ⇧⌘J (`cmd-shift-j`) | In a terminal's chat view: shows the Claude Code, Codex or Antigravity terminal in its place (as Ovis's Mod+Shift+J). The same chord in that terminal, Herdr's global `flip` key, shows the chat again. |
+| `expandInfo` | ⌃O (`ctrl-o`) | Expands or collapses the scrollable live activity info log above the composer, keeping every status and tool update of the current or latest run. |
 
 `steer` and `followUp` work in the composer only. In a menu Enter picks, and
 on an approval card with nothing typed it answers. Shift+Enter is always a new

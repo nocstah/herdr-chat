@@ -34,6 +34,7 @@ export const SHORTCUTS = {
   focusComposer: "Focus the composer",
   newChat: "New chat in this folder, same agent",
   flip: "Show the terminal this chat is the view of (Ctrl+Shift+J in the terminal flips back)",
+  expandInfo: "Expand or collapse the live activity info log",
 };
 
 export const actionName = (a) => `herdrchat_k_${a}`;
