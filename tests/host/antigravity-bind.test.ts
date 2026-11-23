@@ -24,19 +24,24 @@ function io(overrides: Partial<AgyBindIO> = {}): AgyBindIO {
 test("isAgyTui distinguishes interactive TUI invocations from headless print mode and subcommands", () => {
   assert.equal(isAgyTui(["agy"]), true);
   assert.equal(isAgyTui(["/home/me/.local/share/mise/installs/antigravity-cli/latest/agy", "--mode", "auto"]), true);
+  assert.equal(isAgyTui(["antigravity"]), true);
+  assert.equal(isAgyTui(["/home/me/.local/share/mise/installs/antigravity-cli/latest/antigravity", "--mode", "auto"]), true);
   assert.equal(isAgyTui(["agy", "--conversation", A]), true);
   assert.equal(isAgyTui(["agy", "--model=gemini-4-neon-xhigh", "--effort", "xhigh"]), true);
   assert.equal(isAgyTui(["agy", "-i", "fix the bug"]), true);
   assert.equal(isAgyTui(["agy", "--dangerously-skip-permissions", "-c"]), true);
 
   assert.equal(isAgyTui(["agy", "-p", "hello"]), false);
+  assert.equal(isAgyTui(["antigravity", "-p", "hello"]), false);
   assert.equal(isAgyTui(["agy", "--print", "hello"]), false);
   assert.equal(isAgyTui(["agy", "--prompt=hello"]), false);
   assert.equal(isAgyTui(["agy", "models"]), false);
+  assert.equal(isAgyTui(["antigravity", "models"]), false);
   assert.equal(isAgyTui(["agy", "acp"]), false);
   assert.equal(isAgyTui(["agy", "mcp", "list"]), false);
   assert.equal(isAgyTui(["agy", "--model", "gemini-4-neon-high", "models"]), false);
   assert.equal(isAgyTui(["agy", "--version"]), false);
+  assert.equal(isAgyTui(["antigravityx"]), false);
   assert.equal(isAgyTui(["claude"]), false);
   assert.equal(isAgyTui(["codex"]), false);
   assert.equal(isAgyTui([]), false);
@@ -93,4 +98,11 @@ test("bindConversation resolves via presence lock, then conversation DB, then --
     openFiles: () => [`/custom/agy/presence/${A}.lock`],
   }));
   assert.equal(b7.path, transcriptPath("/custom/agy", A));
+
+  // Started via the real `antigravity` binary name rather than the `agy` symlink.
+  const b8 = bindConversation(800, io({
+    argv: () => ["/home/me/.local/share/mise/installs/antigravity-cli/latest/antigravity"],
+    openFiles: () => [`${DATA}/presence/${A}.lock`],
+  }));
+  assert.deepEqual(b8, { id: A, path: transcriptPath(DATA, A), dataDir: DATA, tuiPid: 800, how: "lock" });
 });

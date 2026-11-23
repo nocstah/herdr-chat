@@ -201,6 +201,21 @@ test("the Antigravity view: history, live send/echo, tools, dialogs, images, pic
     assert.equal(q.kind, "questions");
     r.adapter.answer(q.id, { answers: { q: "SQLite" } });
     await until("down enter sent", () => r.calls().some((c) => c[0] === "keys" && c.slice(-2).join(" ") === "down enter"));
+
+    // Antigravity 1.5 single-line Question 1/1 + Write-in... custom answer.
+    r.status("idle");
+    await pause(800);
+    r.events.length = 0;
+    r.screen(`Question\n────────────────────────────────────\n\nQuestion 1/1: Which file?\n\n> 1. (Recommended) hello.txt\n  2. bye.txt\n  3. Write-in...\n\n  ↑/↓ Navigate · enter Select · esc Skip\nesc to cancel        auto · Gemini 4 Neon · xhigh`);
+    r.status("blocked");
+    await until("agy 1.5 question ask", () => r.events.some((e) => e.type === "ask"));
+    const q15 = (r.events.find((e) => e.type === "ask") as any).ask;
+    assert.equal(q15.kind, "questions");
+    assert.equal(q15.questions[0].question, "Which file?");
+    assert.deepEqual(q15.questions[0].options.map((o: any) => o.label), ["(Recommended) hello.txt", "bye.txt"]);
+    assert.equal(q15.questions[0].allowOther, true);
+    r.adapter.answer(q15.id, { answers: { q: "custom.txt" } });
+    await until("write-in typed", () => r.calls().some((c) => c[0] === "send" && c.at(-1) === "custom.txt"));
     r.screen(IDLE_SCREEN);
     r.status("idle");
     await pause();

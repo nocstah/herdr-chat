@@ -40,12 +40,12 @@ const STATUS_RIGHT_RE = /^(?:(auto|plan|accept-edits)\s*·\s*)?(.+?)(?:\s*·\s*(
 const OVERLAY_HINT_RE = /(?:Keyboard:.*\besc\b|enter\s+Select\s+esc\b|\besc\s+Go\s+Back\b|\besc\s+to\s+(?:go\s+back|close)\b)/i;
 
 // Dialog footers when `agy` is blocked waiting for a confirmation or answer.
-const DIALOG_FOOTER_RE = /(?:↑\/↓\s*Navigate\s*·\s*enter\s*Confirm|enter\s*(?:to\s*)?(?:confirm|select|submit)|esc\s*(?:to\s*)?(?:cancel|deny|reject)|tab\s*(?:to\s*)?(?:add\s*(?:notes|feedback|instructions)|reject)|space\s*(?:to\s*)?toggle|press\s+1|f\s+to\s+view\s+full\s+diff)/i;
-const NUMBERED_ROW_RE = /^(\s*)([>›❯]\s*)?(\d+)\.\s+(.*)$/;
-const PLAIN_CURSOR_RE = /^(\s*)([>›❯])\s+(.+)$/;
+const DIALOG_FOOTER_RE = /(?:↑\/↓\s*Navigate\s*·\s*enter\s*Confirm|enter\s*(?:to\s*)?(?:confirm|select|submit)|esc\s*(?:to\s*)?(?:cancel|deny|reject|skip)|tab\s*(?:to\s*)?(?:add\s*(?:notes|feedback|instructions)|reject)|space\s*(?:to\s*)?toggle|press\s+1|f\s+to\s+view\s+full\s+diff)/i;
+const NUMBERED_ROW_RE = /^(\s*)([>›❯▸]\s*)?(\d+)\.\s+(.*)$/;
+const PLAIN_CURSOR_RE = /^(\s*)([>›❯▸])\s+(.+)$/;
 const BOX_RE = /^\[([ ✔✓xX])\]\s+(.*)$/;
-const SUBMIT_RE = /^\s*([>›❯]\s*)?Submit\s*$/i;
-const OTHER_RE = /^Other(?:\b|\s*\(|:|$)|^Type (?:your answer|something)/i;
+const SUBMIT_RE = /^\s*([>›❯▸]\s*)?Submit\s*$/i;
+const OTHER_RE = /^(?:Other(?:\b|\s*\(|:|$)|Type (?:your answer|something)|Write-in(?:\b|\.{3}|…))/i;
 const QUESTION_HEADER_RE = /^(?:Question\s+\d+\/\d+.*|.*(?:\?|:))$/i;
 
 const blank = (l: string) => !l.trim();
@@ -158,6 +158,7 @@ function parseNumberedDialog(lines: string[]): { rows: AgyRow[]; first: number; 
     const box = BOX_RE.exec(text);
     const checked = box ? box[1] !== " " : undefined;
     if (box) text = box[2]!.trim();
+    else text = text.replace(/^✓\s+/, "").trim();
     const split = columns(text);
     const desc = [split.description, ...notes].filter(Boolean).join(" ");
     rows.push({
@@ -261,12 +262,27 @@ export function readAgyPrompt(screen: string): AgyPrompt | null {
       && optRows.some((r) => /^(?:No|Deny|Reject|Cancel)\b/i.test(r.label));
 
     if (!looksApproval && (multi || other || above.some((l) => /^Question\s+\d+\/\d+/i.test(l.trim())))) {
-      const progressLine = above.find((l) => /^Question\s+\d+\/\d+/i.test(l.trim()))?.trim() ?? null;
-      const qLines = above.filter((l) => l.trim() !== progressLine).map((l) => l.trim()).filter(Boolean);
-      const question = qLines.at(-1) ?? "Antigravity has a question";
+      const progressIdx = above.findIndex((l) => /^Question\s+\d+\/\d+/i.test(l.trim()));
+      let progress: string | null = null;
+      let question: string;
+      if (progressIdx >= 0) {
+        const m = /^(Question\s+\d+\/\d+)(?:\s*:\s*(.*))?$/i.exec(above[progressIdx]!.trim())!;
+        progress = m[1]!;
+        const inlineText = m[2]?.trim() ?? "";
+        const after = above.slice(progressIdx + 1).map((l) => l.trim()).filter(Boolean);
+        if (inlineText) {
+          question = [inlineText, ...after].join(" ");
+        } else {
+          const before = above.slice(0, progressIdx).map((l) => l.trim()).filter((l) => l && !/^Question$/i.test(l));
+          question = after.join(" ") || before.at(-1) || "Antigravity has a question";
+        }
+      } else {
+        const qLines = above.map((l) => l.trim()).filter((l) => l && !/^Question$/i.test(l));
+        question = qLines.at(-1) ?? "Antigravity has a question";
+      }
       return {
         kind: "question",
-        progress: progressLine,
+        progress,
         question,
         rows: optRows.filter((r) => r !== other),
         other,

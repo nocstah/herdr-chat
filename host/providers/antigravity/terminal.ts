@@ -621,9 +621,18 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       await this.pressKeys([...agyMovesTo(now, p.other), "enter"]);
       await new Promise((r) => setTimeout(r, 200));
       await this.typeAnswer(typed);
+      await new Promise((r) => setTimeout(r, 200));
     }
     const final = await this.screenPrompt();
-    if (final?.kind === "question" && final.submit) return this.pressKeys([...agyMovesTo(final, final.submit), "enter"]);
+    if (final?.kind !== "question") {
+      if (!typed) return this.pressKeys(["enter"]);
+      return;
+    }
+    if (final.submit) return this.pressKeys([...agyMovesTo(final, final.submit), "enter"]);
+    // In Antigravity 1.5 multi-select without a Submit row, Enter on Write-in... opens the editor instead of submitting.
+    if (final.other && final.rows.length && final.stops.find((r) => r.selected)?.stop === final.other.stop) {
+      return this.pressKeys([...agyMovesTo(final, final.rows[0]!), "enter"]);
+    }
     return this.pressKeys(["enter"]);
   }
 

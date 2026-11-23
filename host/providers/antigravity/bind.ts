@@ -47,10 +47,10 @@ export type AgyBinding =
   | { id: string; path: string; dataDir: string; tuiPid: number; how: "lock" | "db" | "argv" }
   | { id: null; path: null; dataDir: string; tuiPid: number | null; why: "not_running" | "none" };
 
-/** Whether `argv` is an interactive `agy` TUI process (not headless `-p` or a subcommand). */
+/** Whether `argv` is an interactive `agy` / `antigravity` TUI process (not headless `-p` or a subcommand). */
 export function isAgyTui(argv: string[]): boolean {
   const prog = basename(argv[0] ?? "");
-  if (!/^agy(?:-[\w.-]+)?$/.test(prog)) return false;
+  if (!/^(?:agy|antigravity)(?:-[\w.-]+)?$/.test(prog)) return false;
   const rest = argv.slice(1);
   let sub: string | null = null;
   for (let i = 0; i < rest.length; i++) {

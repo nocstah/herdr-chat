@@ -132,7 +132,7 @@ for p in $PROVIDERS; do
   printf -v "BIN_$p" '%s' "$path"
   [ -z "$path" ] || AGENTS_FOUND+=("$p")
 done
-BIN_antigravity="$(command -v agy || true)"
+BIN_antigravity="$(command -v agy || command -v antigravity || true)"
 [ "${#AGENTS_FOUND[@]}" -gt 0 ] || [ -n "$BIN_antigravity" ] || die "no agent on PATH: install Pi (pi), Claude Code (claude), Codex (codex) or Antigravity (agy) first"
 APP="${HERDR_APP_BIN:-$(command -v herdr-app || true)}"
 [ -n "$APP" ] || for c in /Applications/*.app/Contents/MacOS/Herdr; do [ -x "$c" ] && APP="$c" && break; done

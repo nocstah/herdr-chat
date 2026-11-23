@@ -148,3 +148,55 @@ test("readAgyPrompt parses workspace trust, edit/create approvals, and single/mu
   // Regular markdown numbered list at idle prompt is NOT a dialog.
   assert.equal(readAgyPrompt("Here are two steps:\n1. Build\n2. Test\n" + IDLE_DEFAULT), null);
 });
+
+test("readAgyPrompt parses Antigravity 1.5 single-line Question N/M and Write-in... rows", () => {
+  const ask15 = `Question
+────────────────────────────────────────────────────────────────────────
+
+Question 1/1: Which file would you like to create?
+
+> 1. (Recommended) hello.txt
+  2. bye.txt
+  3. Write-in...
+
+  ↑/↓ Navigate · enter Select · esc Skip
+esc to cancel                                        Gemini 3.8 Flash · high`;
+
+  const q = readAgyPrompt(ask15);
+  assert.ok(q && q.kind === "question");
+  assert.equal(q.progress, "Question 1/1");
+  assert.equal(q.question, "Which file would you like to create?");
+  assert.deepEqual(q.rows.map((r) => [r.n, r.label, r.selected]), [
+    [1, "(Recommended) hello.txt", true],
+    [2, "bye.txt", false],
+  ]);
+  assert.ok(q.other && q.other.input && q.other.label === "Write-in...");
+  assert.equal(q.multi, false);
+
+  const multi15 = `Question
+────────────────────────────────────────────────────────────────────────
+
+Question 1/2: Which targets would you like to build
+for this release?
+
+  1. [ ] (Recommended) Desktop
+▸ 2. [x] Mobile
+  3. [ ] Web
+  4. Write-in...
+
+  ↑/↓ Navigate · → Next · space Toggle · enter Submit · esc Skip
+esc to cancel                                        Gemini 3.8 Flash · high`;
+
+  const mq = readAgyPrompt(multi15);
+  assert.ok(mq && mq.kind === "question");
+  assert.equal(mq.progress, "Question 1/2");
+  assert.equal(mq.question, "Which targets would you like to build for this release?");
+  assert.equal(mq.multi, true);
+  assert.equal(mq.submit, null);
+  assert.deepEqual(mq.rows.map((r) => [r.label, r.selected, r.checked]), [
+    ["(Recommended) Desktop", false, false],
+    ["Mobile", true, true],
+    ["Web", false, false],
+  ]);
+  assert.ok(mq.other && mq.other.input && mq.other.label === "Write-in...");
+});
