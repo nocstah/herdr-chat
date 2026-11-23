@@ -65,6 +65,7 @@ import { CodeView, owners } from "./codeview.js";
 import { Viewer, readSvgSize } from "./viewer.js";
 import { TermBar } from "./termbar.js";
 import { DEFAULT_PROVIDER, MOD, PROVIDERS, PROVIDER_NAMES, alpha, homeRel, icon, message, monoFont, plural, relTime, spansText, spinner, tildePath, typedText, unwrapHc } from "./util.js";
+import { themeSig } from "./flavor.js";
 
 const COL_MAX = 800;
 const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before the app's next read (beforeAppRead)
@@ -830,16 +831,17 @@ export default class HerdrChat extends View {
     const cur = this.codeViews.get(key);
     const block = b ?? cur?.block;
     if (!block) return;
-    const props = block.type === "markdown" ? { owner: this.uid, key, markdown: block.text ?? "", id: `md-${key.replace(":", "-")}` }
+    const themeKey = themeSig(theme());
+    const props = block.type === "markdown" ? { owner: this.uid, key, markdown: block.text ?? "", id: `md-${key.replace(":", "-")}`, themeKey }
       : { owner: this.uid, key, lang: block.lang ?? null, code: block.code ?? "", lines: block.lines ?? null,
-        full: this.expanded.has(`code:${key}`), copied: this.copiedAt.has(`code:${key}`) };
+        full: this.expanded.has(`code:${key}`), copied: this.copiedAt.has(`code:${key}`), themeKey };
     if (!cur) {
       if (!cx?.new) return;
       this.codeViews.set(key, { entity: cx.new(CodeView, props), props, block });
       return;
     }
     const p = cur.props;
-    if (p.markdown === props.markdown && p.code === props.code && p.lang === props.lang && p.full === props.full && p.copied === props.copied && (p.lines?.length ?? 0) === (props.lines?.length ?? 0)) return;
+    if (p.markdown === props.markdown && p.code === props.code && p.lang === props.lang && p.full === props.full && p.copied === props.copied && p.themeKey === props.themeKey && (p.lines?.length ?? 0) === (props.lines?.length ?? 0)) return;
     cur.props = props;
     cur.block = block;
     cur.entity.set_props(props);
@@ -855,6 +857,7 @@ export default class HerdrChat extends View {
     const key = `${this.conn.connects}:${JSON.stringify(colors)}:${dark}`;
     if (key === this.themeSent) return;
     this.themeSent = key;
+    this.syncCode(cx);
     this.req("set_theme", { colors, dark }, cx).then(() => { this.themeOk = true; }, () => { this.themeOk = false; });
   }
 

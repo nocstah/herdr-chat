@@ -11,6 +11,7 @@ import { withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
 import { MAC } from "./platform.js";
 import { bgDetailEmpty, bgDetailLines, bgRows, bgSummary } from "./background.js";
+import { flavorPalette } from "./flavor.js";
 
 const STATUS_MAX = 28;
 const STATUS_W = (text) => Math.min(STATUS_MAX, [...text].length) * 6.3 + 18;
@@ -121,9 +122,10 @@ export function underRow(v, t, { width }) {
   const mode = modeLabel(s.permissionMode, modes);
   if (mode && !tiny) {
     const m = modes.find((x) => x.id === s.permissionMode);
+    const modeColor = flavorPalette(t).mode(s.permissionMode);
     right.push(underChip("chip-permission", t, modes.length
-      ? { tip: withKey(withKey(`${mode}: ${m?.description ?? "Permission mode"} · click to change`, "mode"), "cycleMode"), onClick: (_e, cx) => v.control("chip:permission", cx) }
-      : { tip: `Permission mode: ${mode} · Shift+Tab in ${v.providerName()} changes it` })
+      ? { color: modeColor, tip: withKey(withKey(`${mode}: ${m?.description ?? "Permission mode"} · click to change`, "mode"), "cycleMode"), onClick: (_e, cx) => v.control("chip:permission", cx) }
+      : { color: modeColor, tip: `Permission mode: ${mode} · Shift+Tab in ${v.providerName()} changes it` })
       .ml(4).child(div().max_w(small ? 70 : 110).truncate().child(mode)));
     drawn.push("permission");
   }
@@ -427,8 +429,9 @@ export function branchChip(v, t, { width }) {
   const name = g?.name ?? null;
   v.branchShown = name;
   if (!name) return null;
+  const f = flavorPalette(t);
   return h_flex().id("branch").flex_shrink(1).max_w(Math.max(60, Math.round(width * 0.45))).min_w(0).h(24).px(6).gap(5).items_center()
-    .rounded(6).text_size(12.5).text_color(t.dim).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
+    .rounded(6).text_size(12.5).text_color(f.branch).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
     .on_click((_e, cx) => v.control("branch", cx))
     .child(icon(g.detached ? "git-commit" : "git-branch", 11))
     .child(div().min_w(0).truncate().child(name));

@@ -46,9 +46,9 @@ export function alpha(color, a) {
 const SYN = {
   keyword: "ansi5", string: "ansi2", regexp: "ansi2", number: "ansi3", literal: "ansi3", symbol: "ansi3", bullet: "ansi3",
   function: "ansi4", title: "ansi4", section: "ansi4", link: "ansi4", type: "ansi6", class: "ansi6", built_in: "ansi6",
-  comment: "dim", variable: "foreground", attr: "foreground", property: "foreground", params: "foreground",
+  comment: "dim", variable: "foreground", attr: "ansi6", property: "ansi6", params: "foreground",
   meta: "ansi1", tag: "ansi1", punctuation: "muted", operator: "muted", addition: "ansi2", deletion: "ansi1",
-  emphasis: "foreground", strong: "foreground",
+  emphasis: "ansi5", strong: "ansi3",
 };
 
 // A protocol color ("ansi0".."ansi15", "syn:<token>" or "#rrggbb") as a theme color.

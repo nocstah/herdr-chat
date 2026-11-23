@@ -11,74 +11,117 @@ import { alpha, codeLine, homeRel, icon, plural, spinner } from "./util.js";
 import { SPACE } from "./space.js";
 import { linkPaths } from "./paths.js";
 import { oneLine, runsInCode } from "./bang.js";
+import { decorateInlineCode, flavorPalette, mdChunks } from "./flavor.js";
+
+export { mdChunks };
 
 export const CODE_CAP = 30; // lines shown before "Show all N lines"
 const RENDER_MAX = 600; // lines ever built for one block (the rest: copy it)
 export const LINE_H = 19;
+const HEADING = /^ {0,3}#{1,6}(\s|$)/;
 
 // `onLink` (an answer's prose): its file paths become links (linkPaths), and
-// every link's click goes to it instead of straight to the system.
+// every link's click goes to it instead of straight to the system. When `opts.t`
+// is provided (and `opts.codeTint !== false`), standalone inline code spans get a
+// warm tinted pill matching Antigravity's terminal flavor while copying cleanly.
 /** @typedef {(url: string, cx: import("gpui-kit").Context) => void} OnLink */
 /**
  * @param {string} id
  * @param {string} text
  * @param {OnLink} [onLink]
+ * @param {{ t?: any, codeTint?: boolean }} [opts]
  */
-export const prose = (id, text, onLink) => {
-  const view = TextView.markdown(id, onLink ? linkPaths(text) : text).selectable(true);
+export const prose = (id, text, onLink, opts) => {
+  let src = onLink ? linkPaths(text) : text;
+  if (opts?.t && opts.codeTint !== false) src = decorateInlineCode(src, flavorPalette(opts.t).codeBg);
+  const view = TextView.markdown(id, src).selectable(true);
   return onLink ? view.on_link_click(onLink) : view;
 };
-
-// Markdown → the chunks drawn one TextView each, so the space between
-// paragraphs, lists, tables and headings is ours (space.js), not the
-// renderer's: a heading line alone; else split at blank lines, outside code
-// fences, and not inside a list (a loose list stays one chunk, its item
-// spacing the renderer's). Reference-style link definitions need the whole
-// text: then one chunk.
-const FENCE = /^\s*(`{3,}|~{3,})/;
-const HEADING = /^ {0,3}#{1,6}(\s|$)/;
-const LIST = /^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)/;
-const REFDEF = /^ {0,3}\[[^\]]+\]:\s/m;
-export function mdChunks(text) {
-  if (REFDEF.test(text)) return [{ text, heading: false }];
-  const out = [];
-  let cur = [], fence = null, blank = false;
-  const push = () => { if (cur.length) out.push({ text: cur.join("\n"), heading: false }); cur = []; };
-  for (const line of text.split("\n")) {
-    if (fence) {
-      cur.push(line);
-      const f = FENCE.exec(line);
-      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) fence = null;
-      continue;
-    }
-    if (!line.trim()) { blank = cur.length > 0; continue; }
-    if (HEADING.test(line)) { push(); out.push({ text: line, heading: true }); blank = false; continue; }
-    if (blank) {
-      if (LIST.test(cur[0]) && (LIST.test(line) || /^\s/.test(line))) cur.push("");
-      else push();
-      blank = false;
-    }
-    const f = FENCE.exec(line);
-    if (f) fence = f[1];
-    cur.push(line);
-  }
-  push();
-  return out.length ? out : [{ text: " ", heading: false }];
-}
 
 // The space above a piece of an answer, after `prev` (null: the first).
 const above = (heading, prev) => (prev == null ? 0 : heading ? SPACE.headingAbove : prev.heading ? SPACE.headingBelow : SPACE.block);
 
-// Markdown as its chunks, spaced (one TextView when it's one chunk). `onLink`: prose().
+function renderList(id, items, onLink, t, f) {
+  const maxOrd = items.reduce((m, it) => (it.ordered ? Math.max(m, it.marker.length) : m), 0);
+  const numW = Math.max(20, maxOrd * 8 + 6);
+  const bulletOf = (depth) => (depth === 0 ? ["•", f.bullet] : depth === 1 ? ["◦", f.bulletSub] : ["▪", f.bulletDeep]);
+  return v_flex().min_w(0).gap(4).children(items.map((it, idx) => {
+    const padL = it.depth * 18;
+    let lead;
+    if (it.checked !== null) {
+      lead = div().flex_none().w(20).pt(4).flex().justify_center()
+        .child(icon(it.checked ? "circle-check" : "circle", 13).text_color(it.checked ? f.check : t?.dim));
+    } else if (it.ordered) {
+      lead = div().flex_none().min_w(numW).pr(6).text_right().font_medium().text_color(f.ordered).child(it.marker);
+    } else {
+      const [glyph, col] = bulletOf(it.depth);
+      lead = div().flex_none().w(18).pr(6).text_right().font_semibold().text_color(col).child(glyph);
+    }
+    const body = div().flex_1().min_w(0).when(it.checked === true, (e) => e.text_color(t?.muted))
+      .child(prose(`${id}-li-${idx}`, it.text || " ", onLink, { t }));
+    return h_flex().min_w(0).items_start().when(padL > 0, (e) => e.pl(padL)).child(lead).child(body);
+  }));
+}
+
+function renderTable(id, chunk, onLink, t, f) {
+  // Very wide tables (6+ cols) fall back to native TextView table column measurement.
+  if (chunk.headers.length > 5) return prose(id, chunk.text, onLink, { t });
+  const alignCell = (el, a) => (a === "right" ? el.justify_end() : a === "center" ? el.justify_center() : el);
+  const cell = (cid, txt, a, opts) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
+    .child(div().min_w(0).child(prose(cid, txt || " ", onLink, opts)));
+  const head = h_flex().w_full().bg(f.tableHeadBg).border_b_1().border_color(t?.border).text_size(13).font_semibold().text_color(f.tableHead)
+    .children(chunk.headers.map((h, ci) => cell(`${id}-th-${ci}`, h, chunk.aligns[ci], { t })));
+  const body = chunk.rows.map((r, ri) => h_flex().w_full().text_size(13).line_height("20px")
+    .when(ri > 0, (e) => e.border_t_1().border_color(alpha(t?.border, 0.55)))
+    .when(ri % 2 === 1, (e) => e.bg(f.tableStripe))
+    .children(r.map((val, ci) => cell(`${id}-td-${ri}-${ci}`, val, chunk.aligns[ci], { t }))));
+  return v_flex().w_full().rounded(8).overflow_hidden().border_1().border_color(t?.border).child(head).children(body);
+}
+
+function renderChunk(id, p, onLink, t, f) {
+  if (!t) return prose(id, p.text, onLink);
+  switch (p.kind) {
+    case "heading": {
+      const col = f.heading(p.level);
+      return div().min_w(0).text_color(col)
+        .when(p.level === 1, (e) => e.w_full().pb(4).border_b_1().border_color(f.h1Rule))
+        .child(prose(id, p.text, onLink, { t }));
+    }
+    case "hr":
+      return div().w_full().py(4).child(div().w_full().h(1).bg(f.hr));
+    case "callout": {
+      const ca = f.callout(p.alert);
+      return v_flex().w_full().min_w(0).gap(4).pl(12).pr(10).py(8).rounded(8)
+        .border_l_2().border_color(ca.color).bg(ca.bg)
+        .child(h_flex().gap(6).items_center().text_size(12.5).font_semibold().text_color(ca.color)
+          .child(icon(ca.icon, 13).text_color(ca.color)).child(ca.label))
+        .child(div().min_w(0).child(markdown(`${id}-b`, p.body, onLink, t)));
+    }
+    case "blockquote":
+      return div().w_full().min_w(0).pl(12).pr(10).py(6).rounded_r(8)
+        .border_l_2().border_color(f.quoteBar).bg(f.quoteBg)
+        .child(markdown(`${id}-q`, p.body, onLink, t));
+    case "table":
+      return renderTable(id, p, onLink, t, f);
+    case "list":
+      return renderList(id, p.items, onLink, t, f);
+    default:
+      return prose(id, p.text, onLink, { t });
+  }
+}
+
+// Markdown as its chunks, spaced (one TextView when it's one plain chunk). `onLink`: prose().
 /**
  * @param {string} id
  * @param {string} text
  * @param {OnLink} [onLink]
+ * @param {any} [t]
  */
-export function markdown(id, text, onLink) {
+export function markdown(id, text, onLink, t) {
   const parts = mdChunks(text || " ");
-  if (parts.length === 1) return prose(id, parts[0].text, onLink);
-  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(prose(`${id}-${j}`, p.text, onLink))));
+  const f = t ? flavorPalette(t) : null;
+  if (parts.length === 1) return renderChunk(id, parts[0], onLink, t, f);
+  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(renderChunk(`${id}-${j}`, p, onLink, t, f))));
 }
 
 // Whether a block starts or ends with a heading (for the space around it).
@@ -105,7 +148,7 @@ export function blocks(it, c) {
       if (runs.length) el = v_flex().min_w(0).gap(6).child(el).children(runs.map((r, j) => runBar(`${key}:${j}`, r, runs.length > 1, c)));
     }
     else if (b.type === "mermaid") el = mermaid(key, b, c);
-    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink);
+    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink, c.t);
     return div().pt(gap).child(el);
   }));
 }
@@ -154,6 +197,7 @@ export function copyButton(id, text, c, { size = 12, label = null } = {}) {
 // in place (a fence still streaming, with a spinner; a diagram's source) always does.
 export function codeCard(key, lang, code, lines, open, c) {
   const t = c.t;
+  const f = flavorPalette(t);
   // Streaming (open fence): plain lines, one text run each, far cheaper to
   // rebuild every flush; highlighting arrives when the fence closes.
   const all = lines?.length && !open ? lines : plainLines(code);
@@ -164,7 +208,7 @@ export function codeCard(key, lang, code, lines, open, c) {
   const corner = open || !c.codeBody || c.codeHover || c.copied(`code:${key}`)
     ? h_flex().absolute().top(4).right(4).h(26).pl(9).pr(2).gap(6).items_center().rounded(7)
       .bg(c.codeBg).border_1().border_color(c.line)
-      .child(div().text_size(11.5).text_color(t.dim).child(lang || "text"))
+      .child(div().text_size(11.5).font_medium().text_color(lang ? f.langTag : t.dim).child(lang || "text"))
       .when(Boolean(open), (e) => e.child(spinner(11, t.dim)))
       .child(copyButton(`code:${key}`, code, c))
     : null;
@@ -180,7 +224,7 @@ export function codeCard(key, lang, code, lines, open, c) {
       .child(icon(full ? "chevron-up" : "chevron-down", 12))
       .child(full ? (more > 0 ? `Showing ${shown.length} of ${n} lines · copy for the rest` : "Show less") : `Show all ${n} lines`)
     : null;
-  return v_flex().relative().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
+  return v_flex().relative().w_full().rounded(10).overflow_hidden().border_1().border_color(f.codeBorder || t.border).bg(c.codeBg)
     .child(body).children(foot ? [foot] : []).children(corner ? [corner] : []);
 }
 

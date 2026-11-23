@@ -144,8 +144,8 @@ export class CodeView extends View {
 
   render() {
     const p = this.p;
-    if (p.markdown != null) return markdown(p.id, p.markdown, (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => (owners.get(p.owner) ? owners.get(p.owner).onLink(url, cx) : cx.open_url(url)));
     const t = theme();
+    if (p.markdown != null) return markdown(p.id, p.markdown, (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => (owners.get(p.owner) ? owners.get(p.owner).onLink(url, cx) : cx.open_url(url)), t);
     const key = p.key;
     const owner = () => owners.get(p.owner);
     const c = {

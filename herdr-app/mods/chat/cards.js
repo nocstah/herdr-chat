@@ -16,6 +16,7 @@ import { blocks, copyButton, diffView, outputBox, prose, textDiff } from "./rich
 import { cardLive, defaultOpen, groupCards, groupSummary } from "./rows.js";
 import { SPACE } from "./space.js";
 import { keepBreaks } from "./lines.js";
+import { flavorPalette, toolVerb } from "./flavor.js";
 
 const MAX_LINES = 400;
 
@@ -126,12 +127,13 @@ function user(it, c) {
   // its text up to its max: as an item of a row it was laid out at a fraction
   // of that (a two-line message took four). The actions are placed against its
   // left edge, outside the layout.
+  const f = flavorPalette(t);
   const b = SPACE.bubble;
   const lines = (text ?? "").split("\n");
   const long = lines.length > USER_LINES + 2 || (text ?? "").length > 1500;
   const open = !long || c.expanded.has(`user:${it.id}`);
   const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
-  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, keepBreaks(shown) || " "));
+  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, keepBreaks(shown) || " ", null, { t }));
   const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
     .on_click((_e, cx) => c.toggle(`user:${it.id}`, cx))
     .child(icon(open ? "chevron-up" : "chevron-down", 11)).child(open ? "Show less" : `Show full message · ${plural(lines.length, "line")}`)] : [];
@@ -148,7 +150,7 @@ function user(it, c) {
   else if (!text.includes("\n") && text.length <= 80) content = [h_flex().gap(8).items_center().child(skillPill(it, c)).child(body("-i").flex_1().min_w(0)), ...skillBody];
   else content = [h_flex().child(skillPill(it, c)), ...skillBody, body("-s")];
   return hoverable(v_flex().items_end(), it, c)
-    .child(v_flex().relative().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised)
+    .child(v_flex().relative().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised).border_1().border_color(f.userBorder)
       .child(div().absolute().right_full().bottom(2).pr(6).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
       .when(tags.length > 0, (e) => e.child(h_flex().gap(8).text_size(11).text_color(t.dim).children(tags)))
       .children(content)
@@ -186,14 +188,14 @@ function report(it, from, text, c) {
     .child(v_flex().id(`report-${it.id}`).w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
       .child(h_flex().id(`report-head-${it.id}`).h(30).px(10).gap(7).items_center().text_size(12).text_color(t.muted)
         .when(long, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.toggle(`report:${it.id}`, cx)))
-        .child(icon("corner-up-right", 12).text_color(t.dim))
+        .child(icon("corner-up-right", 12).text_color(t.ansi6 ?? t.dim))
         .child(div().flex_none().child("from"))
         .child(div().flex_1().min_w(0).truncate().font_medium().text_color(t.foreground).child(from))
         .child(acts)
         .when(long, (e) => e.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.dim)
           .child(open ? "Fold" : plural(lines.length, "line")).child(icon(open ? "chevron-up" : "chevron-down", 11)))))
       .child(div().border_t_1().border_color(c.line).px(12).py(8).text_size(13.5).line_height("20px")
-        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, keepBreaks(shown) || " ")))
+        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, keepBreaks(shown) || " ", c.onLink, { t })))
       .when(long && !open, (e) => e.child(div().id(`report-more-${it.id}`).px(12).pb(8).text_size(11.5).text_color(t.accent).cursor_pointer()
         .on_click((_e, cx) => c.toggle(`report:${it.id}`, cx)).child("Show all"))));
 }
@@ -218,18 +220,19 @@ function assistant(it, c, footer, slot) {
 // collapsed, the text in dim italic when opened.
 export function thinking(it, c) {
   const t = c.t;
+  const f = flavorPalette(t);
   const open = c.expanded.has(it.id);
   const secs = it.streaming ? secsSince(it.ts, c) : null;
   const label = it.streaming ? "Thinking…" : it.durationMs != null ? `Thought for ${duration(Math.max(1000, it.durationMs)).replace(/\.\d+s$/, "s")}` : "Thought";
   return v_flex()
-    .child(h_flex().id(`think-${it.id}`).h(28).gap(6).items_center().rounded(6).px(4).cursor_pointer().text_size(12.5).text_color(t.dim)
-      .hover((s) => s.bg(t.hover).text_color(t.muted)).on_click((_e, cx) => c.toggle(it.id, cx))
-      .child(icon(open ? "chevron-down" : "chevron-right", 12))
+    .child(h_flex().id(`think-${it.id}`).h(28).gap(6).items_center().rounded(6).px(4).cursor_pointer().text_size(12.5).text_color(f.thinkingDone)
+      .hover((s) => s.bg(t.hover).text_color(f.thinking)).on_click((_e, cx) => c.toggle(it.id, cx))
+      .child(icon(open ? "chevron-down" : "chevron-right", 12).text_color(f.thinkingDone))
       .child(it.streaming
-        ? div().flex_none().text_color(t.muted).child(label).loop("opacity", { from: 0.35, to: 1, period: 1400 })
+        ? div().flex_none().text_color(f.thinking).child(label).loop("opacity", { from: 0.4, to: 1, period: 1400 })
         : div().flex_none().child(label))
       .when(secs != null, (e) => e.child(div().flex_none().text_color(t.dim).child(`${secs}s`))))
-    .when(open, (e) => e.child(div().ml(9).mt(2).mb(6).pl(14).border_l_1().border_color(t.border).text_size(13).line_height("20px")
+    .when(open, (e) => e.child(div().ml(9).mt(2).mb(6).pl(14).border_l_2().border_color(f.thinkingRail).text_size(13).line_height("20px")
       .text_color(t.dim).italic().child(prose(`th-${it.id}`, it.text || " "))));
 }
 
@@ -258,19 +261,27 @@ export function lineOf(d) {
 // "mcp server · tool". `it`: a tool item, or a permission dialog's `tool`.
 export function toolTitle(it, d, c) {
   const t = c.t;
+  const f = flavorPalette(t);
+  const verbColor = f.tool(d?.type);
   if (VERB[d.type] && d.path) {
     const rest = (it.title ?? "").replace(/^\S+\s+/, "").slice(String(d.path).length);
     const shown = shortPath(d.path, c.cwd);
     return h_flex().flex_1().min_w(0).gap(6).items_center()
-      .child(div().flex_none().text_size(12.5).text_color(t.muted).child(VERB[d.type]))
+      .child(div().flex_none().text_size(12.5).font_medium().text_color(verbColor).child(VERB[d.type]))
       .child(div().id(`path-${it.id}`).min_w(0).truncate().font_family(c.mono).text_size(12.5).text_color(t.foreground).cursor_pointer()
         .hover((s) => s.text_color(t.accent).text_decoration_1()).tooltip(`Open ${shown}`)
         .on_click((_e, cx) => { cx.stop_propagation(); c.openFile(d.path, lineOf(d), cx); })
         .child(shown))
-      .when(Boolean(rest) && !/^\s*$/.test(rest), (e) => e.child(div().flex_none().font_family(c.mono).text_size(12).text_color(t.dim).child(rest.trim())));
-  } else {
-    return div().flex_1().min_w(0).truncate().font_family(c.mono).text_size(12.5).text_color(t.foreground).child(it.title || it.name);
+      .when(Boolean(rest) && !/^\s*$/.test(rest), (e) => e.child(div().flex_none().font_family(c.mono).text_size(12).text_color(f.lineRange).child(rest.trim())));
   }
+  const raw = it.title || it.name || "";
+  const sp = toolVerb(raw, d);
+  if (sp) {
+    return h_flex().flex_1().min_w(0).gap(6).items_center().font_family(c.mono).text_size(12.5)
+      .child(div().flex_none().font_medium().text_color(f.tool(sp.kind)).child(sp.verb))
+      .when(Boolean(sp.rest), (e) => e.child(div().min_w(0).truncate().text_color(t.foreground).child(sp.rest)));
+  }
+  return div().flex_1().min_w(0).truncate().font_family(c.mono).text_size(12.5).text_color(t.foreground).child(raw);
 }
 
 export const toolIcon = (d) => TOOL_ICON[d?.type] ?? "wrench";
@@ -280,6 +291,7 @@ export const toolIcon = (d) => TOOL_ICON[d?.type] ?? "wrench";
 // it did under a thin rule. Else (inside a subagent's card) a card of its own.
 export function tool(it, c, { flat = false } = {}) {
   const t = c.t;
+  const f = flavorPalette(t);
   const d = it.detail ?? { type: "generic", tool: it.name };
   if (d.type === "agent") return agentCard(it, d, c);
   const open = c.expanded.has(it.id);
@@ -287,7 +299,7 @@ export function tool(it, c, { flat = false } = {}) {
   const added = d.added ?? null, removed = d.removed ?? null;
   const head = h_flex().id(`tool-${it.id}`).h(flat ? 28 : 34).px(flat ? 4 : 10).gap(flat ? 6 : 8).items_center().cursor_pointer()
     .when(flat, (e) => e.rounded(6)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.toggle(it.id, cx))
-    .child(flat ? icon(open ? "chevron-down" : "chevron-right", 12).text_color(t.dim) : icon(TOOL_ICON[d.type] ?? "wrench", 13).text_color(t.dim))
+    .child(flat ? icon(open ? "chevron-down" : "chevron-right", 12).text_color(t.dim) : icon(TOOL_ICON[d.type] ?? "wrench", 13).text_color(f.tool(d.type)))
     .child(title)
     .when(d.type === "edit" && (added != null || removed != null), (e) => e.child(h_flex().flex_none().gap(6).font_family(c.mono).text_size(11.5)
       .child(div().text_color(t.ansi2).child(`+${added ?? 0}`)).child(div().text_color(t.ansi1).child(`−${removed ?? 0}`))))
@@ -319,6 +331,7 @@ export function tool(it, c, { flat = false } = {}) {
 
 function toolBody(it, d, c, flat = false) {
   const t = c.t;
+  const f = flavorPalette(t);
   const fullText = c.full.get(it.id);
   const out = fullText ?? it.output ?? "";
   const truncated = it.outputTruncated && fullText == null;
@@ -326,7 +339,7 @@ function toolBody(it, d, c, flat = false) {
   const parts = [];
   if (d.type === "bash") {
     parts.push(h_flex().gap(8).font_family(c.mono).text_size(12.5).line_height("19px")
-      .child(div().flex_none().text_color(t.dim).child("$")).child(div().flex_1().min_w(0).text_color(t.foreground).child(d.command ?? "")));
+      .child(div().flex_none().font_medium().text_color(f.tool("bash")).child("$")).child(div().flex_1().min_w(0).text_color(t.foreground).child(d.command ?? "")));
   }
   // Code Mode's REPL call: the script it handed over (its title is its description).
   if (d.type === "script" && d.code) parts.push(outputBox(`${it.id}-code`, asLines(d.code), c, { cap: MAX_LINES, color: t.foreground }));
@@ -365,13 +378,14 @@ export function findMark(el, t) {
 // one is closed until opened.
 function group(r, c) {
   const t = c.t;
+  const f = flavorPalette(t);
   const s = groupSummary(r.items);
   const open = c.groupOpen(r.id) ?? defaultOpen(r);
   const members = groupCards(r, open, c.children);
   const head = h_flex().id(`grp-${r.id}`).h(30).px(6).gap(7).items_center().rounded(8).cursor_pointer()
-    .text_size(12.5).text_color(t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
+    .text_size(12.5).text_color(s.running ? t.foreground : t.muted).hover((x) => x.bg(t.hover).text_color(t.foreground))
     .on_click((_e, cx) => c.toggle(r.id, cx))
-    .child(icon(open ? "chevron-down" : "chevron-right", 12).text_color(t.dim))
+    .child(icon(open ? "chevron-down" : "chevron-right", 12).text_color(s.running ? f.bullet : t.dim))
     .child(div().flex_none().max_w_full().truncate().child(s.text))
     .when(s.failed > 0, (e) => e.child(div().flex_none().text_color(t.ansi1).child(`· ${s.failed} failed`)))
     .when(s.declined > 0, (e) => e.child(div().flex_none().text_color(t.blocked).child(`· ${s.declined} declined`)))
@@ -443,13 +457,15 @@ function custom(it, c) {
 // produced (items with `parent` = this card), folded to "N steps" until opened.
 function agentCard(it, d, c) {
   const t = c.t;
+  const f = flavorPalette(t);
   const kids = (c.children?.get(it.id) ?? []).filter((k) => k.kind !== "assistant" || k.text?.trim());
   const open = c.expanded.has(`kids:${it.id}`);
   const live = open ? [] : cardLive(it, c.children);
+  const agentCol = f.tool("agent");
   const head = h_flex().id(`agent-${it.id}`).h(34).px(10).gap(8).items_center().cursor_pointer()
     .hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.toggle(`kids:${it.id}`, cx))
-    .child(icon("bot", 13).text_color(t.dim))
-    .child(div().flex_none().text_size(12.5).text_color(t.muted).child("Agent"))
+    .child(icon("bot", 13).text_color(agentCol))
+    .child(div().flex_none().text_size(12.5).font_medium().text_color(agentCol).child("Agent"))
     .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(d.description || it.title || it.name))
     .when(Boolean(d.agentType), (e) => e.child(chip(d.agentType, t.muted, t)))
     .child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.dim)
