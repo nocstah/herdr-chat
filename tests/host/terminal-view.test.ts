@@ -152,9 +152,25 @@ test("the view: the TUI's session as history, a message typed into the terminal,
     // A message typed in the terminal itself: shown as the person's (external), a run of its own.
     r.events.length = 0;
     const p3 = prompt("And log each one", a2.uuid);
-    r.write(S1, [p3, answer("m3", "Logged.", p3.uuid)]);
+    const a3 = answer("m3", "Logged.", p3.uuid);
+    r.write(S1, [p3, a3]);
     await until("the external message's run", () => r.events.some((e) => e.type === "run_settled"));
     assert.equal((r.events.find((e) => e.type === "user_message") as any).source, "external");
+
+    // A long message from the chat goes in as a paste, and Claude Code writes it in <pasted_content> tags: still its
+    // echo (not a second copy "from outside"), its text without the tags.
+    r.events.length = 0;
+    const spec = "Make it so:\n\n- retry three times\n- log each one";
+    assert.equal((await r.adapter.prompt({ id: "u-3", text: spec, images: [], mode: "steer", busy: false })).disposition, "started");
+    r.status("working");
+    await until("the pasted message's run", () => r.events.some((e) => e.type === "run_started"));
+    const pp = prompt(`\n\n<pasted_content id="f4fa">\n${spec}\n</pasted_content id="f4fa">\n`, a3.uuid);
+    r.write(S1, [pp, answer("mp", "On it.", pp.uuid)]);
+    await until("the pasted echo", () => r.events.some((e) => e.type === "user_message"));
+    const pasted = r.events.filter((e) => e.type === "user_message") as any[];
+    assert.deepEqual(pasted.map((m) => [m.text, m.source, m.clientId]), [[spec, undefined, "u-3"]]);
+    r.status("done");
+    await until("the pasted message's run settled", () => r.events.some((e) => e.type === "run_settled"));
 
     // A question on its screen: a send would answer it, so it's refused in words.
     r.status("blocked");
