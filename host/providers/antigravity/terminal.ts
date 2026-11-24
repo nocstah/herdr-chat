@@ -27,7 +27,7 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { sendAgyBang } from "./bang.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
@@ -309,6 +309,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     const app = typeof s?.app === "string" ? s.app : null;
     const state = s && (!app || AGENT_APPS.has(app)) && typeof s.state === "string" ? s.state : null;
     if (state === this.status) return;
+    const prev = this.status;
     this.status = state;
     if (!this.host) return;
     if (state === "working" || state === "blocked") {
@@ -326,6 +327,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.closeAsk();
       if (state === "working") this.watchWorkStatus();
     }
+    if (this.queued.length && (prev === "blocked" || state === "blocked")) this.publishQueue();
   }
 
   private setQuotaWarning(next: QuotaWarning | null): void {
@@ -1056,6 +1058,24 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   async clearQueue(): Promise<string[]> {
     this.clearQueued();
     return [];
+  }
+
+  canSendQueuedNow(): boolean {
+    return this.live && !this.disposed && !this.quitSaid && this.status !== "blocked" && this.queued.length > 0;
+  }
+
+  /** Press Antigravity's send-immediately shortcut (from its screen hint, else `alt+m`) to deliver queued inputs now. */
+  async sendQueuedNow(): Promise<boolean> {
+    if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
+    if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
+    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    if (!this.queued.length) return false;
+    const screen = await this.screenText();
+    const key = (screen ? readAgySendNowKey(screen) : null) ?? "alt+m";
+    this.log(`queue: send now via ${key}`);
+    const r = await this.hc(["keys", "--json", this.opts.terminal, key], 10_000);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc keys: exit ${r.code}`);
+    return true;
   }
 
   abort(): void {

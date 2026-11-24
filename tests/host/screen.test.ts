@@ -3,7 +3,7 @@
 // view's cards and answers (keys) against a fake hc.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { movesTo, promptKey, readPrompt } from "../../host/providers/claude/screen.ts";
+import { movesTo, promptKey, readClaudeSendNowKeys, readPrompt } from "../../host/providers/claude/screen.ts";
 
 const RULE = "─".repeat(78);
 const DASH = "╌".repeat(78);
@@ -132,4 +132,19 @@ test("the review of the answers, and a confirm menu's plain rows", () => {
 test("no dialog: a numbered list in an answer isn't one", () => {
   assert.equal(readPrompt(SCREENS.idle), null);
   assert.equal(readPrompt(""), null);
+});
+
+test("readClaudeSendNowKeys parses keyboard hints and ignores mouse-only hints", () => {
+  const screen = (hint: string) => [
+    "● Running tests…",
+    `  ⎿  Queued · ${hint}`,
+    RULE,
+    "❯ ",
+    RULE,
+  ].join("\n");
+  assert.deepEqual(readClaudeSendNowKeys(screen("ctrl+x ctrl+s send now")), ["ctrl+x", "ctrl+s"]);
+  assert.deepEqual(readClaudeSendNowKeys(screen("ctrl+enter send now")), ["ctrl+enter"]);
+  assert.deepEqual(readClaudeSendNowKeys(screen("meta+m send now")), ["alt+m"]);
+  assert.equal(readClaudeSendNowKeys(screen("click to send now")), null);
+  assert.equal(readClaudeSendNowKeys(SCREENS.idle), null);
 });

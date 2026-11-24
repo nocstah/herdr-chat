@@ -510,6 +510,7 @@ queue: {
   steeringIds?: (string | null)[]; followUpIds?: (string | null)[];  // the host's message id; null = not the host's (no ×, ⇄ or edit)
   steeringRemovable?: boolean[]; followUpRemovable?: boolean[];      // the host can take it back now (show ×, allow edit and ⇄)
   steeringFrom?: (string | null)[]; followUpFrom?: (string | null)[]; // as in v3.1
+  steeringSendNow?: boolean;                                         // true when the agent can deliver queued steering message(s) immediately
 };
 ```
 
@@ -532,6 +533,7 @@ Held follow-ups can always be taken back.
 | `queue_remove` | `message` (an id from `state.queue`) | `{}` | the row's ×. Errors: "That message is no longer queued", "<Agent> can't take back a message it already has…", "Too late: <Agent> already took that message." |
 | `queue_edit` | `message` | `{text, images: string[]}` | the row leaves the queue; the client puts `text` and the image paths in the composer. Sending again queues it anew |
 | `queue_move` | `message`, `to: "steer" \| "followUp"` | `{}` | the row's ⇄. A follow-up is sent as a steer now; a steer the agent gives back joins the follow-ups' tail. Already in that lane: nothing happens |
+| `queue_send_now` | `message?` (optional id from `state.queue`) | `{sent: boolean}` | the steering lane's "Send immediately" button: asks the agent to deliver queued steering message(s) now (Antigravity TUI's `alt+m` / custom send-immediately key, Claude Code TUI's `ctrl+x ctrl+s`, Claude Code RPC's `interrupt {send_now: true}` when `interrupt_send_now_v1` is advertised). `{sent: false}` when nothing is waiting |
 
 ## v3.3: sub-agent chats (no wire change)
 

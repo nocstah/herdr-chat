@@ -1,6 +1,7 @@
 {
   "steer": "enter",
   "followUp": "alt-enter",
+  "sendNow": "alt-m",
   "model": "ctrl-shift-m",
   "effort": "ctrl-shift-i",
   "cycleEffort": null,

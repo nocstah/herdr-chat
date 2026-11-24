@@ -251,6 +251,8 @@ test("steer removal (codex): a sent steer can't be taken back (no ×); a held fo
     await c.waitFor((x) => x.state.queue.steering.length === 1 && x.state.queue.followUp.length === 1, 3000, "both lanes");
     assert.deepEqual(c.state.queue.steeringRemovable, [false]);
     assert.deepEqual(c.state.queue.followUpRemovable, [true]);
+    assert.equal(c.state.queue.steeringSendNow, undefined);
+    await assert.rejects(c.req("queue_send_now"), /can't send queued messages immediately/);
     await assert.rejects(c.req("queue_remove", { message: c.state.queue.steeringIds[0] }), /can't take back/);
     await c.req("queue_remove", { message: c.state.queue.followUpIds[0] });
     await c.waitFor((x) => x.state.queue.followUp.length === 0, 2000, "follow-up removed");

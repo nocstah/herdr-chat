@@ -270,7 +270,7 @@ export function queueLabels(s) {
 // A report's row says who sent it.
 export function queueChips(v, s, t) {
   const q = s.queue ?? {};
-  const lane = (kind, texts, ids, removable, from, color, iconName, title) => {
+  const lane = (kind, texts, ids, removable, from, color, iconName, title, { sendNow = false } = {}) => {
     if (!texts?.length) return null;
     const rows = texts.map((x, i) => {
       const id = ids?.[i] ?? null;
@@ -292,12 +292,24 @@ export function queueChips(v, s, t) {
           .child(btn("move", kind === "steer" ? "Move to the follow-ups (after this run)" : "Steer with it now (next turn)", "move"))
           .child(btn("remove", "Remove from the queue", "remove")));
     });
+    const sending = Boolean(v.sendingNow);
+    const sendBtn = sendNow ? h_flex().id(`queued-send-now-${kind}`).flex_none().h(18).px(6).gap(4).items_center().rounded(5)
+      .bg(alpha(color, 0.16)).text_color(color).font_medium()
+      .when(sending, (e) => e.opacity(0.75))
+      .when(!sending, (e) => e.cursor_pointer().hover((st) => st.bg(alpha(color, 0.28)).text_color(t.foreground))
+        .tooltip(withKey("Send queued message immediately", "sendNow"))
+        .on_click((_e, cx) => { cx.stop_propagation(); v.control("queue:send-now", cx); }))
+      .child(sending ? spinner(10, color) : icon("arrow-up", 10.5))
+      .child(sending ? "Sending…" : "Send immediately") : null;
     return v_flex().w_full().rounded(10).border_1().border_color(alpha(color, 0.35)).bg(alpha(color, 0.07)).overflow_hidden()
-      .child(h_flex().h(22).px(10).gap(6).items_center().text_size(11).text_color(color)
-        .child(icon(iconName, 11)).child(div().child(title)).child(div().text_color(t.dim).child(texts.length > 1 ? `· ${texts.length}` : "")))
+      .child(h_flex().h(24).pl(10).pr(sendBtn ? 4 : 10).gap(6).items_center().text_size(11).text_color(color)
+        .child(icon(iconName, 11))
+        .child(div().min_w(0).truncate().child(title))
+        .when(texts.length > 1, (e) => e.child(div().flex_none().text_color(t.dim).child(`· ${texts.length}`)))
+        .when(Boolean(sendBtn), (e) => e.child(div().flex_1()).child(sendBtn)))
       .children(rows);
   };
-  const steer = lane("steer", q.steering, q.steeringIds, q.steeringRemovable, q.steeringFrom, t.ansi4, "corner-up-right", "Steer: next turn");
+  const steer = lane("steer", q.steering, q.steeringIds, q.steeringRemovable, q.steeringFrom, t.ansi4, "corner-up-right", "Steer: next turn", { sendNow: Boolean(q.steeringSendNow) });
   const follow = lane("followUp", q.followUp, q.followUpIds, q.followUpRemovable, q.followUpFrom, t.ansi3, "clock", "Follow-up: after this run");
   if (!steer && !follow) return null;
   return v_flex().w_full().gap(6).children([steer, follow].filter(Boolean));

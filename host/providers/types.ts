@@ -377,6 +377,17 @@ export interface ProviderAdapter {
   canRemoveQueued?(id: string): boolean;
   /** Takes the queued message back. Resolves false when the agent already took it. It emits the new `queue_changed`. */
   removeQueued?(id: string): Promise<boolean>;
+  /**
+   * Optional: the agent can flush/deliver queued steering message(s) immediately
+   * without waiting for the current turn to end. Without it, no "Send now" control shows.
+   */
+  canSendQueuedNow?(): boolean;
+  /**
+   * Ask the agent to deliver queued steering message(s) immediately.
+   * `id`: optional host message id when triggered for a specific entry.
+   * Resolves true if delivered, false if nothing was waiting.
+   */
+  sendQueuedNow?(id?: string): Promise<boolean>;
   /** Stops the run. Fire and forget: `run_settled` follows. */
   abort(): void;
   /** Optional: one background task's detail (`background` events' tasks), or null when it isn't known (any more). */

@@ -24,7 +24,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { claudeAtPrompt, movesTo, promptKey, readPrompt } from "./screen.ts";
+import { claudeAtPrompt, movesTo, promptKey, readClaudeSendNowKeys, readPrompt } from "./screen.ts";
 import { waitForPrompt } from "../prompt-wait.ts";
 import type { PromptWait } from "../prompt-wait.ts";
 import type { Row, ScreenPrompt } from "./screen.ts";
@@ -304,12 +304,14 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
     const app = typeof s?.app === "string" ? s.app : null;
     const state = s && (!app || AGENT_APPS.has(app)) && typeof s.state === "string" ? s.state : null;
     if (state === this.status) return;
+    const prev = this.status;
     this.status = state;
     if (!this.host) return;
     if (state === "working" || state === "blocked") this.runOn();
     else this.settle();
     if (state === "blocked") this.watchAsk();
     else this.closeAsk();
+    if (this.queue.waiting.length && (prev === "blocked" || state === "blocked")) this.publishQueue();
   }
 
   // ---------------------------------------------------------------- its dialogs
@@ -801,6 +803,24 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   async clearQueue(): Promise<string[]> {
     return []; // typed already: the TUI has it
+  }
+
+  canSendQueuedNow(): boolean {
+    return this.live && !this.disposed && !this.quitSaid && this.status !== "blocked" && this.queue.waiting.length > 0;
+  }
+
+  /** Press Claude Code's `chat:sendNow` chord (from its screen hint, else `ctrl+x ctrl+s`) to deliver queued inputs now. */
+  async sendQueuedNow(): Promise<boolean> {
+    if (!this.live) throw new AgentError("Claude Code's terminal has ended.", true);
+    if (!this.registry()) throw new Error("Claude Code isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
+    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    if (!this.queue.waiting.length) return false;
+    const screen = await this.screenText();
+    const keys = (screen ? readClaudeSendNowKeys(screen) : null) ?? ["ctrl+x", "ctrl+s"];
+    this.log(`queue: send now via ${keys.join(" ")}`);
+    const r = await this.hc(["keys", "--json", this.opts.terminal, ...keys], 10_000);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc keys: exit ${r.code}`);
+    return true;
   }
 
   /** A strip row opened: what it did so far (background.ts detail). */

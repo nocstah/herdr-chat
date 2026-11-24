@@ -302,3 +302,34 @@ export function claudeAtPrompt(screen: string): boolean {
   }
   return false;
 }
+
+const VALID_CLAUDE_KEY_RE = /^(?:(?:ctrl|alt|shift)\+)*(?:[a-z0-9]|enter|tab|esc|space|up|down|left|right|f(?:[1-9]|1[0-2]))$/;
+
+/**
+ * Read Claude Code's `chat:sendNow` chord from its queued-message hint, e.g.:
+ *   `Queued · ctrl+x ctrl+s send now` or `Queued · ctrl+enter send now`.
+ * Returns the sequence of `hc keys` names, or null when no keyboard hint is shown.
+ */
+export function readClaudeSendNowKeys(screen: string): string[] | null {
+  const lines = screenLines(screen);
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
+    const m = /\bQueued\s*·\s*([^·\n]{1,32}?)\s+send\s+now\b/i.exec(lines[i]!);
+    if (!m) continue;
+    const raw = m[1]!.trim();
+    if (!raw || /\bclick\s+to\b/i.test(raw)) continue;
+    const parts = raw
+      .toLowerCase()
+      .replace(/⌥\s*/g, "alt+")
+      .replace(/⌃\s*/g, "ctrl+")
+      .replace(/⇧\s*/g, "shift+")
+      .replace(/\b(?:opt|option|meta)\s*\+/g, "alt+")
+      .replace(/\bcontrol\s*\+/g, "ctrl+")
+      .replace(/\s*\+\s*/g, "+")
+      .replace(/↩/g, "enter")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((k) => k.replace(/(?:^|\+)return$/g, (x) => x.replace("return", "enter")).replace(/(?:^|\+)escape$/g, (x) => x.replace("escape", "esc")));
+    if (parts.length && parts.every((k) => VALID_CLAUDE_KEY_RE.test(k))) return parts;
+  }
+  return null;
+}

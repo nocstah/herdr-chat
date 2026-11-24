@@ -812,3 +812,38 @@ export function readAgyWorkingStatus(screen: string): string | null {
   const text = joinWrapped([first, ...lines.slice(start + 1, scanEnd + 1)]).replace(/\s+/g, " ").trim();
   return text || null;
 }
+
+const VALID_HC_KEY_RE = /^(?:(?:ctrl|alt|shift)\+)*(?:[a-z0-9]|enter|tab|esc|space|up|down|left|right|f(?:[1-9]|1[0-2]))$/;
+
+/** Normalize a key chord shown on a TUI screen (e.g. `alt+m`, `⌥m`, `Ctrl+M`, `opt+m`) into an `hc keys` name. */
+function normalizeHcKey(raw: string): string | null {
+  let s = raw.trim().toLowerCase();
+  if (!s) return null;
+  s = s
+    .replace(/⌥\s*/g, "alt+")
+    .replace(/⌃\s*/g, "ctrl+")
+    .replace(/⇧\s*/g, "shift+")
+    .replace(/\b(?:opt|option|meta)\s*\+/g, "alt+")
+    .replace(/\bcontrol\s*\+/g, "ctrl+")
+    .replace(/\s*\+\s*/g, "+")
+    .replace(/(?:^|\+)return$/g, (m) => m.replace("return", "enter"))
+    .replace(/↩/g, "enter")
+    .replace(/(?:^|\+)escape$/g, (m) => m.replace("escape", "esc"));
+  return VALID_HC_KEY_RE.test(s) ? s : null;
+}
+
+/**
+ * Read Antigravity CLI's queued-message immediate-send key from its screen hint, e.g.:
+ *   `(alt+m to send immediately)` or `(ctrl+m to send immediately)` or `(⌥m to send immediately)`.
+ * Returns the normalized `hc keys` name (e.g. `"alt+m"`), or null when no hint is shown.
+ */
+export function readAgySendNowKey(screen: string): string | null {
+  const lines = screenLines(screen);
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
+    const m = /\(([^()\n]{1,32}?)\s+to\s+send\s+immediately\)/i.exec(lines[i]!);
+    if (!m) continue;
+    const key = normalizeHcKey(m[1]!);
+    if (key) return key;
+  }
+  return null;
+}

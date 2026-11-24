@@ -18,6 +18,7 @@ fields; Esc stops the run anywhere.
 |---|---|---|
 | `steer` | ↩ (`enter`) | Sends the message. While the agent works, it **steers**: the message joins the blue "Steer: next turn" lane and reaches the agent at its next step. |
 | `followUp` | ⌥↩ (`alt-enter`) | Sends the message. While the agent works, it **queues a follow-up**: the message waits in the yellow "Follow-up: after this run" lane and is sent when the run ends, one per run. |
+| `sendNow` | ⌥M (`alt-m`) | Sends queued steering message(s) immediately when the agent supports it (same as the **Send immediately** button on the "Steer: next turn" lane). |
 | `model` | ⇧⌘M (`cmd-shift-m`) | Opens the model picker. Press it again to close the picker. |
 | `effort` | ⇧⌘T (`cmd-shift-t`) | Opens the thinking-level (effort) picker. |
 | `cycleEffort` | none | Switches to the next thinking level the model allows, wrapping around, and says it in the hint line ("Thinking: high"). It works only in the composer, and not while a menu is open. |
@@ -61,7 +62,9 @@ With nothing typed in the composer, a card the agent waits on takes the keys:
 ## The queue
 
 The lanes above the composer hold what you sent while the agent works, oldest
-first. On each row you can:
+first. When the agent supports sending queued steers right away (Antigravity and
+Claude Code), the "Steer: next turn" header shows a **Send immediately** button
+(`sendNow`, default ⌥M / Alt+M). On each removable row you can:
 - click it: the text (and its images) goes back into the composer and leaves
   the queue. Sending puts it back: a follow-up back with the follow-ups, a
   steer as a steer;

@@ -118,6 +118,8 @@ export type Queue = {
   steeringIds?: (string | null)[]; followUpIds?: (string | null)[];
   steeringRemovable?: boolean[]; followUpRemovable?: boolean[];
   steeringFrom?: (string | null)[]; followUpFrom?: (string | null)[];
+  /** True when the agent can deliver queued steering message(s) immediately. */
+  steeringSendNow?: boolean;
 };
 
 export type Patch = { state: Partial<ChatState>; upsert: WireItem[]; remove: string[] };
@@ -822,9 +824,11 @@ export class Chat {
     const steeringIds = steering.map((_, i) => ev.steeringIds?.[i] ?? null);
     const followUpIds = [...ev.followUp.map((_, i) => ev.followUpIds?.[i] ?? null), ...this.held.map((h) => h.id)];
     const fromOf = (id: string | null): string | null => (id && (this.unconfirmed.get(id)?.from ?? this.held.find((h) => h.id === id)?.from)) || null;
+    const steeringSendNow = steering.length > 0 && this.adapter.alive && Boolean(this.adapter.sendQueuedNow) && (this.adapter.canSendQueuedNow?.() ?? true);
     const q: Queue = {
       steering, followUp, steeringIds, followUpIds,
       steeringRemovable: steeringIds.map((id) => this.removable(id)), followUpRemovable: followUpIds.map((id) => this.removable(id)),
+      ...(steeringSendNow ? { steeringSendNow: true } : {}),
     };
     const steeringFrom = steeringIds.map(fromOf);
     const followUpFrom = followUpIds.map(fromOf);
@@ -1341,6 +1345,17 @@ export class Chat {
     return {};
   }
 
+  /** queue_send_now: ask the agent to deliver queued steering message(s) immediately instead of waiting for the turn to end. */
+  async queueSendNow(id?: string): Promise<{ sent: boolean }> {
+    if (!this.agentQueue.steering.length) return { sent: false };
+    if (!this.adapter.alive) throw new Error(`${this.agent} is not running.`);
+    if (!this.adapter.sendQueuedNow || !(this.adapter.canSendQueuedNow?.() ?? true)) {
+      throw new Error(`${this.agent} can't send queued messages immediately from here.`);
+    }
+    const sent = await this.adapter.sendQueuedNow(id);
+    return { sent };
+  }
+
   dialogAnswer(args: { dialog?: string; value?: unknown; confirmed?: unknown; cancelled?: unknown; choice?: unknown; message?: unknown; answers?: unknown }): Record<string, never> {
     const id = String(args.dialog ?? "");
     const d = this.dialogs.find((x) => x.id === id);
@@ -1747,6 +1762,8 @@ export class Chat {
         return this.queueEdit(String(a.message ?? ""));
       case "queue_move":
         return this.queueMove(String(a.message ?? ""), String(a.to ?? ""));
+      case "queue_send_now":
+        return this.queueSendNow(typeof a.message === "string" && a.message ? a.message : undefined);
       case "dialog_answer":
         return this.dialogAnswer(a);
       case "ack_editor_text":

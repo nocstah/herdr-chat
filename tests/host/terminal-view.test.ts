@@ -347,8 +347,20 @@ test("the view: a message typed while the agent works waits in the steering lane
     // The run settles: nothing waits in the lane.
     r.write(S1, [op("enqueue", "one more")]);
     await until("one more in the lane", () => lane()?.steering.length === 1);
+    assert.equal(r.adapter.canSendQueuedNow(), true);
+    // Send now: falls back to `ctrl+x ctrl+s` without a screen hint, or uses the screen's chord when shown.
+    assert.equal(await r.adapter.sendQueuedNow(), true);
+    assert.deepEqual(r.calls().at(-1), ["keys", "--json", "t9", "ctrl+x", "ctrl+s"]);
+    writeFileSync(join(r.d, "screen.txt"), "● Running…\n  ⎿  Queued · ctrl+enter send now\n────\n❯ \n");
+    assert.equal(await r.adapter.sendQueuedNow(), true);
+    assert.deepEqual(r.calls().at(-1), ["keys", "--json", "t9", "ctrl+enter"]);
+    // While blocked on a dialog, send-now is unavailable.
+    r.status("blocked");
+    await until("blocked hides send-now", () => !r.adapter.canSendQueuedNow());
+    await assert.rejects(r.adapter.sendQueuedNow(), /asking something/);
     r.status("idle");
     await until("the lane empties as the run settles", () => r.events.some((e) => e.type === "run_settled") && lane()?.steering.length === 0);
+    assert.equal(await r.adapter.sendQueuedNow(), false);
   } finally {
     r.done();
   }

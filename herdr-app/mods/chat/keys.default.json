@@ -1,6 +1,7 @@
 {
   "steer": "enter",
   "followUp": "alt-enter",
+  "sendNow": "alt-m",
   "model": "cmd-shift-m",
   "effort": "cmd-shift-t",
   "cycleEffort": null,

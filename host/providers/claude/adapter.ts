@@ -80,6 +80,8 @@ export class ClaudeAdapter implements ProviderAdapter {
   private settleTimer: NodeJS.Timeout | null = null;
   private interruptTimer: NodeJS.Timeout | null = null;
   private compactWaiter: { resolve: () => void; reject: (e: Error) => void } | null = null;
+  /** True once `system/init` advertises `interrupt_send_now_v1` (safe to call `interrupt` with `send_now: true`). */
+  private supportsSendNow = false;
 
   constructor(opts: AdapterOptions) {
     // `-- --model haiku` on the host's command line: the starting model, which /model can change later.
@@ -117,6 +119,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     this.host = host;
     this.mapper = new ClaudeMapper();
     this.mapper.permissionMode = this.permissionMode;
+    this.supportsSendNow = false;
     let id: string;
     let resume = false;
     // A fork not on disk yet starts as that fork again (a /reload before its first prompt).
@@ -170,6 +173,7 @@ export class ClaudeAdapter implements ProviderAdapter {
     this.startWatchdog();
     // MCP servers can hold up initialize; 30 s as T3 does.
     const init: Rec = await p.control({ subtype: "initialize" }, 30_000);
+    if (Array.isArray(init.capabilities) && init.capabilities.includes("interrupt_send_now_v1")) this.supportsSendNow = true;
     this.models = Array.isArray(init.models) ? init.models : [];
     this.commandList = Array.isArray(init.commands) ? init.commands : [];
     const version = typeof init.claude_code_version === "string" ? init.claude_code_version : null;
@@ -324,6 +328,10 @@ export class ClaudeAdapter implements ProviderAdapter {
   private onSystem(rec: Rec): void {
     switch (rec.subtype) {
       case "init": {
+        if (Array.isArray(rec.capabilities) && rec.capabilities.includes("interrupt_send_now_v1") && !this.supportsSendNow) {
+          this.supportsSendNow = true;
+          if (this.hasQueued()) this.emit(this.mapper.queueEvent());
+        }
         if (typeof rec.model === "string" && rec.model !== this.mapper.initModel) {
           this.mapper.initModel = rec.model;
           this.emitModel();
@@ -524,6 +532,17 @@ export class ClaudeAdapter implements ProviderAdapter {
     s.cancelled = true;
     this.emit(this.mapper.queueEvent());
     return true;
+  }
+
+  canSendQueuedNow(): boolean {
+    return this.supportsSendNow && [...this.mapper.sent.values()].some((s) => s.queued && !s.echoed && !s.cancelled && s.priority !== "later");
+  }
+
+  /** `interrupt` with `send_now: true`: delivers waiting steering message(s) now without treating it as a Stop. */
+  async sendQueuedNow(id?: string): Promise<boolean> {
+    if (!this.canSendQueuedNow()) return false;
+    const r: Rec = await this.require().control({ subtype: "interrupt", send_now: true, ...(id ? { message_uuid: id } : {}) }, 5_000);
+    return r?.send_now !== "nothing_waiting";
   }
 
   abort(): void {

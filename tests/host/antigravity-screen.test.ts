@@ -1,7 +1,7 @@
 // Antigravity CLI's TUI screen reader (host/providers/antigravity/screen.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
+import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
 
 const IDLE_AUTO = `
 ────────────────────────────────────────────────────────────────────────
@@ -461,4 +461,22 @@ test("agyInShellMode detects active `!` bash mode and rejects normal prompt, dra
   assert.equal(agyInShellMode(normalDraft), false);
   assert.equal(agyInShellMode(MODEL_OVERLAY), false);
   assert.equal(agyInShellMode(EDIT_DIALOG), false);
+});
+
+test("readAgySendNowKey reads default and custom immediate-send hints from the queued-messages box", () => {
+  const withHint = (hint: string) => [
+    "⠋ Running tests...",
+    `Queued (1) ${hint}`,
+    "  fix the lint error",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.equal(readAgySendNowKey(withHint("(alt+m to send immediately)")), "alt+m");
+  assert.equal(readAgySendNowKey(withHint("(ctrl+m to send immediately)")), "ctrl+m");
+  assert.equal(readAgySendNowKey(withHint("(⌥m to send immediately)")), "alt+m");
+  assert.equal(readAgySendNowKey(withHint("(Ctrl+Enter to send immediately)")), "ctrl+enter");
+  assert.equal(readAgySendNowKey(withHint("(not a valid key to send immediately)")), null);
+  assert.equal(readAgySendNowKey(IDLE_AUTO), null);
 });

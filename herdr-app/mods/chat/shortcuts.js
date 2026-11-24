@@ -18,6 +18,7 @@ export const DEFAULTS_FILE = MAC ? "keys.default.json" : "keys.default.linux.jso
 export const SHORTCUTS = {
   steer: "Send; while the agent works, steer it (next turn)",
   followUp: "Send; while the agent works, queue a follow-up (after this run)",
+  sendNow: "Send queued steering message(s) immediately",
   model: "Choose the model",
   effort: "Choose the thinking level (effort)",
   cycleEffort: "Next thinking level (effort)",

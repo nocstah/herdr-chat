@@ -1378,6 +1378,7 @@ export default class HerdrChat extends View {
     switch (a) {
       case "steer": return this.send(cx);
       case "followUp": return this.send(cx, "followUp");
+      case "sendNow": return this.queueRow("send-now", null, cx);
       case "model": return toggle("model", () => this.openModelPicker(cx));
       case "effort":
         if (!this.hasThinking()) return this.flash(`${this.providerName()} has no thinking levels for this model`, cx);
@@ -1455,8 +1456,32 @@ export default class HerdrChat extends View {
   }
 
   // A queued row (chrome.js queueChips): × removes it, ⇄ moves it to the other
-  // lane, a click takes it back into the composer (sending re-queues it).
+  // lane, a click takes it back into the composer (sending re-queues it), and
+  // Send immediately flushes queued steers when the agent supports it.
   queueRow(op, id, cx) {
+    if (op === "send-now") {
+      if (this.sendingNow) return;
+      const q = /** @type {{steering?: string[], steeringSendNow?: boolean}} */ (this.store.state.queue);
+      if (!q?.steering?.length) return this.flash("No queued message to send immediately", cx);
+      if (!q?.steeringSendNow) return this.flash(`${this.providerName()} can't send queued messages immediately from here`, cx);
+      this.sendingNow = true;
+      this.debug.mark();
+      cx.notify();
+      cx.spawn(async (cx) => {
+        try {
+          const d = await this.req("queue_send_now", id ? { message: id } : {}, cx);
+          this.flash(d?.sent === false ? "Already delivering" : "Sent immediately", cx);
+        } catch (e) {
+          const err = message(e);
+          this.flash(/Unknown op/.test(err) ? "Restart the chat to use Send immediately" : err, cx);
+        } finally {
+          this.sendingNow = false;
+          this.debug.mark();
+          cx.notify();
+        }
+      });
+      return;
+    }
     const q = /** @type {{steeringIds?: (string | null)[]}} */ (this.store.state.queue);
     const lane = q?.steeringIds?.includes(id) ? "steer" : "followUp";
     if (op === "remove") return this.fire("queue_remove", { message: id }, cx);
