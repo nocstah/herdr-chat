@@ -73,7 +73,9 @@ let VIEWS = 0;
 
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
 // The terminal view: commands whose result shows in the chat (its records have it); any other opens a screen in the TUI.
-const VIEW_IN_PLACE = new Set(["compact", "clear", "cost", "context", "usage", "init", "review", "memory", "export", "new", "plan", "goal", "grill-me", "learn", "boost", "btw"]);
+// Not /usage or /cost (its alias): Claude Code's opens its Settings screen on the Usage tab and writes nothing to the
+// transcript, and Codex's /usage shows in the terminal only.
+const VIEW_IN_PLACE = new Set(["compact", "clear", "context", "init", "review", "memory", "export", "new", "plan", "goal", "grill-me", "learn", "boost", "btw"]);
 
 // A model provider's name for the model picker's scope tabs: its id with the dashes
 // out. The agent names its providers (two Claude Code logins are two providers, so an
