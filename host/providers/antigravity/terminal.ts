@@ -206,8 +206,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private running = false;
   private settling = false;
   private sent: { id: string; text: string; at: number }[] = [];
-  /** Messages typed into Antigravity's TUI while it works, shown in the chat's steering lane until delivered or settled. */
-  private queued: { id: string; text: string; raw: string }[] = [];
+  /** Messages held in the chat's steering lane while Antigravity works — editable/removable until sent now or drained at turn end. */
+  private queued: { id: string; text: string; raw: string; sendText: string }[] = [];
+  private drainingQueue = false;
   private quitSaid = false;
   private binding = false;
   private usageNow: { contextTokens: number | null; contextWindow: number | null } = { contextTokens: null, contextWindow: null };
@@ -483,7 +484,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.log(why);
     this.setQuotaWarning(null);
     this.stopWorkStatus();
-    this.settle();
+    this.settle(true);
     this.clearQueued();
     this.clearSwarm();
     this.emit({ type: "notice", level: "warning", source: "host", text: "Antigravity's terminal has ended." });
@@ -511,9 +512,37 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     } finally {
       this.settling = false;
     }
-    this.clearQueued();
     this.running = false;
+    if (wasAborted && this.queued.length) {
+      const restored = this.queued.map((q) => q.raw);
+      this.clearQueued();
+      this.emit({ type: "editor_text", text: restored.join("\n\n") });
+    }
     this.emit({ type: "run_settled", aborted: wasAborted });
+    if (!wasAborted && this.queued.length && this.live && !this.disposed && this.status !== "blocked") {
+      void this.drainQueued();
+    }
+  }
+
+  /** Deliver the next held steering message after a run settles naturally. */
+  private async drainQueued(): Promise<void> {
+    if (this.drainingQueue || this.running || !this.queued.length || !this.live || this.disposed || this.status === "blocked") return;
+    if (!this.agyRuns()) return;
+    this.drainingQueue = true;
+    const next = this.queued.shift()!;
+    this.publishQueue();
+    const sent = { id: next.id, text: next.raw, at: Date.now() };
+    this.sent.push(sent);
+    try {
+      const r = await this.hc(["send", "--json", this.opts.terminal, next.sendText], 70_000);
+      if (r.code !== 0) {
+        this.sent = this.sent.filter((x) => x !== sent);
+        this.emit({ type: "editor_text", text: next.raw });
+        this.emit({ type: "notice", level: "error", source: "host", text: `Couldn't send the queued message: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}` });
+      }
+    } finally {
+      this.drainingQueue = false;
+    }
   }
 
   // ---------------------------------------------------------------- the conversation
@@ -1190,47 +1219,75 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (p.images.length && !this.opts.sentDir) throw new Error(NO_IMAGES);
     const files = p.images.length ? saveImages(this.opts.sentDir!, p.images) : [];
     const text = files.length ? withImageLines(p.text, files) : p.text;
+    const display = p.text.trim() || (p.images.length === 1 ? "[1 image]" : `[${p.images.length} images]`);
+    // Hold steering messages locally while Antigravity is working so they stay cleanly editable/removable
+    // in the chat UI and can be flushed on demand via Send immediately or drained when the turn settles.
+    if (p.busy && !command) {
+      this.queued.push({ id: p.id, text: display, raw: p.text, sendText: text });
+      this.publishQueue();
+      return { disposition: "queued" };
+    }
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
-    const display = p.text.trim() || (p.images.length === 1 ? "[1 image]" : `[${p.images.length} images]`);
-    const queuedEntry = p.busy && !command ? { id: p.id, text: display, raw: p.text } : null;
-    if (queuedEntry) {
-      this.queued.push(queuedEntry);
-      this.publishQueue();
-    }
     const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
-      if (queuedEntry) {
-        this.queued = this.queued.filter((q) => q.id !== queuedEntry.id);
-        this.publishQueue();
-      }
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
     }
     if (command) return { disposition: "handled" };
-    return { disposition: p.busy ? "queued" : "started" };
+    return { disposition: "started" };
   }
 
   async clearQueue(): Promise<string[]> {
+    const restored = this.queued.map((q) => q.raw);
     this.clearQueued();
-    return [];
+    return restored;
+  }
+
+  canRemoveQueued(id: string): boolean {
+    return this.queued.some((q) => q.id === id);
+  }
+
+  async removeQueued(id: string): Promise<boolean> {
+    const idx = this.queued.findIndex((q) => q.id === id);
+    if (idx < 0) return false;
+    this.queued.splice(idx, 1);
+    this.publishQueue();
+    return true;
   }
 
   canSendQueuedNow(): boolean {
     return this.live && !this.disposed && !this.quitSaid && this.status !== "blocked" && this.queued.length > 0;
   }
 
-  /** Press Antigravity's send-immediately shortcut (from its screen hint, else `alt+m`) to deliver queued inputs now. */
-  async sendQueuedNow(): Promise<boolean> {
+  /** Flush held steering message(s) into Antigravity now and press its send-immediately shortcut (default `alt+m`). */
+  async sendQueuedNow(id?: string): Promise<boolean> {
     if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
     if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
     if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
-    if (!this.queued.length) return false;
-    const screen = await this.screenText();
-    const key = (screen ? readAgySendNowKey(screen) : null) ?? "alt+m";
-    this.log(`queue: send now via ${key}`);
-    const r = await this.hc(["keys", "--json", this.opts.terminal, key], 10_000);
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `hc keys: exit ${r.code}`);
+    const batch = id ? this.queued.filter((q) => q.id === id) : [...this.queued];
+    if (!batch.length) return false;
+    const batchIds = new Set(batch.map((q) => q.id));
+    this.queued = this.queued.filter((q) => !batchIds.has(q.id));
+    this.publishQueue();
+    const sentEntries = batch.map((q) => ({ id: q.id, text: q.raw, at: Date.now() }));
+    this.sent.push(...sentEntries);
+    const payload = batch.map((q) => q.sendText).join("\n");
+    const sr = await this.hc(["send", "--json", this.opts.terminal, payload], 70_000);
+    if (sr.code !== 0) {
+      const sentSet = new Set(sentEntries);
+      this.sent = this.sent.filter((x) => !sentSet.has(x));
+      this.queued = [...batch, ...this.queued];
+      this.publishQueue();
+      throw new Error(`Couldn't type into the terminal: ${sendError(sr.stdout || sr.stderr) || `hc exit ${sr.code}`}`);
+    }
+    if (this.status === "working") {
+      const screen = await this.screenText();
+      const key = (screen ? readAgySendNowKey(screen) : null) ?? "alt+m";
+      this.log(`queue: send now via ${key}`);
+      const kr = await this.hc(["keys", "--json", this.opts.terminal, key], 10_000);
+      if (kr.code !== 0) throw new Error((kr.stderr || kr.stdout).trim() || `hc keys: exit ${kr.code}`);
+    }
     return true;
   }
 

@@ -774,7 +774,7 @@ test("Antigravity hydrates truncated compact transcript records from sibling tra
   }
 });
 
-test("Chat queue_send_now exposes steeringSendNow on Antigravity and presses the screen's immediate-send key (default alt+m)", async () => {
+test("Chat queue_edit and queue_send_now on Antigravity hold steers editably, clear immediately on Send immediately, and drain on settle", async () => {
   const r = rig();
   try {
     r.write(A, [
@@ -799,36 +799,61 @@ test("Chat queue_send_now exposes steeringSendNow on Antigravity and presses the
     // Nothing queued yet -> no-op `{ sent: false }`.
     assert.deepEqual(await chat.op("queue_send_now", {}), { sent: false });
 
-    // Queue a steering message while working -> `steeringSendNow: true`.
+    // Queue a steering message while working -> held locally so it is editable AND sendable immediately.
     await chat.op("send", { text: "Stop and fix tests first" });
-    await until("steering queued with steeringSendNow", () => chat.state.queue.steering[0] === "Stop and fix tests first" && chat.state.queue.steeringSendNow === true);
+    await until(
+      "steering queued with removable + steeringSendNow",
+      () =>
+        chat.state.queue.steering[0] === "Stop and fix tests first" &&
+        chat.state.queue.steeringRemovable?.[0] === true &&
+        chat.state.queue.steeringSendNow === true,
+    );
+    assert.equal(r.calls().filter((c) => c[0] === "send").length, 0, "held locally until sent now or turn ends");
 
-    // Default fallback key when screen shows no hint: `alt+m`.
+    // Edit pulls the queued steer cleanly back out of the lane with its exact text.
+    const editId = chat.state.queue.steeringIds![0]!;
+    const edited = (await chat.op("queue_edit", { message: editId })) as { text: string; images: string[] };
+    assert.equal(edited.text, "Stop and fix tests first");
+    assert.equal(chat.state.queue.steering.length, 0);
+
+    // Re-queue after editing and send immediately with default `alt+m`: clears box immediately, calls send then keys.
+    await chat.op("send", { text: "Stop and fix lint first" });
+    await until("re-queued steer", () => chat.state.queue.steering[0] === "Stop and fix lint first");
     assert.deepEqual(await chat.op("queue_send_now", {}), { sent: true });
-    assert.deepEqual(r.calls().at(-1), ["keys", "--json", "t5", "alt+m"]);
+    assert.equal(chat.state.queue.steering.length, 0, "steer box clears immediately after Send immediately");
+    assert.equal(chat.state.queue.steeringSendNow, undefined);
+    const afterDefault = r.calls();
+    assert.deepEqual(afterDefault.at(-2), ["send", "--json", "t5", "Stop and fix lint first"]);
+    assert.deepEqual(afterDefault.at(-1), ["keys", "--json", "t5", "alt+m"]);
 
     // Custom key shown on Antigravity's screen: presses that exact key (`ctrl+m`).
-    r.screen("⠋ Building...\nQueued (1) (ctrl+m to send immediately)\n  Stop and fix tests first\n────────────────────────────────────\n>\n────────────────────────────────────\nesc to cancel        auto · Gemini 4 Neon · xhigh");
+    await chat.op("send", { text: "Also update docs" });
+    await until("queued second steer", () => chat.state.queue.steering[0] === "Also update docs");
+    r.screen("⠋ Building...\nQueued (1) (ctrl+m to send immediately)\n  Also update docs\n────────────────────────────────────\n>\n────────────────────────────────────\nesc to cancel        auto · Gemini 4 Neon · xhigh");
     assert.deepEqual(await chat.op("queue_send_now", {}), { sent: true });
-    assert.deepEqual(r.calls().at(-1), ["keys", "--json", "t5", "ctrl+m"]);
+    assert.equal(chat.state.queue.steering.length, 0);
+    const afterCustom = r.calls();
+    assert.deepEqual(afterCustom.at(-2), ["send", "--json", "t5", "Also update docs"]);
+    assert.deepEqual(afterCustom.at(-1), ["keys", "--json", "t5", "ctrl+m"]);
 
-    // While blocked on a dialog, steeringSendNow turns off and queue_send_now refuses.
+    // While blocked on a dialog, steeringSendNow turns off and queue_send_now refuses, while message stays safely queued.
+    await chat.op("send", { text: "After approval run e2e" });
+    await until("queued third steer", () => chat.state.queue.steering[0] === "After approval run e2e");
     r.screen(EDIT_APPROVAL);
     r.status("blocked");
     await until("blocked clears steeringSendNow", () => !chat.state.queue.steeringSendNow);
     await assert.rejects(chat.op("queue_send_now", {}), /can't send queued messages immediately/);
 
-    // Returning to working restores steeringSendNow until delivered.
+    // Returning to working restores steeringSendNow; settling naturally drains the held steer into `hc send`.
     r.screen("⠋ Building...\n────────────────────────────────────\n>\n────────────────────────────────────\nesc to cancel        auto · Gemini 4 Neon · xhigh");
     r.status("working");
     await until("working restores steeringSendNow", () => chat.state.queue.steeringSendNow === true);
 
-    // Once delivered, queue empties and queue_send_now returns `{ sent: false }`.
-    r.write(A, [
-      { step_index: 1, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nStop and fix tests first\n</USER_REQUEST>" },
-    ]);
-    await until("queue drained after delivery", () => chat.state.queue.steering.length === 0);
-    assert.equal(chat.state.queue.steeringSendNow, undefined);
+    r.screen(IDLE_SCREEN);
+    r.status("done");
+    await until("queued steer drained on turn settle", () =>
+      chat.state.queue.steering.length === 0 && r.calls().some((c) => c[0] === "send" && c[3] === "After approval run e2e"),
+    );
     assert.deepEqual(await chat.op("queue_send_now", {}), { sent: false });
 
     await chat.shutdown();

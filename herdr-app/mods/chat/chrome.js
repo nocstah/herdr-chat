@@ -285,6 +285,13 @@ export function queueChips(v, s, t) {
         .hover((st) => st.text_color(t.foreground).bg(t.hover)).tooltip(tip)
         .on_click((_e, cx) => { cx.stop_propagation(); v.control(`queue:${what}:${id}`, cx); })
         .child(icon(name === "move" ? "arrow-left-right" : "x", 11.5));
+      const editBtn = can ? h_flex().id(`queued-edit-${kind}-${i}`).flex_none().h(20).px(6).gap(4).items_center().rounded(5).cursor_pointer()
+        .bg(alpha(color, 0.14)).text_size(11).font_medium().text_color(color)
+        .hover((st) => st.bg(alpha(color, 0.24)).text_color(t.foreground))
+        .tooltip("Put back in the composer to edit")
+        .on_click((_e, cx) => { cx.stop_propagation(); v.control(`queue:edit:${id}`, cx); })
+        .child(icon("pencil", 10))
+        .child("Edit") : null;
       return h_flex().id(`queued-${kind}-${i}`).min_h(26).pl(10).pr(4).gap(6).items_center().text_size(12)
         .when(i > 0, (e) => e.border_t_1().border_color(alpha(color, 0.18)))
         .when(can, (e) => e.cursor_pointer().hover((st) => st.bg(alpha(color, 0.1))).tooltip("Click to edit it in the composer")
@@ -292,6 +299,7 @@ export function queueChips(v, s, t) {
         .when(Boolean(who), (e) => e.child(div().flex_none().text_color(t.dim).child(`Report from ${who}`)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(text))
         .when(can, (e) => e
+          .child(editBtn)
           .child(btn("move", kind === "steer" ? "Move to the follow-ups (after this run)" : "Steer with it now (next turn)", "move"))
           .child(btn("remove", "Remove from the queue", "remove")));
     });
