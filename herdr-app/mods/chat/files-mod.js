@@ -154,3 +154,26 @@ export function revealFolderInFilesPanel(o, api) {
   api.run("layout.show", { id: "panel" });
   return { how: modName ?? "files" };
 }
+
+/**
+ * A page a click opens in a browser rather than a viewer: what another mod shares for it in `my-files.open-with`
+ * ({ <mod>: { name, command, types, clicks } }, Inapse Spaces' "this space's browser"), for a file of this computer
+ * whose extension is in that entry's `clicks`. A link to a line (`page.html:42`) is about its source: none. The
+ * command gets the file's path last. `{path, line, machine}` → {name, command} or null.
+ */
+export function pageOpener(o, api) {
+  if (!o || o.machine || (o.line ?? 0) > 0) return null;
+  const base = String(o.path ?? "").split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  if (!ext) return null;
+  const all = api.shared("my-files.open-with");
+  if (!all || typeof all !== "object" || Array.isArray(all)) return null;
+  for (const entry of Object.values(all)) {
+    const command = Array.isArray(entry?.command) ? entry.command : [];
+    const clicks = Array.isArray(entry?.clicks) ? entry.clicks.map((c) => String(c).toLowerCase()) : [];
+    if (command.length && command.every((p) => typeof p === "string" && p) && clicks.includes(ext))
+      return { name: typeof entry.name === "string" && entry.name ? entry.name : "the browser", command };
+  }
+  return null;
+}

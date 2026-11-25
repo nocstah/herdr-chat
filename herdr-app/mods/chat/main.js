@@ -2705,10 +2705,11 @@ export default class HerdrChat extends View {
         }
         const r = await openFile({ path: abs, line, anchor, cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine });
         this.lastOpen.how = r.how;
+        if (r.refused) this.flash(`Not in the browser: ${r.refused}`, cx);
         if (r.terminal) {
           this.editorTerm = { address: r.terminal, at: Date.now(), seen: false };
         }
-        if (this.peekMode && (r.how === "my-files" || r.how === "better-files")) {
+        if (this.peekMode && (r.how === "browser" || r.how === "my-files" || r.how === "better-files")) {
           this.closePeek();
         }
       } catch (e) {

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { findFilesMod, hasFilesPanel, openInFilesMod, revealFolderInFilesPanel, rootFor } from "../../herdr-app/mods/chat/files-mod.js";
+import { findFilesMod, hasFilesPanel, openInFilesMod, pageOpener, revealFolderInFilesPanel, rootFor } from "../../herdr-app/mods/chat/files-mod.js";
 
 function makeApi({
   spaces = [{ id: "s1", active: true, tabs: [{ id: "t1" }] }],
@@ -167,4 +167,18 @@ test("revealFolderInFilesPanel opens the Files panel for folders inside cwd and 
   const r2 = revealFolderInFilesPanel({ path: "/etc", cwd: "/home/noc/code/omarelay", machine: null }, api2);
   assert.equal(r2, null);
   assert.equal(runs2.length, 0);
+});
+
+test("pageOpener: a page of this computer goes to the opener another mod shares for clicks on its type, not a line of its source", () => {
+  const browser = { name: "this space's browser", command: ["/usr/bin/python3", "/o/scripts/ovis.py", "workspace-browsers", "app-browse"], types: ["html", "pdf"], clicks: ["html", "htm"] };
+  const { api } = makeApi({ shared: { "my-files.open-with": { other: { name: "x", command: ["x"], types: ["md"] }, "inapse-spaces": browser } } });
+  assert.deepEqual(pageOpener({ path: "/tmp/a/Report.HTML", line: null, machine: null }, api), { name: "this space's browser", command: browser.command });
+  // a type it opens from a menu only, a line, another machine's file, no extension: the viewer as before
+  assert.equal(pageOpener({ path: "/tmp/a/doc.pdf", line: null, machine: null }, api), null);
+  assert.equal(pageOpener({ path: "/tmp/a/page.html", line: 42, machine: null }, api), null);
+  assert.equal(pageOpener({ path: "/srv/page.html", line: null, machine: "box" }, api), null);
+  assert.equal(pageOpener({ path: "/tmp/a/html", line: null, machine: null }, api), null);
+  // nothing shared, or an entry without a whole command: none
+  assert.equal(pageOpener({ path: "/tmp/a/page.html", machine: null }, makeApi().api), null);
+  assert.equal(pageOpener({ path: "/tmp/a/page.html", machine: null }, makeApi({ shared: { "my-files.open-with": { b: { name: "b", command: ["x", ""], clicks: ["html"] } } } }).api), null);
 });
