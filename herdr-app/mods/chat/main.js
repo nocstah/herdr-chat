@@ -30,6 +30,8 @@ import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup, ScrollHandle } from "gpui-base";
 import { agents, appHome, closeOverlay, focused, hc, home, layout, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
+import { HANDOFF_MS, SETTLE_MS, copiedText, ctrlCCommand, messageMenuItems, swallowsStop } from "./selcopy.js";
+import { MessageMenu } from "./msgmenu.js";
 
 // What each chat pane shows, for the agents list (mods/chat-agents/chat-focus.js): pane → agent's terminal.
 const SHOWS = "herdr-chat.panes";
@@ -91,6 +93,11 @@ const modelTab = (p) => p.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCa
 export default class HerdrChat extends View {
   init(_props, cx) {
     const p = props() ?? {};
+    if (p.messageMenu) {
+      // A message's right-click menu, opened by a chat as a popup (msgmenu.js).
+      this.messageMenuView = new MessageMenu(p.messageMenu);
+      return;
+    }
     if (p.viewer) {
       // An enlarged image or diagram, opened by a chat as an overlay (viewer.js: zoom and pan).
       this.viewer = new Viewer(p.viewer, cx);
@@ -193,7 +200,9 @@ export default class HerdrChat extends View {
       // req logs a failure. An older host has no detach_image / detach_file: its chips aren't the chat's copies.
       onRemoveChip: (ch, cx) => this.handleRemoveChip(ch, cx),
       skills: () => this.commandList().filter((c) => c.source === "skill").map((c) => ({ command: c.name, name: c.name.replace(/^skill:/, "") })),
-    });
+    });    // A copy key in the composer with no text of its own selected: the text selected in the chat (selcopy.js).
+    this.composer.copyMiss = (cx) => this.handOffCopy(cx);
+
     this.conn = new Connection({
       chat: this.chat,
       cwd: this.cwd ?? home(),
@@ -1791,6 +1800,8 @@ export default class HerdrChat extends View {
       case "mode": return toggle("permission", () => this.openModePicker(cx));
       case "cycleMode": return this.cycleMode(cx);
       case "stop":
+        // the Ctrl+C a copy asked Herdr for, with nothing selected: not the person's Stop
+        if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; return; }
         if (!this.store.working()) return this.flash("Nothing to stop", cx);
         return this.abort(cx);
       case "tui":
@@ -2109,7 +2120,7 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_up") this.composer.recall(this.store.sentPrompts(), -1);
     else if (a === "herdrchat_down") this.composer.recall(this.store.sentPrompts(), 1);
     else if (a === "herdrchat_enter") this.send(cx);
-    else if (a === "herdrchat_stop") this.abort(cx);
+    else if (a === "herdrchat_stop") { if (swallowsStop(this.copyHandoffUntil, Date.now())) this.copyHandoffUntil = 0; else this.abort(cx); }
     else if (a === "herdrchat_escape") {
       if (this.pastePreviewId) return this.closePastePreview(cx);
       if (this.swarm?.open || this.swarm?.startOpen) return this.swarm.close(cx);
@@ -2235,6 +2246,42 @@ export default class HerdrChat extends View {
     this.plusOpen = open;
     this.debug.mark();
     cx.notify();
+  }
+
+  // The text selected in the chat's text views, which only Herdr's own Ctrl+C copies (selcopy.js): for a copy key
+  // with nothing of an input's own to copy (Super+C), and a message's right-click (look: {it, text}), whose menu
+  // offers Copy for what this found, then Copy message. On Linux only, through Hyprland: elsewhere, a hint, or the
+  // menu without Copy.
+  /** @param {import("gpui-kit").Context} cx @param {{ it: any, text: string } | null} [look] */
+  handOffCopy(cx, look = null) {
+    /** @param {any} cx */
+    const read = (cx) => { try { return cx.read_from_clipboard() ?? null; } catch { return null; } };
+    if (appWindow()?.platform !== "linux") return look ? this.openMessageMenu(look, null) : undefined;
+    const before = read(cx);
+    this.copyHandoffUntil = Date.now() + HANDOFF_MS;
+    cx.spawn(async (cx) => {
+      await cx.sleep(0);
+      const { program, args } = ctrlCCommand();
+      const r = await exec(program, args, { timeout: 5000 }).catch(() => null);
+      if (r?.code === 0) await cx.sleep(SETTLE_MS);
+      else this.copyHandoffUntil = 0;
+      const got = r?.code === 0 ? copiedText(before, read(cx)) : null;
+      if (look) {
+        // a look, not a copy: the clipboard's text goes back (a picture on it can't, and gives way to the text)
+        if (got != null && typeof before === "string") cx.write_to_clipboard(before);
+        this.openMessageMenu(look, got);
+      } else if (got != null) this.flash(`Copied ${plural(got.length, "character")}`, cx);
+      else if (r?.code === 0) this.flash("Nothing new to copy: select text in the chat first", cx);
+      else this.flash("Select the text, then press Ctrl+C to copy it", cx);
+      this.debug.mark();
+      cx.notify();
+    });
+  }
+
+  /** @param {{ it: any, text: string }} look @param {string | null} selection */
+  openMessageMenu(look, selection) {
+    const items = messageMenuItems(selection, look.text);
+    if (items.length) openOverlay({ mod: MOD, kind: "popup", props: { messageMenu: { items } }, width: 250, height: 10 + items.length * 26 });
   }
 
   // Text selected in a code block (codeview.js), on ⌘C.
@@ -3182,7 +3229,7 @@ export default class HerdrChat extends View {
   }
 
   close() {
-    if (this.viewer || this.termbar) return;
+    if (this.viewer || this.termbar || this.messageMenuView) return;
     this.activityScroll?.release?.();
     this.swarm?.release?.();
     owners.delete(this.uid);
@@ -3505,6 +3552,7 @@ export default class HerdrChat extends View {
       terminalView: this.view ? (cx) => this.visitTerminal(cx) : null,
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
+      messageMenu: (/** @type {any} */ it, /** @type {string} */ text, /** @type {import("gpui-kit").Context} */ cx) => this.handOffCopy(cx, { it, text }),
       runBang: this.sub ? null : this.bangTarget(),
       openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null, findItem: this.find?.current?.id ?? null,
@@ -3525,6 +3573,7 @@ export default class HerdrChat extends View {
   }
 
   render(cx) {
+    if (this.messageMenuView) return this.messageMenuView.render();
     if (this.viewer) return this.viewer.render(cx);
     if (this.termbar) return this.termbar.render(cx);
     // The host's hidden pane took the focus (agent.focus, the agents list, cmd-]): a
@@ -3610,6 +3659,8 @@ export default class HerdrChat extends View {
       .children(this.sub ? [this.subBar(t)] : pill && !floats ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
+    // Super+C's Ctrl+Shift+C (or Ctrl+Insert) outside an input: the text selected in the chat (selcopy.js).
+    root = root.on_action("herdrchat_copy", (_e, cx) => this.handOffCopy(cx));
 
     if (empty) {
       // Startup notices (an extension's warning) don't end the empty state: they show under it.
