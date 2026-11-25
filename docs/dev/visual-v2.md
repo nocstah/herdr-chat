@@ -35,6 +35,14 @@ runs with under it.
 - **Image chips:** a pasted or dropped image shows as a 64×48 thumbnail with a ✕ in its corner. The box is fixed, so the composer keeps its height while the image loads, and a dropped image fills it with an image icon until the host has copied the file. Hovering shows the file name; a click enlarges it in the viewer. The thumbnail is the same as a sent message's (`util.js` `thumbnail`), from the chat's copy of the file (protocol.md "Attachments"). A file the app can't show (an older host) is a chip with an image icon and the file name (`util.js` `fileChip`, as on a sent message). A file the host refuses makes no chip: the hint line shows why.
 - **Queue and steer chips** sit just above the composer card, inside the same column.
 - **The hint** sits in the card's bottom row (see above), dim, 11.5 px: only while working or while a card waits, and "Esc closes" in a peek.
+- **A reply is compact.** The full card above is a new chat's. Once the chat has a conversation (the history has loaded and holds a message, or a run has started), the card is a reply's, as in the Claude app: one row, the text and the send / stop button (30 px), growing with the text (the button stays beside its last line; chips sit above the text). The `+` and the mic (26 px) move to the start of the row under the card, and the hint goes between the left and the right of that row, where the Claude app has its line; while a hint shows, the extension statuses fold into their `+N`. `composer.js` `view` (`compact`), `chrome.js` `underRow` (`lead`, `hint`); the dump says `composerCompact`.
+
+```
+╭──────────────────────────────────────────────────────────────────╮
+│ Message Claude Code…                                           ⏎ │  text (grows) · send
+╰──────────────────────────────────────────────────────────────────╯
+  + 🎙 🗀 shop  ⎇ main  Enter steers · Esc stops    ◔ 23%  Opus 5.5 Medium  Manual
+```
 
 ## 2. A centered content column
 

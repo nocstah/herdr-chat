@@ -442,16 +442,23 @@ export class Composer {
       }
       return fileChip(`chip-${i}`, ch.label, t).pr(6).bg(t.raised).on_mouse_down("left", stopDown).child(x);
     });
+    // A reply (`c.compact`: the chat has a conversation), as the Claude app draws it: one row, the text and
+    // the send / stop button, growing with the text. The +, the mic and the hint are under the card then
+    // (chrome.js underRow `lead`).
+    const compact = Boolean(c.compact);
     let wrap = div().id("composer-box").w_full().min_w(0).cursor_text().key_context(this.context());
+    if (compact) wrap = wrap.flex_1();
     for (const a of ACTIONS) wrap = wrap.on_action(a, (_e, cx) => c.action(a, cx));
     if (COPY_KEYS.length) wrap = wrap.on_action("herdrchat_copy", (_e, cx) => this.copyKey(cx));
     wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
-    wrap = wrap.child(Textarea.new(this.ta).w_full().px(16).pt(14).pb(8).text_size(14).text_color(t.foreground).bg(alpha(t.background, 0))
+    const field = Textarea.new(this.ta).w_full().text_size(14).text_color(t.foreground).bg(alpha(t.background, 0));
+    wrap = wrap.child((compact ? field.pl(16).pr(4).py(11) : field.px(16).pt(14).pb(8))
       .token((tok, _cx) => skillPillEl(tok, t)));
     const working = c.working;
     const typed = Boolean(this.value.trim() || this.chips.length);
     const stop = working && !typed;
-    const btn = h_flex().id(stop ? "stop" : "send").flex_none().w(32).h(32).rounded(10).items_center().justify_center().cursor_pointer()
+    const side = compact ? 30 : 32;
+    const btn = h_flex().id(stop ? "stop" : "send").flex_none().w(side).h(side).rounded(compact ? 9 : 10).items_center().justify_center().cursor_pointer()
       .bg(stop ? t.foreground : typed ? t.solid : t.raised)
       .text_color(stop ? t.background : typed ? t.solid_foreground : t.dim)
       .hover((s) => s.opacity(0.85))
@@ -459,8 +466,17 @@ export class Composer {
       .on_mouse_down("left", stopDown)
       .on_click((_e, cx) => c.action(stop ? "herdrchat_stop" : "herdrchat_enter", cx))
       .child(icon(stop ? "square" : "arrow-up", stop ? 11 : 15));
-    return v_flex().id("composer-card").w_full().rounded(18).border_1().border_color(this.focused ? alpha(t.foreground, 0.2) : t.input).bg(t.surface).shadow_sm()
-      .cursor_text().on_mouse_down("left", focusCard)
+    const card = v_flex().id("composer-card").w_full().rounded(compact ? 14 : 18).border_1().border_color(this.focused ? alpha(t.foreground, 0.2) : t.input).bg(t.surface).shadow_sm()
+      .cursor_text().on_mouse_down("left", focusCard);
+    if (compact) {
+      // The chips above the text; the button stays beside the text's last line.
+      return card
+        .when(chips.length > 0, (e) => e.child(h_flex().id("composer-chips").px(14).pt(8).gap(6).flex_wrap().cursor_text().on_mouse_down("left", focusBar).children(chips)))
+        .child(h_flex().id("composer-row").w_full().min_w(0).items_end().cursor_text()
+          .child(wrap)
+          .child(div().id("composer-send-wrap").flex_none().pr(6).pb(6).on_mouse_down("left", stopDown).child(btn)));
+    }
+    return card
       .child(wrap)
       .when(chips.length > 0, (e) => e.child(h_flex().id("composer-chips").px(14).pb(6).gap(6).flex_wrap().cursor_text().on_mouse_down("left", focusBar).children(chips)))
       .child(h_flex().id("composer-bar").h(44).pl(8).pr(8).gap(6).items_center().cursor_text().on_mouse_down("left", focusBar)

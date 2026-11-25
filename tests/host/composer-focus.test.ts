@@ -210,6 +210,28 @@ test("composer card focuses textarea on click anywhere outside buttons and chips
       assert.equal(res.stopped, true, `#${controlId} should stop mouse_down propagation`);
       assert.equal(composer.ta._focusCount, 4, `#${controlId} must not trigger card focus`);
     }
+
+    // 6. A reply (the chat has a conversation): one row, the text and the send button; no +, mic or hint in the
+    //    card (they're under it), the chips above the text, and the card still focuses on a click.
+    const compact = composer.view(theme, {
+      t: theme,
+      working: false,
+      compact: true,
+      plus: div().id("compose-plus"),
+      mic: div().id("compose-mic"),
+      hint: "Enter sends",
+      action: () => {},
+      previewPaste: () => {},
+    });
+    for (const id of ["composer-card", "composer-row", "composer-box", "composer-chips", "send"]) assert.ok(findPathById(compact, id), `reply: missing #${id}`);
+    for (const id of ["composer-bar", "composer-hint", "compose-plus", "compose-mic"]) assert.equal(findPathById(compact, id), null, `reply: #${id} belongs under the card`);
+    const card = findPathById(compact, "composer-card")!.at(-1);
+    assert.deepEqual(card._children.map((ch: any) => ch._id), ["composer-chips", "composer-row"]);
+    const before = composer.ta._focusCount;
+    bubbleLeftMouseDown(compact, "composer-row");
+    assert.equal(composer.ta._focusCount, before + 1);
+    assert.equal(bubbleLeftMouseDown(compact, "send").stopped, true);
+    assert.equal(composer.ta._focusCount, before + 1, "the send button must not trigger card focus");
   } finally {
     hooks.deregister();
   }
