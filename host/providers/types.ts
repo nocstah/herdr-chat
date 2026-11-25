@@ -124,8 +124,11 @@ export type Question = {
   id: string;
   header?: string;
   question: string;
-  /** `recommended`: the agent suggests this option (the card starts on it). */
-  options: { label: string; description?: string; recommended?: boolean }[];
+  /**
+   * `recommended`: the agent suggests this option (the card starts on it).
+   * `preview`: what the option would do, in lines meant for a monospace box (AskUserQuestion's preview).
+   */
+  options: { label: string; description?: string; recommended?: boolean; preview?: string }[];
   multiSelect: boolean;
   allowOther: boolean;
 };

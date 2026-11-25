@@ -388,7 +388,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   /** The card for a dialog: a permission card (its rows as choices) or a question. */
   private askOf(id: string, p: ScreenPrompt): Ask {
     if (p.kind === "question") {
-      const options = p.rows.filter((r) => r !== p.other).map((r) => ({ label: r.label, ...(r.description ? { description: r.description } : {}) }));
+      const options = p.rows.filter((r) => r !== p.other).map((r) => ({ label: r.label, ...(r.description ? { description: r.description } : {}), ...(r.preview ? { preview: r.preview } : {}) }));
       const tabs = p.tabs ?? [];
       const header = p.header ?? (tabs.length === 1 ? tabs[0]!.label : null);
       const title = tabs.length > 1 ? `Claude Code has ${tabs.length} questions (${Math.min(tabs.filter((t) => t.answered).length + 1, tabs.length)} of ${tabs.length})` : "Claude Code has a question";
