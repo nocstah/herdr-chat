@@ -210,11 +210,14 @@ export class QuestionsForm {
     return ["↑↓ move", q.multiSelect && "Space ticks", enter, n > 1 ? `1–${n} choose` : n === 1 && "1 chooses", "Esc cancels"].filter(Boolean).join(" · ");
   }
 
-  view(t, answer) {
+  view(t, answer, c = null) {
     const qs = this.questions;
     const ready = this.answers() != null;
     const blocks = qs.map((q, qi) => {
       const set = this.picked.get(q.id);
+      // Some options' previews but not all (a terminal view couldn't read them): the terminal shows each.
+      const previews = (q.options ?? []).filter((o) => o.preview).length;
+      const partial = previews > 0 && previews < (q.options ?? []).length;
       const current = qi === this.cur.q && qs.length > 1;
       const lit = (i) => qi === this.cur.q && i === this.cur.i;
       return v_flex().gap(6)
@@ -244,6 +247,11 @@ export class QuestionsForm {
                 .children(o.preview.split("\n").map((l) => div().min_w(0).child(l || " "))))))
             .when(qi === this.cur.q, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.dim).child(i < 9 ? String(i + 1) : "")));
         })))
+        .when(partial, (e) => e.child(h_flex().gap(10).items_center().px(2)
+          .child(div().flex_1().min_w(0).text_size(11.5).text_color(t.dim).child("The other options' previews show in the terminal, as you move to each one."))
+          .when(Boolean(c?.terminalView), (e) => e.child(h_flex().id(`dlg-q-${q.id}-terminal`).flex_none().h(24).px(10).items_center().rounded(7)
+            .cursor_pointer().border_1().border_color(t.input).bg(t.raised).text_size(11.5).text_color(t.foreground)
+            .hover((s) => s.bg(t.hover)).on_click((_e, cx) => c.terminalView(cx)).child("Terminal view")))))
         .when(this.others.has(q.id), (e) => e.child(div().id(`dlg-other-${q.id}`).key_context("HerdrChatDialog")
           .on_action("herdrchat_dialog_enter", (_e, cx) => {
             const out = this.key("enter", { inOther: qi });

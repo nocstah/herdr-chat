@@ -56,11 +56,22 @@ if (cmd === "events") {
   pump();
   setInterval(pump, 20);
 } else if (cmd === "read") {
-  // The screen the test wrote (Claude Code's dialogs are read from it).
+  // The screen the test wrote (Claude Code's dialogs are read from it); with cursor.json, the screen for where
+  // its cursor is (one per row), which up and down move.
   let text = "";
-  try { text = fs.readFileSync(dir + "/screen.txt", "utf8"); } catch {}
+  try {
+    const c = JSON.parse(fs.readFileSync(dir + "/cursor.json", "utf8"));
+    text = c.screens[c.at];
+  } catch {
+    try { text = fs.readFileSync(dir + "/screen.txt", "utf8"); } catch {}
+  }
   process.stdout.write(JSON.stringify({ complete: true, how: "screen", text }) + "\\n");
 } else {
+  if (cmd === "keys" && fs.existsSync(dir + "/cursor.json")) {
+    const c = JSON.parse(fs.readFileSync(dir + "/cursor.json", "utf8"));
+    for (const k of rest) c.at = k === "down" ? Math.min(c.at + 1, c.screens.length - 1) : k === "up" ? Math.max(c.at - 1, 0) : c.at;
+    fs.writeFileSync(dir + "/cursor.json", JSON.stringify(c));
+  }
   fs.appendFileSync(dir + "/calls.jsonl", JSON.stringify([cmd, ...rest]) + "\\n");
   process.stdout.write("{}\\n");
 }
@@ -445,6 +456,66 @@ test("Claude Code's dialogs: a card while it waits, the card's answer pressed as
     await until("the plan card", () => asks().length === 4);
     r.status("working");
     await until("its card closed", () => r.events.some((e) => e.type === "ask_closed" && (e as any).id === asks()[3].id));
+  } finally {
+    delete process.env.HERDR_CHAT_ASK_MS;
+    r.done();
+  }
+});
+
+/** A rig with Claude Code waiting on a question whose options have previews. */
+async function previewRig() {
+  const { BOX, LEFT, REPLY, previewScreen } = await import("./screen.test.ts");
+  const r = rig();
+  const asks = () => r.events.filter((e) => e.type === "ask").map((e: any) => e.ask);
+  const keys = () => r.calls().filter((c) => c[0] === "keys");
+  const S1 = "11111111-1111-4111-8111-111111111111";
+  r.register(S1);
+  r.write(S1, [prompt("Push it")]);
+  r.event({ terminals: [{ address: "t9", state: "live", foreground: { pid: r.pid, name: "claude", argv: ["claude"] }, status: { app: "claude", state: "working" } }] });
+  await r.adapter.start(null, r.host);
+  await r.adapter.history();
+  // The screen with the cursor on option i: its preview in the box.
+  const BOXES = [REPLY, ["Leave the threads as they are."], ["Only the P1 fix, nothing pushed."]];
+  const at = (i: number) => previewScreen(LEFT.map((l) => l.replace(/^[❯ ] (\d)\./, (_m, n) => `${Number(n) === i + 1 ? "❯" : " "} ${n}.`)), BOX(BOXES[i]!));
+  return { r, asks, keys, at, BOXES };
+}
+
+test("a question with previews: the card has every option's, read by stepping the cursor, which goes back", async () => {
+  const { r, asks, keys, at, BOXES } = await previewRig();
+  process.env.HERDR_CHAT_ASK_MS = "40";
+  try {
+    writeFileSync(join(r.d, "cursor.json"), JSON.stringify({ at: 0, screens: [0, 1, 2].map(at) }));
+    r.status("blocked");
+    await until("the question card", () => asks().length === 1);
+    const q = asks()[0];
+    assert.deepEqual(q.questions[0].options.map((o: any) => [o.label, o.preview]), [
+      ["Push and reply (Recommended)", BOXES[0]!.join("\n")],
+      ["Push only", BOXES[1]![0]],
+      ["P1 fix only", BOXES[2]![0]],
+    ]);
+    assert.deepEqual(keys().map((k) => k.slice(3)), [["down"], ["down"], ["up", "up"]], "one step at a time, then back");
+    assert.equal(JSON.parse(readFileSync(join(r.d, "cursor.json"), "utf8")).at, 0, "the cursor where it was");
+    // Shown again (the dialog stays a while after an answer), it keeps them without stepping again.
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal(keys().length, 3, "read once per dialog");
+    r.adapter.answer(q.id, { answers: { q: "P1 fix only" } });
+    await until("P1 fix only picked", () => keys().length === 4);
+    assert.deepEqual(keys()[3]!.slice(3), ["down", "down", "enter"]);
+  } finally {
+    delete process.env.HERDR_CHAT_ASK_MS;
+    r.done();
+  }
+});
+
+test("a question with previews: the cursor won't move, so the card shows the one on screen", async () => {
+  const { r, asks, at, BOXES } = await previewRig();
+  process.env.HERDR_CHAT_ASK_MS = "40";
+  try {
+    writeFileSync(join(r.d, "screen.txt"), at(0)); // keys change nothing
+    r.status("blocked");
+    await until("the question card", () => asks().length === 1, 6000);
+    assert.deepEqual(asks()[0].questions[0].options.map((o: any) => o.preview ?? null), [BOXES[0]!.join("\n"), null, null]);
+    assert.ok(r.logs.some((l) => /previews: 1 of 3 read/.test(l)));
   } finally {
     delete process.env.HERDR_CHAT_ASK_MS;
     r.done();

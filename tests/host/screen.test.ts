@@ -104,12 +104,12 @@ test("one question: its chip, its options with descriptions, Type something, not
 });
 
 // Options with previews (Claude Code 2.1.332, read off its screen): the box beside the options shows the cursor's option.
-const beside = (left: string, right = "") => (right ? `${left.padEnd(34)}${right}` : left);
-const BOX = (rows: string[]) => {
+export const beside = (left: string, right = "") => (right ? `${left.padEnd(34)}${right}` : left);
+export const BOX = (rows: string[]) => {
   const w = Math.max(...rows.map((r) => r.length)) + 2;
   return [`┌${"─".repeat(w)}┐`, ...rows.map((r) => `│ ${r.padEnd(w - 2)} │`), `└${"─".repeat(w)}┘`];
 };
-const previewScreen = (left: string[], box: string[], question = ["│ Force-push and reply in each of the three review threads?"]) => {
+export const previewScreen = (left: string[], box: string[], question = ["│ Force-push and reply in each of the three review threads?"]) => {
   const rows = Math.max(left.length, box.length);
   return [
     RULE, " ☐ PR #15774", "", ...question, "",
@@ -118,8 +118,8 @@ const previewScreen = (left: string[], box: string[], question = ["│ Force-pus
     "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
   ].join("\n");
 };
-const REPLY = ["Force-push the rebased branch to PR #15774.", "Then reply in each of the three review threads", "  with the commit that addresses the comment.", "", "Resolve each thread once its reply is posted."];
-const LEFT = ["❯ 1. Push and reply", "    (Recommended)", "  2. Push only", "  3. P1 fix only"];
+export const REPLY = ["Force-push the rebased branch to PR #15774.", "Then reply in each of the three review threads", "  with the commit that addresses the comment.", "", "Resolve each thread once its reply is posted."];
+export const LEFT = ["❯ 1. Push and reply", "    (Recommended)", "  2. Push only", "  3. P1 fix only"];
 
 test("a question with previews: the box beside the options isn't part of them, and its text is the cursor's option's", () => {
   const p = readPrompt(previewScreen(LEFT, BOX(REPLY)))!;

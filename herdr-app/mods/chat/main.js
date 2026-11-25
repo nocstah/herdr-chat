@@ -3446,6 +3446,8 @@ export default class HerdrChat extends View {
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
       previewPaste: (id, cx) => this.openPastePreview(id, cx),
+      // A terminal's chat view: its terminal, back to the chat once the TUI is at its prompt (a question answered there).
+      terminalView: this.view ? (cx) => this.visitTerminal(cx) : null,
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
       runBang: this.sub ? null : this.bangTarget(),
