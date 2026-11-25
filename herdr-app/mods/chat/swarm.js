@@ -108,6 +108,11 @@ export class SwarmPanel {
     return this.postInput;
   }
 
+  ensureBoardInputs() {
+    this.ensureSearchInput();
+    this.ensurePostInput();
+  }
+
   ensureStartInput() {
     if (!this.startInput) {
       this.startInput = TextareaState.new({ placeholder: "Describe the goal for the swarm… (Ctrl+Enter launches)" });
@@ -137,6 +142,10 @@ export class SwarmPanel {
   }
 
   release() {
+    this.open = false;
+    this.modal = false;
+    this.startOpen = false;
+    this.addOpen = false;
     for (const f of [this.searchInput, this.postInput, this.startInput, this.addNameInput, this.addModelInput, this.addBriefInput]) {
       f?.release?.();
     }
@@ -153,9 +162,11 @@ export class SwarmPanel {
     this.startOpen = false;
     this.tab = tab || "overview";
     if (this.tab === "board") {
+      this.ensureBoardInputs();
       const head = this.view.store.state.swarm?.head_seq ?? 0;
       if (head > this.seenSeq) this.seenSeq = head;
     }
+    if (this.tab === "members" && this.addOpen) this.ensureAddInputs();
     if (this.tab === "graph") this.syncGraph(cx, true);
     this.view.debug?.mark?.();
     cx.notify();
@@ -370,6 +381,8 @@ export class SwarmPanel {
     if (sub === "modal") {
       this.modal = !this.modal;
       this.open = true;
+      if (this.tab === "board") this.ensureBoardInputs();
+      if (this.tab === "members" && this.addOpen) this.ensureAddInputs();
       this.view.debug?.mark?.();
       cx.notify();
       return;
@@ -412,6 +425,7 @@ export class SwarmPanel {
       if (Number.isSafeInteger(seq) && seq > 0) {
         this.open = true;
         this.tab = "board";
+        this.ensureBoardInputs();
         this.channel = "all";
         this.sender = "all";
         this.searchQuery = "";
@@ -425,8 +439,9 @@ export class SwarmPanel {
       const member = sub.slice(6);
       this.open = true;
       this.tab = "board";
+      this.ensureBoardInputs();
       this.postTarget = member;
-      this.ensurePostInput().focus();
+      this.postInput.focus();
       cx.notify();
       return;
     }
@@ -681,7 +696,8 @@ export function swarmStrip(v, s, t) {
 
   if (!swarm) {
     if (!sw?.startOpen) return null;
-    const area = sw.ensureStartInput();
+    const area = sw.startInput;
+    if (!area) return null;
     return v_flex().id("swarm-start-card").w_full().p(12).gap(8).rounded(10)
       .border_1().border_color(alpha(t.accent, 0.45)).bg(t.popover)
       .child(h_flex().gap(8).items_center()
@@ -905,7 +921,7 @@ function renderOverviewTab(v, swarm, t, c) {
       .when(workstreams.length === 0, (e) => e.child(div().text_size(12).text_color(t.dim).child("No worker threads yet — wait for workers to spawn or post to the board.")))
       .children(workstreams.map((ws, idx) => {
         const stCol = workstreamToneColor(ws.state, t);
-        const pct = ws.progress ? Math.min(1, Math.max(0, ws.progress.done / ws.progress.total)) : null;
+        const pct = ws.progress && ws.progress.total > 0 ? Math.min(1, Math.max(0, ws.progress.done / ws.progress.total)) : null;
         const ownerLive = (ws.owners ?? [])
           .map((o) => {
             const m = membersByName.get(o);
@@ -917,15 +933,15 @@ function renderOverviewTab(v, swarm, t, c) {
           .child(h_flex().gap(6).items_center().flex_wrap()
             .child(div().size(7).rounded(4).bg(stCol))
             .child(div().flex_1().min_w(120).text_size(12.5).font_semibold().text_color(t.foreground).child(ws.title))
-            .when(pct !== null, (e) => h_flex().gap(6).items_center()
+            .when(pct !== null, (e) => e.child(h_flex().gap(6).items_center()
               .child(div().w(54).h(5).rounded(3).bg(alpha(t.muted, 0.2)).child(div().h_full().rounded(3).w(Math.round(54 * pct)).bg(stCol)))
-              .child(div().text_size(11).font_family(monoFont()).text_color(t.dim).child(`${ws.progress.done}/${ws.progress.total}`)))
+              .child(div().text_size(11).font_family(monoFont()).text_color(t.dim).child(`${ws.progress.done}/${ws.progress.total}`))))
             .child(div().px(5).py(1).rounded(4).bg(alpha(stCol, 0.14)).text_size(10.5).text_color(stCol).child(ws.state)))
           .when(Boolean(ws.note), (e) => e.child(div().text_size(12).line_height("17px").text_color(t.muted).child(ws.note)))
           .when(ownerLive.length > 0, (e) => e.child(div().text_size(11.5).text_color(t.accent).child(ownerLive.join(" · "))))
-          .when((ws.owners?.length ?? 0) > 0 || (ws.refs?.length ?? 0) > 0, (e) => h_flex().gap(5).flex_wrap().items_center()
+          .when((ws.owners?.length ?? 0) > 0 || (ws.refs?.length ?? 0) > 0, (e) => e.child(h_flex().gap(5).flex_wrap().items_center()
             .children((ws.owners ?? []).map((o) => memberChip(`ws-own-${idx}-${o}`, o, t, v)))
-            .children((ws.refs ?? []).map((seq) => seqPill(`ws-ref-${idx}-${seq}`, seq, t, v))));
+            .children((ws.refs ?? []).map((seq) => seqPill(`ws-ref-${idx}-${seq}`, seq, t, v)))));
       })),
   );
 
@@ -982,8 +998,8 @@ function renderBoardTab(v, swarm, t, c) {
   const channels = swarm.channels ?? [];
   const members = (swarm.members ?? []).filter((m) => !m.role_worker);
   const filtered = filterSwarmMessages(swarm, { channel: sw.channel, sender: sw.sender, search: sw.searchQuery });
-  const searchField = sw.ensureSearchInput();
-  const postField = sw.ensurePostInput();
+  const searchField = sw.searchInput;
+  const postField = sw.postInput;
 
   const filterPill = (id, label, active, what) => div().id(id).flex_none().h(22).px(8).flex().items_center().rounded(6).cursor_pointer()
     .text_size(11.5)
@@ -997,7 +1013,7 @@ function renderBoardTab(v, swarm, t, c) {
       .child(filterPill("swarm-ch-all", "All channels", sw.channel === "all", "swarm:channel:all"))
       .children(channels.map((ch) => filterPill(`swarm-ch-${ch.name}`, `#${ch.name} (${ch.message_count})`, sw.channel === ch.name, `swarm:channel:${ch.name}`)))
       .child(div().flex_1().min_w(12))
-      .child(h_flex().w(180).h(24).px(6).gap(4).items_center().rounded(6).border_1().border_color(t.input).bg(t.background)
+      .when(Boolean(searchField), (e) => e.child(h_flex().w(180).h(24).px(6).gap(4).items_center().rounded(6).border_1().border_color(t.input).bg(t.background)
         .child(icon("search", 11).text_color(t.dim))
         .child(fieldWrap(
           "swarm-board-search",
@@ -1012,7 +1028,7 @@ function renderBoardTab(v, swarm, t, c) {
             } else v.control("swarm:close", cx);
           },
           Input.new(searchField).h(22).px(2).text_size(11.5),
-        ))))
+        )))))
     .child(h_flex().gap(4).items_center().flex_wrap()
       .child(div().text_size(11).text_color(t.dim).pr(2).child("From:"))
       .child(filterPill("swarm-from-all", "Anyone", sw.sender === "all", "swarm:sender:all"))
@@ -1064,34 +1080,36 @@ function renderBoardTab(v, swarm, t, c) {
   const targets = ["coordinator", "all", ...members.filter((m) => !m.killed && m.name !== "coordinator").map((m) => m.name)];
   const activeChannels = channels.filter((ch) => !ch.archived);
 
-  const steerBar = v_flex().flex_none().px(12).py(8).gap(6).border_t_1().border_color(t.border).bg(t.surface)
-    .child(h_flex().gap(4).items_center().flex_wrap()
-      .child(div().text_size(11).text_color(t.dim).child("To:"))
-      .children(targets.map((tg) => filterPill(`swarm-to-${tg}`, `@${tg}`, sw.postTarget === tg, `swarm:post:target:${tg}`)))
-      .when(activeChannels.length > 1, (e) => e.child(h_flex().gap(4).pl(6).items_center()
-        .child(div().text_size(11).text_color(t.dim).child("in"))
-        .children(activeChannels.map((ch) => filterPill(`swarm-pch-${ch.name}`, `#${ch.name}`, sw.postChannel === ch.name, `swarm:post:channel:${ch.name}`))))))
-    .child(h_flex().gap(6).items_center()
-      .child(fieldWrap(
-        "swarm-post-field",
-        postField,
-        "HerdrChatDialog",
-        (cx) => v.control("swarm:post:submit", cx),
-        (cx) => v.control("swarm:close", cx),
-        Input.new(postField).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12),
-      ))
-      .child(smallBtn("swarm-post-send", sw.busyAction ? "Sending…" : "Send", t, {
-        primary: true,
-        disabled: sw.busyAction,
-        onClick: (_e, cx) => v.control("swarm:post:submit", cx),
-      })));
+  const steerBar = postField
+    ? v_flex().flex_none().px(12).py(8).gap(6).border_t_1().border_color(t.border).bg(t.surface)
+      .child(h_flex().gap(4).items_center().flex_wrap()
+        .child(div().text_size(11).text_color(t.dim).child("To:"))
+        .children(targets.map((tg) => filterPill(`swarm-to-${tg}`, `@${tg}`, sw.postTarget === tg, `swarm:post:target:${tg}`)))
+        .when(activeChannels.length > 1, (e) => e.child(h_flex().gap(4).pl(6).items_center()
+          .child(div().text_size(11).text_color(t.dim).child("in"))
+          .children(activeChannels.map((ch) => filterPill(`swarm-pch-${ch.name}`, `#${ch.name}`, sw.postChannel === ch.name, `swarm:post:channel:${ch.name}`))))))
+      .child(h_flex().gap(6).items_center()
+        .child(fieldWrap(
+          "swarm-post-field",
+          postField,
+          "HerdrChatDialog",
+          (cx) => v.control("swarm:post:submit", cx),
+          (cx) => v.control("swarm:close", cx),
+          Input.new(postField).h(28).px(8).rounded(7).border_1().border_color(t.input).bg(t.background).text_size(12),
+        ))
+        .child(smallBtn("swarm-post-send", sw.busyAction ? "Sending…" : "Send", t, {
+          primary: true,
+          disabled: sw.busyAction,
+          onClick: (_e, cx) => v.control("swarm:post:submit", cx),
+        })))
+    : null;
 
   return v_flex().flex_1().min_h(0)
     .child(filterBar)
     .child(v_flex().id("swarm-board-feed").flex_1().min_h(0).overflow_y_scroll().p(12).gap(8)
       .when(rows.length === 0, (e) => e.child(div().text_size(12).text_color(t.dim).child("No board posts match this filter.")))
       .children(rows))
-    .child(steerBar);
+    .when(Boolean(steerBar), (e) => e.child(steerBar));
 }
 
 // ---------------------------------------------------------------- Tab 3: Members + Transcript Inspector
@@ -1111,7 +1129,7 @@ function renderMembersTab(v, swarm, t) {
       .border_color(m.status === "blocked" ? alpha(t.ansi1, 0.5) : t.border)
       .bg(t.background)
       .child(h_flex().gap(8).items_center().flex_wrap()
-        .child(div().text_size(12.5).font_semibold().text_color(col).cursor_pointer()
+        .child(div().id(`swarm-mem-name-${m.name}`).text_size(12.5).font_semibold().text_color(col).cursor_pointer()
           .on_click((_e, cx) => v.control(`swarm:inspect:${m.name}`, cx))
           .child(`@${m.name}`))
         .child(statusBadge(m.status, t))
@@ -1130,9 +1148,9 @@ function renderMembersTab(v, swarm, t) {
         .when(!m.killed && m.name !== "coordinator", (e) => e.child(smallBtn(`mem-nudge-${m.name}`, "Nudge", t, { onClick: (_e, cx) => v.control(`swarm:nudge:${m.name}`, cx) })))
         .when(m.status === "blocked" && Boolean(v.view), (e) => e.child(smallBtn(`mem-term-${m.name}`, "Approve in terminal", t, { danger: true, ic: "terminal", onClick: (_e, cx) => v.control("swarm:terminal", cx) })))
         .when(!m.killed && m.name !== "coordinator" && !confirmingKill, (e) => e.child(smallBtn(`mem-kill-${m.name}`, "Kill", t, { danger: true, onClick: (_e, cx) => v.control(`swarm:kill:ask:${m.name}`, cx) })))
-        .when(confirmingKill, (e) => h_flex().gap(4).items_center()
+        .when(confirmingKill, (e) => e.child(h_flex().gap(4).items_center()
           .child(smallBtn(`mem-kill-yes-${m.name}`, `Confirm kill @${m.name}`, t, { danger: true, onClick: (_e, cx) => v.control(`swarm:kill:confirm:${m.name}`, cx) }))
-          .child(smallBtn(`mem-kill-no-${m.name}`, "Cancel", t, { onClick: (_e, cx) => v.control("swarm:kill:cancel", cx) }))))
+          .child(smallBtn(`mem-kill-no-${m.name}`, "Cancel", t, { onClick: (_e, cx) => v.control("swarm:kill:cancel", cx) })))))
       .when(showingModels, (e) => e.child(
         v_flex().pt(4).gap(4).border_t_1().border_color(t.border)
           .child(div().text_size(11).text_color(t.dim).child(`Switch @${m.name} model:`))
@@ -1145,8 +1163,7 @@ function renderMembersTab(v, swarm, t) {
   };
 
   let addForm = null;
-  if (sw.addOpen) {
-    sw.ensureAddInputs();
+  if (sw.addOpen && sw.addNameInput && sw.addModelInput && sw.addBriefInput) {
     addForm = v_flex().id("swarm-add-form").p(10).gap(8).rounded(8).border_1().border_color(alpha(t.accent, 0.45)).bg(t.background)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().text_size(12.5).font_semibold().text_color(t.foreground).child("Spawn new swarm worker"))
@@ -1224,9 +1241,9 @@ function renderMemberInspector(v, swarm, t) {
       .when(Boolean(liveMember && !liveMember.killed && name !== "coordinator"), (e) => e.child(smallBtn("insp-nudge", "Nudge", t, { onClick: (_e, cx) => v.control(`swarm:nudge:${name}`, cx) })))
       .when(Boolean(liveMember?.status === "blocked" && v.view), (e) => e.child(smallBtn("insp-term", "Approve", t, { danger: true, ic: "terminal", onClick: (_e, cx) => v.control("swarm:terminal", cx) })))
       .when(Boolean(liveMember && !liveMember.killed && name !== "coordinator" && !confirmingKill), (e) => e.child(smallBtn("insp-kill", "Kill", t, { danger: true, onClick: (_e, cx) => v.control(`swarm:kill:ask:${name}`, cx) })))
-      .when(confirmingKill, (e) => h_flex().gap(4)
+      .when(confirmingKill, (e) => e.child(h_flex().gap(4)
         .child(smallBtn("insp-kill-yes", "Confirm kill", t, { danger: true, onClick: (_e, cx) => v.control(`swarm:kill:confirm:${name}`, cx) }))
-        .child(smallBtn("insp-kill-no", "Cancel", t, { onClick: (_e, cx) => v.control("swarm:kill:cancel", cx) }))))
+        .child(smallBtn("insp-kill-no", "Cancel", t, { onClick: (_e, cx) => v.control("swarm:kill:cancel", cx) })))))
     .when(Boolean(liveMember?.activity), (e) => e.child(div().text_size(11.5).text_color(t.accent).child(`Now: ${liveMember.activity}`)))
     .when(showingModels, (e) => e.child(h_flex().gap(5).flex_wrap().pt(2)
       .children(models.map((mod) => smallBtn(`insp-setmod-${mod}`, mod, t, {
@@ -1239,7 +1256,7 @@ function renderMemberInspector(v, swarm, t) {
     if (ev.kind === "tool") {
       const open = sw.expandedTools.has(key);
       return v_flex().id(`swarm-ev-${i}`).px(9).py(6).gap(4).rounded(7).border_1().border_color(t.border).bg(t.background)
-        .child(h_flex().gap(6).items_center().cursor_pointer()
+        .child(h_flex().id(`swarm-ev-hdr-${i}`).gap(6).items_center().cursor_pointer()
           .on_click((_e, cx) => v.control(`swarm:tool:${key}`, cx))
           .child(icon("wrench", 11).text_color(t.accent))
           .child(div().flex_1().min_w(0).truncate().font_family(mono).text_size(11.5).text_color(t.foreground).child(ev.tool_summary || ev.tool_name || "tool"))
@@ -1359,7 +1376,7 @@ function renderGraphTab(v, swarm, t, c) {
   return v_flex().flex_1().min_h(0)
     .child(toolbar)
     .child(v_flex().id("swarm-graph-body").flex_1().min_h(0).overflow_y_scroll().p(12).gap(10)
-      .child(h_flex().w_full().justify_center().rounded(10).border_1().border_color(t.border).bg(t.background).p(6)
+      .child(h_flex().id("swarm-graph-stage").w_full().justify_center().rounded(10).border_1().border_color(t.border).bg(t.background).p(6)
         .when(Boolean(relSvg), (e) => e.cursor_pointer().tooltip("Click to zoom & pan SVG")
           .on_click((_e, cx) => v.control("swarm:graph:enlarge", cx))
           .child(image(relSvg).w(stageW).h(stageH)))

@@ -2,6 +2,7 @@
 // Uses only disposable temp directories and synthetic fixtures.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import {
   appendFileSync,
   chmodSync,
@@ -716,6 +717,287 @@ test("swarm reader handles real Antigravity JSON-quoted args, step.error, view.j
     assert.deepEqual(snap.narrator.milestones, [{ title: "Card polish landed", state: "done", note: "" }]);
     assert.deepEqual(snap.narrator.risks, [{ title: "db-1 rate limited", severity: "med", note: "" }]);
   } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("SwarmPanel never creates GPUI InputState/TextareaState during render and preserves elements across .when() branches", async () => {
+  clearSwarmReaderCache();
+  const d = mkdtempSync(join(tmpdir(), "herdr-chat-swarm-panel-"));
+  const dataDir = join(d, "agy-data");
+  const imageDir = join(d, "images");
+
+  const gpuiState = {
+    inRender: false,
+    createdInputs: 0,
+    createdTextareas: 0,
+    focusedStates: [] as string[],
+  };
+  (globalThis as any).__swarmPanelTestState = gpuiState;
+
+  const gpuiKitSrc = `
+    function makeEl(tag, extra) {
+      const node = { _tag: tag, _id: null, _children: [], _extra: extra || null };
+      const proxy = new Proxy(node, {
+        get(target, prop) {
+          if (prop === "_tag" || prop === "_id" || prop === "_children" || prop === "_extra") return target[prop];
+          if (prop === "id") return (v) => { target._id = v; return proxy; };
+          if (prop === "child") return (c) => { target._children.push(c); return proxy; };
+          if (prop === "children") return (arr) => { if (Array.isArray(arr)) target._children.push(...arr); return proxy; };
+          if (prop === "when") return (cond, fn) => (cond ? fn(proxy) : proxy);
+          if (prop === "hover") return (fn) => { fn(proxy); return proxy; };
+          if (prop === "on_click" || prop === "tooltip") {
+            return () => {
+              if (!target._id) throw new Error(String(prop) + " called on <" + target._tag + "> without .id(...)");
+              return proxy;
+            };
+          }
+          return () => proxy;
+        },
+      });
+      return proxy;
+    }
+    export const div = () => makeEl("div");
+    export const image = (path) => makeEl("image", { path });
+    export const svg = (path) => makeEl("svg", { path });
+    export const __makeEl = makeEl;
+  `;
+
+  const gpuiBaseSrc = `
+    import { __makeEl } from "gpui-kit";
+    const st = () => globalThis.__swarmPanelTestState;
+    function makeFieldState(kind, opts) {
+      if (st().inRender) {
+        throw new Error(kind + ".new(...) cannot run during render; create state in init() or in an event handler and keep it on the view");
+      }
+      if (kind === "InputState") st().createdInputs++;
+      else st().createdTextareas++;
+      let val = opts?.value ?? "";
+      return {
+        _kind: kind,
+        _placeholder: opts?.placeholder ?? "",
+        on() {},
+        set_auto_grow() {},
+        value() { return val; },
+        set_value(v) { val = String(v ?? ""); },
+        focus() { st().focusedStates.push(opts?.placeholder ?? kind); },
+        release() {},
+      };
+    }
+    export const v_flex = () => __makeEl("v_flex");
+    export const h_flex = () => __makeEl("h_flex");
+    export const InputState = { new: (opts) => makeFieldState("InputState", opts) };
+    export const TextareaState = { new: (opts) => makeFieldState("TextareaState", opts) };
+    export const Input = {
+      new(state) {
+        if (!state || state._kind !== "InputState") throw new Error("Input.new requires a live InputState");
+        return __makeEl("Input", { state });
+      },
+    };
+    export const Textarea = {
+      new(state) {
+        if (!state || state._kind !== "TextareaState") throw new Error("Textarea.new requires a live TextareaState");
+        return __makeEl("Textarea", { state });
+      },
+    };
+  `;
+
+  const herdrSrc = `
+    export const appHome = () => ${JSON.stringify(d)};
+    export const settings = () => ({ font_family: "JetBrains Mono", dark: true });
+    export const readTextFile = async () => "";
+  `;
+
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === "gpui-kit" || specifier === "gpui-base" || specifier === "herdr") {
+        return { url: `swarm-test-mock:${specifier}`, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    },
+    load(url, context, nextLoad) {
+      if (url === "swarm-test-mock:gpui-kit") return { format: "module", source: gpuiKitSrc, shortCircuit: true };
+      if (url === "swarm-test-mock:gpui-base") return { format: "module", source: gpuiBaseSrc, shortCircuit: true };
+      if (url === "swarm-test-mock:herdr") return { format: "module", source: herdrSrc, shortCircuit: true };
+      return nextLoad(url, context);
+    },
+  });
+
+  const collectText = (node: any, out: string[] = []): string[] => {
+    if (node == null) return out;
+    if (typeof node === "string" || typeof node === "number") {
+      out.push(String(node));
+      return out;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) collectText(item, out);
+      return out;
+    }
+    if (Array.isArray(node._children)) {
+      for (const ch of node._children) collectText(ch, out);
+    }
+    return out;
+  };
+
+  const countTag = (node: any, tag: string): number => {
+    if (!node || typeof node !== "object") return 0;
+    let n = node._tag === tag ? 1 : 0;
+    if (Array.isArray(node._children)) {
+      for (const ch of node._children) n += countTag(ch, tag);
+    }
+    return n;
+  };
+
+  const renderStrict = <T>(fn: () => T): T => {
+    gpuiState.inRender = true;
+    try {
+      return fn();
+    } finally {
+      gpuiState.inRender = false;
+    }
+  };
+
+  try {
+    buildSyntheticSwarm(dataDir);
+    const snap = readSwarmSnapshot(dataDir, COORD_ID)!;
+    materializeSwarmFrames(snap, dataDir, imageDir);
+    const graphRes = writeSwarmGraphSvg(snap, { expandAll: false }, DEFAULT_THEME, imageDir);
+
+    const swarmUrl = new URL("../../herdr-app/mods/chat/swarm.js", import.meta.url).href + `?t=${Date.now()}`;
+    const { SwarmPanel, swarmStrip, swarmDrawer, swarmModal }: any = await import(swarmUrl);
+
+    const theme = {
+      background: "#111111",
+      surface: "#181818",
+      popover: "#1c1c1c",
+      raised: "#222222",
+      hover: "#262626",
+      border: "#333333",
+      input: "#444444",
+      foreground: "#eeeeee",
+      muted: "#aaaaaa",
+      dim: "#777777",
+      accent: "#38bdf8",
+      solid: "#38bdf8",
+      solid_foreground: "#000000",
+      blocked: "#f87171",
+      ansi1: "#f87171",
+      ansi2: "#34d399",
+      ansi3: "#fbbf24",
+      ansi4: "#60a5fa",
+      ansi5: "#c084fc",
+      ansi6: "#22d3ee",
+    };
+
+    const makeView = (swarmState: any) => {
+      const cx = {
+        notify() {},
+        spawn() {},
+        stop_propagation() {},
+      };
+      const v: any = {
+        view: "t5",
+        store: { state: { swarm: swarmState } },
+        composer: { focus() {} },
+        debug: { mark() {} },
+        conn: { req: async () => ({}) },
+        req: async () => ({}),
+        fire() {},
+        flash() {},
+        log() {},
+        showFace() {},
+        enlarge() {},
+        control(what: string, c = cx) {
+          if (what.startsWith("swarm:")) v.swarm.control(what.slice(6), c);
+        },
+      };
+      v.swarm = new SwarmPanel(v);
+      return { v, cx };
+    };
+
+    const renderCtx = {
+      t: theme,
+      colW: 680,
+      imageRel: (p: string) => (p.startsWith(d + "/") ? p.slice(d.length + 1) : null),
+      imagePending: () => false,
+      traceThumb() {},
+      enlarge() {},
+    };
+
+    // 1. Clicking Board on the docked strip must create search + post inputs in the handler, never during render.
+    const { v: vBoard, cx: cxBoard } = makeView(snap);
+    vBoard.control("swarm:open:board", cxBoard);
+    const boardTree = renderStrict(() => {
+      swarmStrip(vBoard, vBoard.store.state, theme);
+      return swarmDrawer(vBoard, vBoard.store.state, theme, renderCtx);
+    });
+    assert.ok(boardTree);
+    assert.equal(countTag(boardTree, "Input"), 2, "Board tab should render search and post inputs");
+
+    // 2. Jumping to #seq from a fresh panel must also initialize Board inputs outside render.
+    const { v: vJump, cx: cxJump } = makeView(snap);
+    vJump.control("swarm:jump:2", cxJump);
+    const jumpTree = renderStrict(() => swarmDrawer(vJump, vJump.store.state, theme, renderCtx));
+    assert.ok(jumpTree);
+    assert.equal(countTag(jumpTree, "Input"), 2);
+
+    // 3. Clicking Reply/Message from a fresh panel must initialize BOTH search and post inputs outside render.
+    const { v: vReply, cx: cxReply } = makeView(snap);
+    vReply.control("swarm:reply:api-1", cxReply);
+    const replyTree = renderStrict(() => swarmDrawer(vReply, vReply.store.state, theme, renderCtx));
+    assert.ok(replyTree);
+    assert.equal(countTag(replyTree, "Input"), 2);
+
+    // 4. Overview tab: workstream cards with progress + owners/refs must keep title, progress, note, and chips.
+    vBoard.control("swarm:tab:overview", cxBoard);
+    const overviewTree = renderStrict(() => swarmDrawer(vBoard, vBoard.store.state, theme, renderCtx));
+    const overviewText = collectText(overviewTree);
+    assert.ok(overviewText.includes("Backend JWT"), "workstream title must not be dropped by .when()");
+    assert.ok(overviewText.includes("2/3"), "workstream progress must render");
+    assert.ok(overviewText.includes("Tests running"), "workstream note must not be dropped by .when()");
+    assert.ok(overviewText.includes("@api-1"), "workstream owner chip must render");
+
+    // 5. Members tab: add-worker form + 2-step kill confirmation (card + inspector) must render cleanly.
+    vBoard.control("swarm:tab:members", cxBoard);
+    vBoard.control("swarm:add:open", cxBoard);
+    vBoard.control("swarm:kill:ask:api-1", cxBoard);
+    const membersTree = renderStrict(() => swarmDrawer(vBoard, vBoard.store.state, theme, renderCtx));
+    const membersText = collectText(membersTree);
+    assert.equal(countTag(membersTree, "Input"), 2, "add-worker form should render name + model inputs");
+    assert.equal(countTag(membersTree, "Textarea"), 1, "add-worker form should render brief textarea");
+    assert.ok(membersText.includes("Inspect") && membersText.includes("Confirm kill @api-1"), "confirm kill must keep sibling action buttons");
+
+    vBoard.control("swarm:inspect:api-1", cxBoard);
+    vBoard.swarm.memberDetail = readSwarmMemberTranscript(dataDir, COORD_ID, "api-1");
+    vBoard.control("swarm:kill:ask:api-1", cxBoard);
+    const inspTree = renderStrict(() => swarmDrawer(vBoard, vBoard.store.state, theme, renderCtx));
+    const inspText = collectText(inspTree);
+    assert.ok(inspText.includes("← Roster") && inspText.includes("Confirm kill"), "inspector confirm kill must keep header controls");
+
+    // 6. Graph tab + maximized modal must render cleanly in render mode.
+    vBoard.control("swarm:tab:graph", cxBoard);
+    vBoard.swarm.graphData = graphRes;
+    vBoard.control("swarm:modal", cxBoard);
+    const modalTree = renderStrict(() => swarmModal(vBoard, vBoard.store.state, theme, renderCtx));
+    assert.ok(modalTree);
+
+    // 7. Start Swarm inline card (no active swarm) creates its TextareaState in openStart, never in render.
+    const { v: vStart, cx: cxStart } = makeView(null);
+    vStart.control("swarm:start:open", cxStart);
+    const startTree = renderStrict(() => swarmStrip(vStart, vStart.store.state, theme));
+    assert.ok(startTree);
+    assert.equal(countTag(startTree, "Textarea"), 1);
+
+    // 8. Defensive guard: rendering Board with uninitialized inputs must never call InputState.new during render.
+    const { v: vRaw } = makeView(snap);
+    vRaw.swarm.open = true;
+    vRaw.swarm.tab = "board";
+    const rawTree = renderStrict(() => swarmDrawer(vRaw, vRaw.store.state, theme, renderCtx));
+    assert.ok(rawTree);
+    assert.equal(countTag(rawTree, "Input"), 0);
+  } finally {
+    hooks.deregister();
+    delete (globalThis as any).__swarmPanelTestState;
     rmSync(d, { recursive: true, force: true });
   }
 });
