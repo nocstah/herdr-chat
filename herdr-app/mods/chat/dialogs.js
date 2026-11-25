@@ -82,7 +82,7 @@ export class DialogCard {
       .hover((s) => s.opacity(0.88)).on_click(fn).child(label);
     let body;
     if (d.method === "permission") return this.permissionView(d, pending, t, answer, c, btn);
-    if (d.method === "questions") return this.frame(d, pending, t, answer, "help", "cancel").children(this.form.view(t, answer));
+    if (d.method === "questions") return this.frame(d, pending, t, answer, "help", "cancel").children(this.form.view(t, answer, c));
     if (d.method === "select") {
       body = v_flex().gap(4).children((d.options ?? []).map((o, i) => h_flex().id(`dlg-opt-${i}`).min_h(30).px(10).py(5).gap(8).items_center()
         .rounded(7).border_1().border_color(i === this.sel ? t.accent : t.border).bg(t.background).cursor_pointer()

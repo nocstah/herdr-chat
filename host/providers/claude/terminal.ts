@@ -187,6 +187,8 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   private askTimer: NodeJS.Timeout | null = null;
   private answering = false;
   private askHold = 0;
+  /** A question's previews by stop, read once per dialog (the screen shows only the cursor's option's). */
+  private previews: { key: string; byStop: Map<number, string> } | null = null;
   /** Until then, a review of the answers is sent as the card's last answer leaves it (the card asked them all). */
   private autoSubmit = 0;
   /** The answer being pressed is a question's last: its review is sent once its keys are in. */
@@ -324,7 +326,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
 
   private async pollAsk(): Promise<void> {
     if (!this.disposed && this.status === "blocked" && !this.answering && Date.now() >= this.askHold) {
-      const p = await this.screenPrompt();
+      const p = await this.withPreviews(await this.screenPrompt());
       if (this.status === "blocked" && !this.answering && Date.now() >= this.askHold && p !== undefined) this.showAsk(p);
     }
     this.askTimer = null;
@@ -347,6 +349,70 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
       return typeof text === "string" ? text : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * A question whose options have previews shows only the preview of the option the cursor is on. Before its
+   * card shows, the cursor steps over the other options to read theirs, then goes back where it was (once per
+   * dialog: a card shown again, or the cursor moved, keeps what was read). A preview it can't read stays out;
+   * the card then points to the terminal. Undefined: the dialog changed meanwhile, for the next poll to read.
+   */
+  private async withPreviews(p: ScreenPrompt | null | undefined): Promise<ScreenPrompt | null | undefined> {
+    if (!p || p.kind !== "question" || !p.rows.some((r) => r.preview)) return p;
+    const key = promptKey(p);
+    if (this.previews?.key !== key) {
+      const byStop = new Map<number, string>();
+      for (const r of p.rows) if (r.preview) byStop.set(r.stop, r.preview);
+      this.previews = { key, byStop };
+      const home = p.stops.find((r) => r.selected)?.stop;
+      let now: ScreenPrompt = p;
+      try {
+        for (const r of p.rows) {
+          if (byStop.has(r.stop) || r.input) continue;
+          await this.pressKeys(movesTo(now, r));
+          now = await this.cursorOn(key, r.stop);
+          const seen = now.stops[r.stop]?.preview;
+          if (seen) byStop.set(r.stop, seen);
+        }
+      } catch (e) {
+        this.log(`dialog: previews: ${(e as Error).message}`);
+      }
+      if (home !== undefined) {
+        try {
+          const at = await this.screenPrompt();
+          if (at && promptKey(at) === key && at.stops.find((r) => r.selected)?.stop !== home) {
+            await this.pressKeys(movesTo(at, at.stops[home]!));
+            await this.cursorOn(key, home);
+          }
+        } catch (e) {
+          this.log(`dialog: previews: back to option ${home + 1}: ${(e as Error).message}`);
+        }
+      }
+      this.log(`dialog: previews: ${byStop.size} of ${p.rows.filter((r) => !r.input).length} read`);
+      const fresh = await this.screenPrompt();
+      if (!fresh || promptKey(fresh) !== key || fresh.kind !== "question") return undefined;
+      p = fresh;
+    }
+    const known = this.previews?.key === key ? this.previews.byStop : null;
+    for (const r of p.rows) {
+      const seen = known?.get(r.stop);
+      if (seen) r.preview = seen;
+    }
+    return p;
+  }
+
+  /** The screen once this dialog's cursor is on `stop`, read alike twice in a row (not a frame drawn halfway). */
+  private async cursorOn(key: string, stop: number, ms = 1500): Promise<ScreenPrompt> {
+    let last: string | null = null;
+    for (const t0 = Date.now(); ; await new Promise((r) => setTimeout(r, 30))) {
+      const p = await this.screenPrompt();
+      if (p && promptKey(p) === key && p.stops.find((r) => r.selected)?.stop === stop) {
+        const seen = p.stops[stop]?.preview ?? "";
+        if (seen === last) return p;
+        last = seen;
+      } else last = null;
+      if (Date.now() - t0 > ms) throw new Error(`the cursor didn't settle on option ${stop + 1}`);
     }
   }
 
