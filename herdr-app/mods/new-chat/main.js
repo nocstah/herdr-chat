@@ -30,12 +30,13 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { appHome, closeOverlay, exec, focused, hc, knownAgents, nextCommand, notify, openOverlay, panes, props, readTextFile, run, spaces, terminals, theme } from "herdr";
+import { appHome, closeOverlay, exec, focused, hc, knownAgents, nextCommand, notify, openOverlay, panes, props, readTextFile, run, shared, spaces, terminals, theme } from "herdr";
 import * as fs from "fs/promises";
 import { randomBytes } from "crypto";
 import { UpdateDialog, checkHosts, checkRelease, checkRunning } from "./update.js";
 import { appHas, bare, flip, viewProps, viewTerminal } from "./faces.js";
 import { REMOTE_CHECK, VIEW_AGENTS, faceOf, flipsThere, remoteAnswer, started, withFace } from "./first-face.js";
+import { cwdFor } from "./cwd.js";
 
 const CHOICES = [
   { id: "pi", label: "Pi", icon: "pi", tint: true, letter: "p" },
@@ -44,11 +45,15 @@ const CHOICES = [
 ];
 const PREFS = () => `${appHome()}/data/herdr-chat/launcher.json`;
 
-/** A chat with `provider` in a new tab, in the focused terminal's folder (else the space's). */
+/** A chat with `provider` in a new tab, in the focused terminal's folder (or chat view's attached terminal, else the space's). */
 async function openChat(provider) {
-  const f = focused();
-  const space = spaces().find((s) => s.id === f?.space);
-  const cwd = f?.cwd || space?.folder || null;
+  const cwd = cwdFor({
+    focused: focused(),
+    spaces: spaces(),
+    panes: panes(),
+    terminals: terminals(),
+    chatPanes: /** @type {Record<string, string> | null} */ (shared("herdr-chat.panes")),
+  });
   const chat = `c-${randomBytes(4).toString("hex")}`;
   run("tab.new", { name: provider, mod: "chat", props: { chat, provider, ...(cwd ? { cwd } : {}) } });
   await fs.mkdir(`${appHome()}/data/herdr-chat`, { recursive: true });

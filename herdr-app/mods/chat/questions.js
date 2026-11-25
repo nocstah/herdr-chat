@@ -10,6 +10,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { alpha, icon } from "./util.js";
 import { SPACE } from "./space.js";
+import { copyField, pasteField } from "./composer.js";
 
 export class QuestionsForm {
   constructor(questions, { onChange, focusComposer }) {
@@ -245,6 +246,8 @@ export class QuestionsForm {
             cx.notify();
           })
           .on_action("herdrchat_dialog_escape", (_e, cx) => { this.key("escape", { inOther: qi }); cx.notify(); })
+          .on_action("herdrchat_copy", (_e, cx) => copyField(this.others.get(q.id), cx))
+          .on_action("herdrchat_paste", (_e, cx) => pasteField(this.others.get(q.id), cx))
           .child(Input.new(this.others.get(q.id)).h(30).px(10).rounded(8).border_1().border_color(lit(this.optionCount(q)) ? t.accent : t.input)
             .bg(t.background).text_size(12.5))));
     });

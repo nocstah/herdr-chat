@@ -61,7 +61,7 @@ export function flavorPalette(t) {
       return h6;
     },
     h1Rule: withAlpha(h1, dark ? 0.30 : 0.24),
-    codeBg: withAlpha(codeBase, dark ? 0.22 : 0.14),
+    codeBg: withAlpha(codeBase, dark ? 0.26 : 0.14),
     quoteBar,
     quoteBg: withAlpha(quoteBar, dark ? 0.08 : 0.06),
     bullet: dark ? cyan : blue,
@@ -389,7 +389,73 @@ export function mdChunks(text) {
   return out.length ? out : [{ kind: "prose", text: " ", heading: false }];
 }
 
-const TOOL_VERB_RE = /^(\$|Read|Edit|Write|Grep|Find|List|Fetch|Search|Agent|Task|Question|Message|Schedule|Workflow|Run|Bash|Waiting)(\s+[\s\S]*|\s*)$/;
+const TOOL_VERB_RE = /^(\$|REPL|Read|Edit|Write|Grep|Find|List|Fetch|Search|Agent|Task|Question|Message|Schedule|Workflow|Run|Bash|Waiting)(\s+[\s\S]*|\s*)$/;
+
+const VERB_KIND = {
+  $: "bash",
+  Bash: "bash",
+  Run: "bash",
+  REPL: "script",
+  Read: "read",
+  Edit: "edit",
+  Write: "write",
+  Grep: "search",
+  Find: "search",
+  List: "search",
+  Search: "search",
+  Fetch: "web",
+  Agent: "agent",
+  Task: "agent",
+  Waiting: "wait",
+};
+
+/** Strips leading `#` markers (and optional closing `#` markers) from an ATX heading line. */
+export function stripHeading(line) {
+  return String(line ?? "").replace(/^ {0,3}#{1,6}(?:\s+|$)/, "").replace(/[ \t]+#+[ \t]*$/, "").trim();
+}
+
+const INLINE_SPAN_RE = /(`+)(?!`)(.+?)(?<!`)\1(?!`)|\[((?:[^[\]`]|`[^`]*`)+)\]\(([^)\s]+)\)|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)|~~(?=\S)(.+?)(?<=\S)~~/g;
+
+/**
+ * Parses a single-line markdown snippet (heading or table header) into flat inline runs
+ * so GPUI native divs can paint it with a real foreground color (working around gpui-shell's
+ * TextView resetting text color to theme.foreground) while keeping inline code pills, bold,
+ * italic, strikethrough and clickable links intact.
+ * @param {string} text
+ * @param {{ bold?: boolean, italic?: boolean, strike?: boolean, url?: string }} [style]
+ * @returns {Array<{ text: string, code?: boolean, bold?: boolean, italic?: boolean, strike?: boolean, url?: string }>}
+ */
+export function parseInlineSpans(text, style = {}) {
+  const src = String(text ?? "");
+  if (!src) return [];
+  const out = [];
+  const push = (run) => {
+    if (!run.text) return;
+    out.push(run);
+  };
+  let last = 0;
+  const re = new RegExp(INLINE_SPAN_RE.source, "g");
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) push({ ...style, text: src.slice(last, m.index) });
+    if (m[1]) {
+      let body = m[2];
+      if (m[1].length > 1 && body.startsWith(" ") && body.endsWith(" ") && body.trim()) body = body.slice(1, -1);
+      push({ ...style, text: body, code: true });
+    } else if (m[3] != null && m[4] != null) {
+      out.push(...parseInlineSpans(m[3], { ...style, url: m[4] }));
+    } else if (m[5] != null || m[6] != null) {
+      out.push(...parseInlineSpans(m[5] ?? m[6], { ...style, bold: true }));
+    } else if (m[7] != null) {
+      out.push(...parseInlineSpans(m[7], { ...style, italic: true }));
+    } else if (m[8] != null) {
+      out.push(...parseInlineSpans(m[8], { ...style, strike: true }));
+    }
+    last = re.lastIndex;
+  }
+  if (last < src.length) push({ ...style, text: src.slice(last) });
+  return out.length ? out : [{ ...style, text: src }];
+}
 
 /** Splits a tool's title into a colored leading verb and the rest, or null if none matches. */
 export function splitToolVerb(title) {
@@ -405,12 +471,12 @@ export function splitToolVerb(title) {
  * "Read the config"), not a tool's verb: "REPL" goes before it, in the script color. A Poll's "Waiting" ("Waiting for
  * #12 Run the tests") is a wait's color, not a generic tool's.
  * @param {string | null | undefined} title
- * @param {{ type?: string } | null | undefined} d the tool's detail
+ * @param {{ type?: string } | null | undefined} [d] the tool's detail (inferred from verb when omitted)
  * @returns {{ verb: string, rest: string, kind: string } | null}
  */
 export function toolVerb(title, d) {
   if (d?.type === "script") return { verb: "REPL", rest: title && title.trim() !== "REPL" ? title.trim() : "", kind: "script" };
   const sp = splitToolVerb(title);
   if (!sp) return null;
-  return { ...sp, kind: sp.verb === "Waiting" ? "wait" : d?.type ?? "generic" };
+  return { ...sp, kind: sp.verb === "Waiting" ? "wait" : d?.type ?? VERB_KIND[sp.verb] ?? "generic" };
 }

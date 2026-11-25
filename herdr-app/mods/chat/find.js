@@ -8,6 +8,7 @@
 import { div } from "gpui-kit";
 import { h_flex, InputState, Input } from "gpui-base";
 import { alpha, icon } from "./util.js";
+import { copyField, pasteField } from "./composer.js";
 
 // The field's keys (composer.js binds them in "HerdrChatFind > Input").
 export const FIND_ACTIONS = ["herdrchat_find_older", "herdrchat_find_newer", "herdrchat_find_close"];
@@ -82,6 +83,8 @@ export class Find {
       .child(icon(name, 13));
     let field = div().id("find-field").flex_1().min_w(0).key_context("HerdrChatFind");
     for (const a of FIND_ACTIONS) field = field.on_action(a, (_e, cx) => actions(a, cx));
+    field = field.on_action("herdrchat_copy", (_e, cx) => copyField(this.input, cx))
+      .on_action("herdrchat_paste", (_e, cx) => pasteField(this.input, cx));
     field = field.child(Input.new(this.input).h(26).px(2).text_size(12.5));
     return h_flex().id("find-bar").w(340).h(36).pl(10).pr(4).gap(4).items_center().rounded(10)
       .bg(t.popover).border_1().border_color(t.input)

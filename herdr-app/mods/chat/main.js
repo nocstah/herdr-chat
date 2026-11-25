@@ -48,14 +48,14 @@ import { Connection, hostSide, hostTerminal, readConfig, runsHost } from "./conn
 import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { findMark, lineOf, planProgress, row, samePlan } from "./cards.js";
-import { fileLink } from "./paths.js";
+import { fileLink, resolveFilePath } from "./paths.js";
 import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { activityDrawer, backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
 import { bgDetailLines, bgTicking } from "./background.js";
-import { openFile } from "./files.js";
+import { openFile, openFolder } from "./files.js";
 import { Composer } from "./composer.js";
 import { Picker, menuView, slashItems, wheel as wheelMenu } from "./menus.js";
 import { DialogCard } from "./dialogs.js";
@@ -66,6 +66,9 @@ import { Viewer, readSvgSize } from "./viewer.js";
 import { TermBar } from "./termbar.js";
 import { DEFAULT_PROVIDER, MOD, PROVIDERS, PROVIDER_NAMES, alpha, homeRel, icon, message, monoFont, plural, relTime, spansText, spinner, tildePath, typedText, unwrapHc } from "./util.js";
 import { themeSig } from "./flavor.js";
+import { MAC } from "./platform.js";
+import { pickFiles } from "./file-picker.js";
+import { assembleMessageWithPastes, canUnpackInline, createPastedChip, formatCount, pasteChipTitle, rebalancePasteModes } from "./paste.js";
 
 const COL_MAX = 800;
 const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before the app's next read (beforeAppRead)
@@ -169,12 +172,16 @@ export default class HerdrChat extends View {
         if (r.code === 0 && r.stdout.trim()) { this.dictation = r.stdout.trim(); this.debug.mark(); cx.notify(); }
       } catch {}
     });
+    this.pasteSeq = 0;
+    this.pastePreviewId = null;
+    this.pastePreviewFocus = cx.focus_handle();
     this.composer = new Composer(cx, {
       placeholder: `Message ${PROVIDER_NAMES[this.provider ?? DEFAULT_PROVIDER] ?? "the agent"}…`,
-      onChange: (cx) => { this.updateMenu(cx); this.debug.mark(); cx.notify(); },
+      onChange: (cx) => { this.updateMenu(cx); this.rebalancePastes(cx); this.debug.mark(); cx.notify(); },
       onPasteOther: (cx) => this.pasteImage(cx),
-      // req logs a failure. An older host has no detach_image: its chips aren't the chat's copies.
-      onRemoveChip: (ch) => this.req("detach_image", { path: ch.path }).catch(() => {}),
+      onPasteCollapse: (text, cx) => this.collapsePaste(text, cx),
+      // req logs a failure. An older host has no detach_image / detach_file: its chips aren't the chat's copies.
+      onRemoveChip: (ch, cx) => this.handleRemoveChip(ch, cx),
       skills: () => this.commandList().filter((c) => c.source === "skill").map((c) => ({ command: c.name, name: c.name.replace(/^skill:/, "") })),
     });
     this.conn = new Connection({
@@ -956,16 +963,32 @@ export default class HerdrChat extends View {
   // `mode`: "auto" (Enter: steers while the agent works) or "followUp" (Alt+Enter: after this run).
   // A follow-up taken out of its lane for editing goes back to it on Enter (its lane never changes implicitly).
   send(cx, mode = "auto") {
+    if (this.composer.chips.some((c) => c.pending && (c.kind === "paste" || this.remoteMachine()))) {
+      return this.flash("Uploading attachments… try again once finished", cx);
+    }
+    const failedPaste = this.composer.chips.find((c) => c.kind === "paste" && c.mode === "file" && (c.error || !c.path));
+    if (failedPaste) {
+      if (!failedPaste.error && !failedPaste.pending) {
+        this.uploadPasteText(failedPaste, cx);
+        return this.flash("Saving large paste as a .txt file… try again in a moment", cx);
+      }
+      return this.flash(`Couldn't attach pasted text: ${failedPaste.error} (click the chip to retry or remove)`, cx);
+    }
     if (mode === "auto" && this.editingQueued?.lane === "followUp") mode = "followUp";
     this.editingQueued = null;
     const message = this.composer.message();
     if (message === null) return this.flash("One skill per message: remove the other pill", cx);
-    const text = message.replace(/\s+$/, "");
-    const images = this.composer.chips.map((c) => c.path);
-    if (!text.trim() && !images.length) return;
-    const m = /^\/(\S+)\s*([\s\S]*)$/.exec(text.trim());
+    const rawText = message.replace(/\s+$/, "");
+    const images = this.composer.chips.filter((c) => c.kind !== "file" && c.kind !== "paste").map((c) => c.path);
+    const files = this.composer.chips.filter((c) => c.kind === "file").map((c) => c.path);
+    const pastes = this.composer.pasteChips();
+    const hasAttachments = images.length > 0 || files.length > 0 || pastes.length > 0;
+    if (!rawText.trim() && !hasAttachments) return;
+    const text = assembleMessageWithPastes(rawText, pastes, files, this.store.state.cwd || this.cwd);
+    const m = /^\/(\S+)\s*([\s\S]*)$/.exec(rawText.trim());
     // /reload on a host older than the install restarts the host, not just the agent.
-    if (m?.[1] === "reload" && !images.length && this.updater.canRestart(this.conn.welcome)) {
+    if (m?.[1] === "reload" && !hasAttachments && this.updater.canRestart(this.conn.welcome)) {
+      this.pastePreviewId = null;
       this.composer.clear();
       this.updater.want();
       const quietNow = quiet(this.store.state, hostTerminal(this.chat)?.address);
@@ -973,32 +996,40 @@ export default class HerdrChat extends View {
     }
     // The terminal view: /model alone opens the chat's picker where the host lists the TUI's models (Codex, Antigravity);
     // /effort alone opens the chat's thinking picker where the model has adjustable levels.
-    if (this.view && m?.[1] === "model" && !m[2].trim() && !images.length) {
+    if (this.view && m?.[1] === "model" && !m[2].trim() && !hasAttachments) {
+      this.pastePreviewId = null;
       this.composer.clear();
       return this.openModelPicker(cx);
     }
-    if (this.view && m?.[1] === "effort" && !m[2].trim() && !images.length && this.hasThinking()) {
+    if (this.view && m?.[1] === "effort" && !m[2].trim() && !hasAttachments && this.hasThinking()) {
+      this.pastePreviewId = null;
       this.composer.clear();
       return this.openThinkingPicker(cx);
     }
-    if (m && !images.length) {
+    if (m && !hasAttachments) {
       const cmd = this.commandList().find((c) => c.name === m[1]);
       if (cmd?.handler === "client") {
+        this.pastePreviewId = null;
         this.composer.clear();
         this.clientCommand(m[1], m[2].trim(), cx);
         return;
       }
     }
+    // Detach any leftover .txt file from a paste chip that ended up sent inline.
+    for (const ch of pastes) {
+      if (ch.mode === "inline" && ch.path) this.req("detach_file", { path: ch.path }).catch(() => {});
+    }
+    this.pastePreviewId = null;
     this.composer.clear();
     this.timeline.toBottom();
     // The terminal view: `!command` is the TUI's shell command (Claude Code's bash mode), shown by its own records (a card).
-    const bang = Boolean(this.view) && !images.length && /^!\s*[^\s=!]/.test(text.trim());
+    const bang = Boolean(this.view) && !hasAttachments && /^!\s*[^\s=!]/.test(rawText.trim());
     this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}) }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
       // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
       // and the chat comes back once the TUI is at its prompt again.
       // `/model <name>` and `/effort <level>` set it in place in the TUI (no picker opens there).
-      if (this.view && m && !images.length && !VIEW_IN_PLACE.has(m[1]) && !((m[1] === "model" || m[1] === "effort") && m[2].trim())) this.visitTerminal(cx);
+      if (this.view && m && !hasAttachments && !VIEW_IN_PLACE.has(m[1]) && !((m[1] === "model" || m[1] === "effort") && m[2].trim())) this.visitTerminal(cx);
     });
   }
 
@@ -1218,20 +1249,71 @@ export default class HerdrChat extends View {
     });
   }
 
+  uploadFiles(cx) {
+    if (this.pickingFiles) return;
+    this.pickingFiles = true;
+    const startDir = this.remoteMachine() ? this.homeDir : (this.store.state.cwd || this.cwd || this.homeDir);
+    cx.spawn(async (cx) => {
+      try {
+        const paths = await pickFiles(exec, { platform: MAC ? "darwin" : "linux", startDir });
+        if (paths.length) this.drop(paths, cx);
+        else this.composer.focus();
+      } catch (e) {
+        this.flash(message(e), cx);
+      } finally {
+        this.pickingFiles = false;
+        this.debug.mark();
+        cx.notify();
+      }
+    });
+  }
+
   drop(paths, cx) {
-    let text = this.composer.value;
-    for (const p of paths) {
+    for (const raw of paths) {
+      const p = String(raw ?? "").trim();
+      if (!p) continue;
       if (IMAGE.test(p)) {
         this.attachImage(this.composer.addChip(p, { pending: true }), cx);
         continue;
       }
-      const rel = this.cwd && p.startsWith(this.cwd + "/") ? p.slice(this.cwd.length + 1) : p;
-      text += (text && !/\s$/.test(text) ? " " : "") + `@${rel} `;
+      if (this.composer.chips.some((c) => c.kind === "file" && (c.sourcePath === p || c.path === p))) continue;
+      this.attachFile(this.composer.addChip(p, { kind: "file", pending: true }), cx);
     }
-    if (text !== this.composer.value) this.composer.set(text);
     this.composer.focus();
     this.debug.mark();
     cx.notify();
+  }
+
+  // A picked or dropped non-image file: on another machine it goes there first (`hc put`) and is
+  // copied into the chat's attachments folder; locally it stays in place after checking it exists.
+  // An older host without `attach_file` keeps the path as-is.
+  attachFile(chip, cx) {
+    cx.spawn(async (cx) => {
+      const remote = Boolean(this.remoteMachine());
+      let from = chip.path;
+      try {
+        if (remote) from = await this.putForHost(chip.path, "file");
+        const d = await this.req("attach_file", { path: from, ...(remote ? { copy: true } : {}) }, cx);
+        if (this.composer.chips.includes(chip)) {
+          Object.assign(chip, { path: d.path ?? from, label: d.name ?? chip.label, isDir: Boolean(d.isDir) });
+        } else if (remote && d.path) {
+          this.req("detach_file", { path: d.path }).catch(() => {});
+        }
+      } catch (e) {
+        if (/^Unknown op/.test(message(e))) {
+          if (this.composer.chips.includes(chip)) chip.path = from;
+        } else {
+          const i = this.composer.chips.indexOf(chip);
+          if (i >= 0) {
+            this.composer.removeChip(i);
+            this.flash(message(e), cx);
+          }
+        }
+      }
+      chip.pending = false;
+      this.debug.mark();
+      cx.notify();
+    });
   }
 
   // A dropped image's chip holds the dropped file until the host has made the chat's copy
@@ -1257,6 +1339,193 @@ export default class HerdrChat extends View {
       this.debug.mark();
       cx.notify();
     });
+  }
+
+  // ---- collapsed large pastes (paste.js) ----------------------------------------
+
+  collapsePaste(rawText, cx) {
+    const chip = createPastedChip(rawText, ++this.pasteSeq);
+    this.composer.chips.push(chip);
+    this.rebalancePastes(cx);
+    this.composer.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  rebalancePastes(cx) {
+    const pastes = this.composer.pasteChips();
+    if (!pastes.length) return;
+    const { toUpload, toDetach } = rebalancePasteModes(this.composer.value, pastes);
+    for (const ch of toDetach) {
+      const p = ch.path;
+      ch.path = null;
+      ch.sizeBytes = null;
+      if (p) this.req("detach_file", { path: p }).catch(() => {});
+    }
+    for (const ch of toUpload) this.uploadPasteText(ch, cx);
+  }
+
+  uploadPasteText(chip, cx) {
+    if (chip.pending) return;
+    chip.pending = true;
+    chip.error = null;
+    cx.spawn(async (cx) => {
+      try {
+        const d = await this.req("attach_text", { text: chip.text, name: chip.fileName }, cx);
+        if (this.composer.chips.includes(chip) && chip.mode === "file") {
+          Object.assign(chip, { path: d.path, fileName: d.name ?? chip.fileName, sizeBytes: d.sizeBytes ?? null, error: null });
+        } else if (d?.path) {
+          this.req("detach_file", { path: d.path }).catch(() => {});
+        }
+      } catch (e) {
+        const err = message(e);
+        if (this.composer.chips.includes(chip)) {
+          chip.error = /^Unknown op/.test(err) ? "Restart the chat host to attach large pastes as .txt files" : err;
+          this.flash(chip.error, cx);
+        }
+      } finally {
+        chip.pending = false;
+        this.debug.mark();
+        cx.notify();
+      }
+    });
+  }
+
+  handleRemoveChip(ch, cx) {
+    if (ch.kind === "paste") {
+      if (this.pastePreviewId === ch.id) {
+        this.pastePreviewId = null;
+        this.composer.focus();
+      }
+      if (ch.path) this.req("detach_file", { path: ch.path }).catch(() => {});
+      if (cx) this.rebalancePastes(cx);
+      return;
+    }
+    this.req(ch.kind === "file" ? "detach_file" : "detach_image", { path: ch.path }).catch(() => {});
+  }
+
+  findPasteChip(id) {
+    return this.composer.chips.find((ch) => ch.kind === "paste" && ch.id === id) ?? null;
+  }
+
+  openPastePreview(id, cx) {
+    if (!this.findPasteChip(id)) return;
+    this.pastePreviewId = id;
+    this.composer.menu = null;
+    this.pastePreviewFocus?.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  closePastePreview(cx) {
+    if (!this.pastePreviewId) return;
+    this.pastePreviewId = null;
+    this.composer.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  unpackPaste(id, cx) {
+    const idx = this.composer.chips.findIndex((ch) => ch.kind === "paste" && ch.id === id);
+    if (idx < 0) return;
+    const ch = this.composer.chips[idx];
+    if (!canUnpackInline(ch, this.composer.value.length)) {
+      return this.flash(ch.hasControlChars ? "Contains terminal control characters: keep as .txt attachment" : "Too large to unpack inline: keep as .txt attachment", cx);
+    }
+    this.composer.removeChip(idx, cx);
+    this.composer.insertInline(ch.text);
+    this.rebalancePastes(cx);
+    this.pastePreviewId = null;
+    this.composer.focus();
+    this.debug.mark();
+    cx.notify();
+  }
+
+  retryPasteUpload(id, cx) {
+    const ch = this.findPasteChip(id);
+    if (!ch || ch.mode !== "file") return;
+    ch.error = null;
+    this.uploadPasteText(ch, cx);
+    this.debug.mark();
+    cx.notify();
+  }
+
+  removePasteChip(id, cx) {
+    const idx = this.composer.chips.findIndex((ch) => ch.kind === "paste" && ch.id === id);
+    if (idx < 0) return;
+    this.composer.removeChip(idx, cx);
+    this.debug.mark();
+    cx.notify();
+  }
+
+  pastePreviewModal(t) {
+    if (!this.pastePreviewId) return null;
+    const ch = this.findPasteChip(this.pastePreviewId);
+    if (!ch) {
+      this.pastePreviewId = null;
+      return null;
+    }
+    const MAX_PREVIEW_LINES = 2000;
+    const allLines = ch.text.split("\n");
+    const shownLines = allLines.slice(0, MAX_PREVIEW_LINES);
+    const hiddenLines = allLines.length - shownLines.length;
+    const canEdit = canUnpackInline(ch, this.composer.value.length);
+    const copied = this.copiedAt.has("paste-preview");
+    const btn = (id, label, { primary = false, danger = false, ic = null, onClick } = {}) => h_flex().id(id).h(28).px(10).gap(6).items_center().rounded(7).cursor_pointer()
+      .border_1().border_color(primary ? t.solid : danger ? alpha(t.ansi1, 0.45) : t.input)
+      .bg(primary ? t.solid : danger ? alpha(t.ansi1, 0.12) : t.raised)
+      .text_color(primary ? t.solid_foreground : danger ? t.ansi1 : t.foreground)
+      .text_size(12).font_medium().hover((s) => s.opacity(0.86))
+      .on_click(onClick)
+      .when(Boolean(ic), (e) => e.child(icon(ic, 12)))
+      .child(label);
+
+    let note = null;
+    if (ch.error) {
+      note = h_flex().px(14).py(8).gap(8).items_center().border_b_1().border_color(alpha(t.ansi1, 0.35)).bg(alpha(t.ansi1, 0.1)).text_size(12).text_color(t.ansi1)
+        .child(icon("alert", 13)).child(div().flex_1().min_w(0).child(ch.error));
+    } else if (ch.hasControlChars) {
+      note = h_flex().px(14).py(7).gap(8).items_center().border_b_1().border_color(t.border).bg(t.surface).text_size(11.5).text_color(t.muted)
+        .child(icon("info", 12).text_color(t.accent)).child("Contains terminal control characters — will be sent as a .txt file attachment.");
+    } else if (ch.mode === "file") {
+      note = h_flex().px(14).py(7).gap(8).items_center().border_b_1().border_color(t.border).bg(t.surface).text_size(11.5).text_color(t.muted)
+        .child(icon("info", 12).text_color(t.accent)).child(ch.pending ? "Saving as a .txt file attachment…" : "Exceeds inline size limit — will be sent as a .txt file attachment.");
+    }
+
+    return div().id("paste-preview-backdrop").absolute().top(0).bottom(0).left(0).right(0)
+      .bg(alpha("#000000", 0.55)).flex().items_center().justify_center().p(24)
+      .on_click((_e, cx) => this.closePastePreview(cx))
+      .child(v_flex().id("paste-preview-dialog").w_full().max_w(740).max_h("82%").rounded(12).overflow_hidden()
+        .border_1().border_color(t.border).bg(t.popover).shadow_md()
+        .track_focus(this.pastePreviewFocus)
+        .on_click((_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => {
+          if (e.key === "escape") {
+            cx.stop_propagation();
+            this.closePastePreview(cx);
+          }
+        })
+        .child(h_flex().h(42).px(14).gap(8).items_center().border_b_1().border_color(t.border).bg(t.surface)
+          .child(icon("file-text", 14).text_color(t.accent))
+          .child(div().font_semibold().text_size(13).text_color(t.foreground).child(pasteChipTitle(ch)))
+          .child(div().text_size(11.5).text_color(t.dim).child(`· ${formatCount(ch.charCount)} chars`))
+          .when(ch.mode === "file", (e) => e.child(div().px(5).py(1).rounded(4).text_size(10.5).bg(alpha(t.accent, 0.14)).text_color(t.accent).child(".txt")))
+          .child(div().flex_1())
+          .child(h_flex().id("paste-preview-close").w(26).h(26).items_center().justify_center().rounded(6).cursor_pointer()
+            .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close (Esc)")
+            .on_click((_e, cx) => this.closePastePreview(cx)).child(icon("x", 13))))
+        .when(Boolean(note), (e) => e.child(note))
+        .child(v_flex().id("paste-preview-body").flex_1().min_h(120).max_h(440).overflow_y_scrollbar().overflow_x_scroll()
+          .px(14).py(12).bg(t.background).font_family(monoFont()).text_size(12.5).line_height("19px").text_color(t.foreground)
+          .children(shownLines.map((line) => div().flex_none().whitespace_nowrap().child(line || " ")))
+          .when(hiddenLines > 0, (e) => e.child(div().pt(8).text_size(11.5).text_color(t.dim).child(`… ${formatCount(hiddenLines)} more lines (Copy copies all)`))))
+        .child(h_flex().px(14).py(10).gap(8).items_center().border_t_1().border_color(t.border).bg(t.surface)
+          .when(canEdit, (e) => e.child(btn("paste-preview-edit", "Edit inline", { ic: "pencil", onClick: (_e, cx) => this.unpackPaste(ch.id, cx) })))
+          .child(btn("paste-preview-copy", copied ? "Copied" : "Copy", { ic: copied ? "check" : "copy", onClick: (_e, cx) => this.copy("paste-preview", ch.text, cx) }))
+          .when(Boolean(ch.error), (e) => e.child(btn("paste-preview-retry", "Retry upload", { ic: "rotate", onClick: (_e, cx) => this.retryPasteUpload(ch.id, cx) })))
+          .child(div().flex_1())
+          .child(btn("paste-preview-remove", "Remove", { danger: true, ic: "x", onClick: (_e, cx) => this.removePasteChip(ch.id, cx) }))
+          .child(btn("paste-preview-done", "Close", { primary: true, onClick: (_e, cx) => this.closePastePreview(cx) }))));
   }
 
   // ---- menus and pickers --------------------------------------------------------
@@ -1709,6 +1978,7 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_enter") this.send(cx);
     else if (a === "herdrchat_stop") this.abort(cx);
     else if (a === "herdrchat_escape") {
+      if (this.pastePreviewId) return this.closePastePreview(cx);
       if (m) this.composer.menu = null;
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
       else if (this.runAsk) this.runAsk = null;
@@ -1960,15 +2230,15 @@ export default class HerdrChat extends View {
     });
   }
 
-  // A file of this computer's (a pasted or dropped image) for a host on another machine: sent
-  // beside the host's terminal there (hc put, at most 8 MB), and its path there.
-  async putForHost(path) {
-    const host = hostTerminal(this.chat);
-    if (!host) throw new Error("the chat's host isn't running");
-    const r = await hc(["put", host.address, path, "--json"]);
-    if (r.code !== 0) throw new Error(`couldn't send the image to ${machineOf(host.address)}: ${(r.stderr || r.stdout).trim()}`);
+  // A file of this computer's (a pasted, picked, or dropped image/file) for a host on another machine:
+  // sent beside the host's terminal there (hc put, at most 8 MB), and its path there.
+  async putForHost(path, what = "image") {
+    const target = hostTerminal(this.chat)?.address ?? this.view;
+    if (!target) throw new Error("the chat's host isn't running");
+    const r = await hc(["put", target, path, "--json"]);
+    if (r.code !== 0) throw new Error(`couldn't send the ${what} to ${machineOf(target)}: ${(r.stderr || r.stdout).trim()}`);
     const landed = JSON.parse(r.stdout)?.path;
-    if (!landed) throw new Error("hc put said nothing of where the image landed");
+    if (!landed) throw new Error(`hc put said nothing of where the ${what} landed`);
     return landed;
   }
 
@@ -2077,15 +2347,17 @@ export default class HerdrChat extends View {
     });
   }
 
-  // A link in an answer: a file path (rich.js linkPaths) opens in an editor, as
-  // a tool's path does, once it's there; any other link goes to the system.
+  // A link in an answer: a file link (rich.js linkPaths, `file://…`, or a
+  // relative/absolute path) opens in Herdr's files viewer (else an editor), as
+  // a tool's path does, once it's there; HTTP(S) links go to the system.
   /** @param {string} url @param {import("gpui-kit").Context} cx */
   onLink(url, cx) {
     const bang = runLink(url);
     if (bang) return this.askRun([bang], cx);
     const f = fileLink(url);
-    if (!f) return cx.open_url(url);
-    this.openFile(f.path, f.line, cx, { mustExist: true });
+    if (f) return this.openFile(f.path, f.line, cx, { mustExist: true, anchor: f.anchor });
+    if (/^https?:\/\//i.test(url)) return cx.open_url(url);
+    this.flash(`Can't open link: ${url}`, cx);
   }
 
   // ---- `!` commands in answers (bang.js) -------------------------------------------
@@ -2190,28 +2462,56 @@ export default class HerdrChat extends View {
         .child(btn("quota-dismiss", "Dismiss", false, "quota:dismiss")));
   }
 
-  // A file a tool touched, in an editor (files.js). `mustExist`: a path an answer
-  // named, checked first (in the chat's folder, on the space's machine).
-  openFile(path, line, cx, { mustExist = false } = {}) {
+  // A file a tool touched or an answer linked, in Herdr's files viewer or an
+  // editor (files.js). `mustExist`: a path an answer named, checked first (in
+  // the chat's folder, on the space's machine).
+  openFile(path, line, cx, { mustExist = false, anchor = null } = {}) {
     const me = this.myPane();
-    const abs = path.startsWith("/") ? path : `${this.cwd ?? this.store.state.cwd}/${path}`;
-    this.lastOpen = { path: abs, line, at: Date.now(), how: null };
+    const machine = this.remoteMachine();
+    const cwd = this.cwd ?? this.store.state.cwd;
+    let abs = resolveFilePath(path, cwd, machine ? null : this.homeDir);
+    this.lastOpen = { path: abs, line: line ?? null, at: Date.now(), how: null };
     cx.spawn(async (cx) => {
       try {
-        if (mustExist) {
-          const machine = this.remoteMachine();
-          const r = await exec("/bin/sh", ["-c", 'test -f "$1"', "sh", abs], machine ? { on: machine, timeout: 15000 } : { timeout: 15000 });
+        if (mustExist || abs === "~" || abs.startsWith("~/")) {
+          const check = 'case "$1" in "~/"*) p="$HOME/${1#~/}" ;; "~") p="$HOME" ;; *) p="$1" ;; esac; '
+            + 'if [ -f "$p" ]; then printf "f\\n%s" "$p"; elif [ -d "$p" ]; then printf "d\\n%s" "$p"; else exit 1; fi';
+          const r = await exec("/bin/sh", ["-c", check, "sh", abs], machine ? { on: machine, timeout: 15000 } : { timeout: 15000 });
           if (r.code !== 0) {
-            this.lastOpen.how = "missing";
-            this.flash(`No file ${tildePath(abs)}`, cx);
-            this.debug.mark();
-            return;
+            if (mustExist) {
+              this.lastOpen.how = "missing";
+              this.flash(`No file ${tildePath(abs)}`, cx);
+              this.debug.mark();
+              return;
+            }
+          } else {
+            const [kind, resolved] = r.stdout.split("\n");
+            if (resolved) {
+              abs = resolved;
+              this.lastOpen.path = abs;
+            }
+            if (kind === "d") {
+              const shown = openFolder({ path: abs, cwd, machine });
+              if (shown) {
+                this.lastOpen.how = shown.how;
+                if (this.peekMode) this.closePeek();
+              } else {
+                this.lastOpen.how = "dir";
+                this.flash(`Folder ${tildePath(abs)}`, cx);
+              }
+              this.debug.mark();
+              cx.notify();
+              return;
+            }
           }
         }
-        const r = await openFile({ path: abs, line, cwd: this.cwd ?? this.store.state.cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine: this.remoteMachine() });
+        const r = await openFile({ path: abs, line, anchor, cwd, pane: me?.pane, tab: me?.tab, space: this.place?.space, machine });
         this.lastOpen.how = r.how;
         if (r.terminal) {
           this.editorTerm = { address: r.terminal, at: Date.now(), seen: false };
+        }
+        if (this.peekMode && (r.how === "my-files" || r.how === "better-files")) {
+          this.closePeek();
         }
       } catch (e) {
         this.lastOpen.how = "failed";
@@ -2308,7 +2608,11 @@ export default class HerdrChat extends View {
         this.lastCopy = { id: "folder", len: path.length, text: path };
         return this.flash(`Copied ${path.replace(this.homeDir, "~")}`, cx);
       }
-      // The + menu: "@" or "/" typed where the text ends, which opens its menu; or the clipboard's image.
+      // The + menu: native file picker, "@" or "/" menus, or the clipboard's image.
+      case "plus:upload":
+        this.plusOpen = false;
+        this.uploadFiles(cx);
+        break;
       case "plus:file":
       case "plus:command": {
         this.plusOpen = false;
@@ -2401,11 +2705,22 @@ export default class HerdrChat extends View {
         }
         if (what.startsWith("enlarge:chip:")) {
           const ch = this.composer.chips[Number(what.slice(13))];
-          if (ch) this.enlarge(ch.path, ch.size, cx);
+          if (ch?.kind === "paste") this.openPastePreview(ch.id, cx);
+          else if (ch && ch.kind !== "file") this.enlarge(ch.path, ch.size, cx);
           break;
         }
         if (what.startsWith("chip-x:")) {
-          this.composer.removeChip(Number(what.slice(7)));
+          this.composer.removeChip(Number(what.slice(7)), cx);
+          break;
+        }
+        if (what === "paste:close") return this.closePastePreview(cx);
+        if (what.startsWith("paste:preview:")) return this.openPastePreview(what.slice(14), cx);
+        if (what.startsWith("paste:unpack:")) return this.unpackPaste(what.slice(13), cx);
+        if (what.startsWith("paste:retry:")) return this.retryPasteUpload(what.slice(12), cx);
+        if (what.startsWith("paste:remove:")) return this.removePasteChip(what.slice(13), cx);
+        if (what.startsWith("paste:copy:")) {
+          const ch = this.findPasteChip(what.slice(11));
+          if (ch) this.copy("paste-preview", ch.text, cx);
           break;
         }
         if (what.startsWith("enlarge:")) {
@@ -2490,7 +2805,8 @@ export default class HerdrChat extends View {
     else if (c.startsWith("drop:")) this.drop(c.slice(5).split(","), cx);
     else if (c.startsWith("hover:")) this.setHover(c.slice(6) || this.hover, Boolean(c.slice(6)), cx);
     else if (c.startsWith("svghover:")) this.setSvgHover(c.slice(9) || this.svgHover, Boolean(c.slice(9)), cx);
-    else if (c === "clear") this.composer.clear();
+    else if (c === "clear") { this.pastePreviewId = null; this.composer.clear(); }
+    else if (c.startsWith("paste:")) this.collapsePaste(c.slice(6), cx);
     else if (c.startsWith("wheel:")) this.wheel(Number(c.slice(6)), cx);
     else if (c === "outside") this.outside(cx);
     else if (c.startsWith("shortcut:")) this.shortcut(c.slice(9), cx);
@@ -2783,7 +3099,7 @@ export default class HerdrChat extends View {
       hasOlder: this.store.hasOlder,
       expanded: [...this.expanded], full: [...this.full.keys()],
       sticky: this.timeline.sticky, top: Math.round(this.timeline.top), viewH: this.timeline.viewH, scale: this.timeline.scale, shown: this.timeline.shown,
-      composer: { text: this.composer.value, pills: this.composer.tokens().map((x) => ({ ...x.range, id: x.token.id, label: x.token.label ?? null })), cursor: this.composer.cursor, message: this.composer.message(), chips: this.composer.chips.map((c) => c.path), pending: this.composer.chips.filter((c) => c.pending).length, chipImages: this.composer.chips.map((c) => homeRel(c.path, appHome())), chipSizes: this.composer.chips.map((c) => c.size), focused: this.composer.focused, context: this.composer.context(), history: this.composer.history ? this.composer.history.i : null },
+      composer: { text: this.composer.value, pills: this.composer.tokens().map((x) => ({ ...x.range, id: x.token.id, label: x.token.label ?? null })), cursor: this.composer.cursor, message: this.composer.message(), chips: this.composer.chips.map((c) => c.path ?? null), chipKinds: this.composer.chips.map((c) => c.kind ?? "image"), pastes: this.composer.pasteChips().map((c) => ({ id: c.id, lineCount: c.lineCount, charCount: c.charCount, mode: c.mode, path: c.path ?? null, pending: Boolean(c.pending), error: c.error ?? null })), pastePreview: this.pastePreviewId ?? null, pending: this.composer.chips.filter((c) => c.pending).length, chipImages: this.composer.chips.map((c) => (c.path ? homeRel(c.path, appHome()) : null)), chipSizes: this.composer.chips.map((c) => c.size ?? null), focused: this.composer.focused, context: this.composer.context(), history: this.composer.history ? this.composer.history.i : null },
       menu: m ? { kind: m.kind, query: m.query, start: m.start ?? null, sel: m.sel, top: m.top ?? 0, wheeled: m.wheeled ?? 0, count: m.items.length,
         items: m.items.slice(0, 12).map((x) => (typeof x === "string" ? x : x.name)) } : null,
       picker: this.picker ? pickerDump(this.picker) : null,
@@ -2924,6 +3240,7 @@ export default class HerdrChat extends View {
       toggle: (id, cx) => this.toggle(id, cx), more: (id, cx) => this.more(id, cx),
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
       enlarge: (p, size, cx) => this.enlarge(p, size, cx), svgSize: (p) => this.svgSize(p), traceThumb: (p, w, h) => this.thumbsSeen?.add(p, w, h),
+      previewPaste: (id, cx) => this.openPastePreview(id, cx),
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
       runBang: this.sub ? null : this.bangTarget(),
@@ -3060,10 +3377,12 @@ export default class HerdrChat extends View {
             .child(icon("arrow-down", 12)).child("Latest"))))), t, floats);
   }
 
-  // The terminal view's floating switch and the FPS HUD (debug/fps): on top
+  // The terminal view's floating switch, the paste preview modal, and the FPS HUD (debug/fps): on top
   // of the chat, last children of the root.
   hud(el, t, floats = false) {
     if (floats) el = el.relative().child(div().absolute().top(8).right(14).child(this.viewBar(t)));
+    const modal = this.pastePreviewModal(t);
+    if (modal) el = el.relative().child(modal);
     return this.debug?.fps ? el.relative().child(fps_monitor()) : el;
   }
 

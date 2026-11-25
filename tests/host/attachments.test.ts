@@ -5,7 +5,7 @@
 // restart's kill): only the chat's pane closing removes it (E2E `thumb`).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { Host, idle, sleep, startHost } from "./harness.ts";
 
@@ -109,4 +109,62 @@ test("composer images: copied under the state dir, kept while a message or the c
   }
   assert.equal(again.exitCode, 0, "SIGTERM ends the host as a restart's kill does");
   assert.ok(existsSync(composed!), "a killed host keeps the attachments: a restart that falls back to a kill starts a new host for the composer");
+});
+
+test("composer non-image files: local stays in place, remote copy lives under state dir and obeys detach/queue lifecycle", async () => {
+  const h = await startHost({ name: "file-attachments", scenario: SCENARIO, speed: 1 });
+  const dir = join(h.stateDir, "attachments", h.chat);
+  const localDoc = join(h.dir, "report 2026.pdf");
+  const subDir = join(h.dir, "notes");
+  writeFileSync(localDoc, "%PDF-1.4\nhello\n");
+  mkdirSync(subDir, { recursive: true });
+  try {
+    const c = h.client;
+    await c.waitFor(idle, 10_000);
+
+    // Local attach validates in place without copying, and detach never deletes the user's file.
+    const local = await c.req("attach_file", { path: localDoc });
+    assert.equal(local.path, localDoc);
+    assert.equal(local.name, "report 2026.pdf");
+    assert.equal(local.sizeBytes, Buffer.byteLength("%PDF-1.4\nhello\n"));
+    await c.req("detach_file", { path: local.path });
+    assert.ok(existsSync(localDoc), "local original file is never removed on detach");
+
+    // Local directory is accepted in place; remote copy refuses directories.
+    const folder = await c.req("attach_file", { path: subDir });
+    assert.equal(folder.path, subDir);
+    assert.equal(folder.isDir, true);
+    await assert.rejects(c.req("attach_file", { path: subDir, copy: true }), /Folders can't be uploaded/);
+
+    // Invalid paths and URLs are rejected cleanly.
+    await assert.rejects(c.req("attach_file", { path: join(h.dir, "missing.pdf") }), /Could not read file/);
+    await assert.rejects(c.req("attach_file", { path: "https://example.com/a.pdf" }), /URLs aren't supported/);
+
+    // Copy mode (used after `hc put` for remote spaces) stages into the chat's attachments folder.
+    const copied = await c.req("attach_file", { path: localDoc, copy: true });
+    assert.equal(dirname(copied.path), dir);
+    assert.match(basename(copied.path), /report 2026\.pdf$/);
+    assert.equal(readFileSync(copied.path, "utf8"), "%PDF-1.4\nhello\n");
+
+    // Removing an unused copied file deletes the copy.
+    await c.req("detach_file", { path: copied.path });
+    assert.ok(!existsSync(copied.path), "✕ on a copied file chip removes the copy");
+
+    // A copied file referenced in a held follow-up is protected from detach until taken out of the queue.
+    const heldFile = await c.req("attach_file", { path: localDoc, copy: true });
+    await c.req("send", { text: "long build" });
+    await c.waitFor(running, 5000, "tool running");
+    await c.req("send", { text: `Check this\n\n@"${heldFile.path}"`, mode: "followUp" });
+    await c.waitFor((x) => x.state.queue.followUp.length === 1, 3000, "follow-up queued");
+    await c.req("detach_file", { path: heldFile.path });
+    assert.ok(existsSync(heldFile.path), "a held follow-up keeps its copied file attachment");
+
+    await c.req("queue_edit", { message: c.state.queue.followUpIds[0] });
+    await c.req("detach_file", { path: heldFile.path });
+    assert.ok(!existsSync(heldFile.path), "once removed from the queue, detach removes the copy");
+    await c.req("abort");
+    await c.waitFor(idle, 5000, "aborted");
+  } finally {
+    await h.stop();
+  }
 });

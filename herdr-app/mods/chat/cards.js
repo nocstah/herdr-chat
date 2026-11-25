@@ -16,6 +16,7 @@ import { blocks, copyButton, diffView, outputBox, prose, textDiff } from "./rich
 import { cardLive, defaultOpen, groupCards, groupSummary } from "./rows.js";
 import { SPACE } from "./space.js";
 import { keepBreaks } from "./lines.js";
+import { verbatimUserMarkdown } from "./paste.js";
 import { flavorPalette, toolVerb } from "./flavor.js";
 
 const MAX_LINES = 400;
@@ -133,7 +134,10 @@ function user(it, c) {
   const long = lines.length > USER_LINES + 2 || (text ?? "").length > 1500;
   const open = !long || c.expanded.has(`user:${it.id}`);
   const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
-  const body = (key) => div().text_size(14).line_height(`${SPACE.lineH}px`).child(prose(`md-${it.id}${key}${open ? "" : "-f"}`, keepBreaks(shown) || " ", null, { t }));
+  const body = (key) => {
+    const view = TextView.markdown(`md-${it.id}${key}${open ? "" : "-f"}`, verbatimUserMarkdown(shown) || " ").selectable(true);
+    return div().text_size(14).line_height(`${SPACE.lineH}px`).child(c.onLink ? view.on_link_click(c.onLink) : view);
+  };
   const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
     .on_click((_e, cx) => c.toggle(`user:${it.id}`, cx))
     .child(icon(open ? "chevron-up" : "chevron-down", 11)).child(open ? "Show less" : `Show full message · ${plural(lines.length, "line")}`)] : [];
@@ -250,11 +254,11 @@ function chip(text, color, t) {
   return div().flex_none().h(18).px(6).rounded(6).flex().items_center().text_size(11).text_color(color).bg(alpha(color, 0.13)).child(text);
 }
 
-// The line a file tool opens at: read's offset, the edit's first hunk.
+// The line a file tool opens at: read's explicit offset, the edit's first hunk, or null for top/preview.
 export function lineOf(d) {
-  if (d.type === "read") return d.offset ?? 1;
-  if (d.type === "edit") return d.diffLines?.find((l) => l.new != null && l.kind !== "hunk")?.new ?? Number(/@@ -\d+(?:,\d+)? \+(\d+)/.exec(d.diff ?? "")?.[1] ?? 1);
-  return 1;
+  if (d.type === "read") return d.offset ?? null;
+  if (d.type === "edit") return d.diffLines?.find((l) => l.new != null && l.kind !== "hunk")?.new ?? (Number(/@@ -\d+(?:,\d+)? \+(\d+)/.exec(d.diff ?? "")?.[1] ?? 0) || null);
+  return null;
 }
 
 // A tool's one-line title, detail-aware: "$ cmd", "Read <path link> :10-40",
@@ -461,10 +465,11 @@ function spansOrText(it, c, base) {
 
 function custom(it, c) {
   const t = c.t;
+  const view = TextView.markdown(`cu-${it.id}`, it.text || " ").selectable(true);
   return v_flex()
     .child(v_flex().gap(4).px(12).py(8).rounded(10).border_1().border_color(t.border)
       .child(div().text_size(11).text_color(t.dim).child(it.customType ?? "message"))
-      .child(div().text_size(13.5).child(TextView.markdown(`cu-${it.id}`, it.text || " ").selectable(true))));
+      .child(div().text_size(13.5).child(c.onLink ? view.on_link_click(c.onLink) : view)));
 }
 
 // A subagent (ToolDetail "agent"): its description, then the steps its run

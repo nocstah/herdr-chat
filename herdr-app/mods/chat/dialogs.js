@@ -12,6 +12,7 @@ import { copyButton, diffView } from "./rich.js";
 import { QuestionsForm } from "./questions.js";
 import { reasonPlaceholder } from "./reason.js";
 import { commandSteps } from "./perm-format.js";
+import { copyField, pasteField } from "./composer.js";
 
 export class DialogCard {
   constructor(onChange, focusComposer) {
@@ -100,6 +101,8 @@ export class DialogCard {
       const wrap = div().id("dlg-field").key_context(d.method === "editor" ? "HerdrChatEditor" : "HerdrChatDialog")
         .on_action("herdrchat_dialog_enter", (_e, cx) => answer("submit", null, cx))
         .on_action("herdrchat_dialog_escape", (_e, cx) => answer("cancel", null, cx))
+        .on_action("herdrchat_copy", (_e, cx) => copyField(this.field, cx))
+        .on_action("herdrchat_paste", (_e, cx) => pasteField(this.field, cx))
         .child(field);
       body = v_flex().gap(8).child(wrap)
         .child(h_flex().gap(8).child(btn("dlg-submit", "Submit", true, (_e, cx) => answer("submit", null, cx))));
@@ -180,6 +183,8 @@ export class DialogCard {
       wrap = div().id("dlg-field").key_context("HerdrChatDialog")
         .on_action("herdrchat_dialog_enter", (_e, cx) => answer("choice", this.choiceFor(d, "escape"), cx))
         .on_action("herdrchat_dialog_escape", (_e, cx) => answer("choice", this.choiceFor(d, "escape"), cx))
+        .on_action("herdrchat_copy", (_e, cx) => copyField(this.field, cx))
+        .on_action("herdrchat_paste", (_e, cx) => pasteField(this.field, cx))
         .child(Input.new(this.field).h(30).px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(12.5));
     }
     const reasonView = (msg) => {

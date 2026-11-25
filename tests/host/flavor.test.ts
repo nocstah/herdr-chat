@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, mdChunks, parseTableRow, splitToolVerb, toolVerb } from "../../herdr-app/mods/chat/flavor.js";
+import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, mdChunks, parseTableRow, splitToolVerb, toolVerb, stripHeading, parseInlineSpans } from "../../herdr-app/mods/chat/flavor.js";
 import { CODEX_PERMISSION_MODES } from "../../host/providers/codex/adapter.ts";
 
 const DARK = {
@@ -223,4 +223,33 @@ test("a Poll's Waiting row has the wait color, with what it waits for after it",
   assert.equal(flavorPalette(LIGHT).tool("wait"), LIGHT.ansi4);
   assert.notEqual(flavorPalette(DARK).tool("wait"), flavorPalette(DARK).tool("script"), "a wait and the script it waits for read apart");
   assert.notEqual(flavorPalette(DARK).tool("wait"), flavorPalette(DARK).tool("generic"));
+});
+
+test("toolVerb infers semantic tool kind from verb alone for activity drawer rows", () => {
+  assert.deepEqual(toolVerb("$ git status"), { verb: "$", rest: "git status", kind: "bash" });
+  assert.deepEqual(toolVerb("Read src/app.ts"), { verb: "Read", rest: "src/app.ts", kind: "read" });
+  assert.deepEqual(toolVerb("Edit src/app.ts"), { verb: "Edit", rest: "src/app.ts", kind: "edit" });
+  assert.deepEqual(toolVerb("Write src/new.ts"), { verb: "Write", rest: "src/new.ts", kind: "write" });
+  assert.deepEqual(toolVerb("Grep flavor"), { verb: "Grep", rest: "flavor", kind: "search" });
+  assert.deepEqual(toolVerb("Fetch https://example.com"), { verb: "Fetch", rest: "https://example.com", kind: "web" });
+  assert.deepEqual(toolVerb("Agent explore"), { verb: "Agent", rest: "explore", kind: "agent" });
+});
+
+test("stripHeading and parseInlineSpans keep inline code, emphasis and clickable links for colored headings", () => {
+  assert.equal(stripHeading("### 1. Left-pane `← →` arrows ###"), "1. Left-pane `← →` arrows");
+  assert.equal(stripHeading("# Title"), "Title");
+  assert.deepEqual(parseInlineSpans("1. See [`rich.js`](file:///rich.js) and `flavor.js` **now**"), [
+    { text: "1. See " },
+    { url: "file:///rich.js", text: "rich.js", code: true },
+    { text: " and " },
+    { text: "flavor.js", code: true },
+    { text: " " },
+    { bold: true, text: "now" },
+  ]);
+  assert.deepEqual(parseInlineSpans("Plain *em* and ~~old~~"), [
+    { text: "Plain " },
+    { italic: true, text: "em" },
+    { text: " and " },
+    { strike: true, text: "old" },
+  ]);
 });

@@ -173,10 +173,12 @@ export function thumbnail(id, { path, size }, w, h, c) {
     .child(image(rel).w(w).h(h));
 }
 
-// An image file image() can't show: its icon and name.
-export function fileChip(id, label, t) {
-  return h_flex().id(id).flex_none().h(26).px(8).gap(6).items_center().rounded(6).border_1().border_color(t.border)
-    .text_size(11.5).text_color(t.muted).child(icon("image", 12)).child(div().max_w(220).truncate().child(label));
+// A file or image chip: its icon and name.
+export function fileChip(id, label, t, { iconEl = icon("image", 12), tip = null } = {}) {
+  let el = h_flex().id(id).flex_none().h(26).px(8).gap(6).items_center().rounded(6).border_1().border_color(t.border)
+    .text_size(11.5).text_color(t.muted).child(iconEl).child(div().max_w(220).truncate().child(label));
+  if (tip) el = el.tooltip(tip);
+  return el;
 }
 
 // A folder for a list row: under home as ~/…, a long one as …/its last two parts.

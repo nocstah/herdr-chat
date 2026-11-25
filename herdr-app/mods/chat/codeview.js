@@ -26,8 +26,13 @@ const WORD = /[\p{L}\p{N}_$]/u;
 
 // A code card's bindings in the app's keymap (keymap.js says when).
 export function bindCodeKeys(cx) {
-  cx.bind_keys([{ keystroke: "cmd-c", action: COPY, context: "HerdrChatCode" }, { keystroke: "ctrl-c", action: COPY, context: "HerdrChatCode" },
-    { keystroke: "escape", action: CLEAR, context: "HerdrChatCode" }]);
+  cx.bind_keys([
+    { keystroke: "cmd-c", action: COPY, context: "HerdrChatCode" },
+    { keystroke: "ctrl-c", action: COPY, context: "HerdrChatCode" },
+    { keystroke: "ctrl-shift-c", action: COPY, context: "HerdrChatCode" },
+    { keystroke: "ctrl-insert", action: COPY, context: "HerdrChatCode" },
+    { keystroke: "escape", action: CLEAR, context: "HerdrChatCode" },
+  ]);
 }
 
 export class CodeView extends View {

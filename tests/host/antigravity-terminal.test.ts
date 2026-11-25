@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { AntigravityTerminalAdapter } from "../../host/providers/antigravity/terminal.ts";
+import { AntigravityTerminalAdapter, fullTranscriptPath } from "../../host/providers/antigravity/terminal.ts";
 import { Chat } from "../../host/chat.ts";
 import { Attachments } from "../../host/attachments.ts";
 import { transcriptPath } from "../../host/providers/antigravity/bind.ts";
@@ -718,6 +718,58 @@ test("Chat accumulates activityLog with prefix collapsing, keeps it after settle
   } finally {
     if (prevPoll === undefined) delete process.env.HERDR_CHAT_WORK_STATUS_MS;
     else process.env.HERDR_CHAT_WORK_STATUS_MS = prevPoll;
+    r.done();
+  }
+});
+
+test("Antigravity hydrates truncated compact transcript records from sibling transcript_full.jsonl in history and live tail", async () => {
+  const r = rig();
+  try {
+    const compactPath = r.file(A);
+    const fullPath = fullTranscriptPath(compactPath)!;
+    assert.ok(fullPath.endsWith("transcript_full.jsonl"));
+    const writeFull = (recs: Rec[]) => {
+      mkdirSync(dirname(fullPath), { recursive: true });
+      appendFileSync(fullPath, recs.map((x) => JSON.stringify(x) + "\n").join(""));
+    };
+
+    const fullReply1 = "1. **Bug: `herdr-app` strips `text_color(...)` from all `TextView.markdown` headings**\n   - Full details preserved.\n2. **Second item**";
+    const compactReply1 = "1. **Bug: `herdr-app` stri\n<truncated 848 bytes>\n.markdown` headings**";
+
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nCheck colors\n</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", content: compactReply1, truncated_fields: ["content"] },
+    ]);
+    writeFull([
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nCheck colors\n</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", content: fullReply1 },
+    ]);
+
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "idle" } }] });
+    await r.adapter.start(null, r.host);
+
+    const hist = await r.adapter.history();
+    const histAnswer = hist.find((e) => e.type === "assistant_end") as any;
+    assert.ok(histAnswer);
+    assert.equal(histAnswer.content.find((b: any) => b?.type === "text")?.text, fullReply1);
+
+    // Live tail: compact truncated record arrives slightly before transcript_full.jsonl flushes.
+    const fullReply2 = "### Live Answer\n- Complete `code` and [link](file:///a.ts) without truncation.";
+    const compactReply2 = "### Live Ans\n<truncated 400 bytes>\ntruncation.";
+    r.events.length = 0;
+    r.write(A, [
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", content: compactReply2, truncated_fields: ["content"] },
+    ]);
+    // Pause briefly before writing the full record so tail() exercises its wait-for-full path.
+    await pause(200);
+    assert.equal(r.events.filter((e) => e.type === "assistant_end").length, 0, "waits briefly for transcript_full.jsonl instead of emitting corrupted compact text");
+    writeFull([
+      { step_index: 2, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", content: fullReply2 },
+    ]);
+    await until("live hydrated answer", () => r.events.some((e) => e.type === "assistant_end"));
+    const liveAnswer = r.events.find((e) => e.type === "assistant_end") as any;
+    assert.equal(liveAnswer.content.find((b: any) => b?.type === "text")?.text, fullReply2);
+  } finally {
     r.done();
   }
 });

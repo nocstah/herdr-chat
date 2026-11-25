@@ -11,7 +11,9 @@ import { keyHint, withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
 import { MAC } from "./platform.js";
 import { bgDetailEmpty, bgDetailLines, bgRows, bgSummary } from "./background.js";
-import { flavorPalette } from "./flavor.js";
+import { flavorPalette, toolVerb } from "./flavor.js";
+
+const ACTIVITY_ICON = { bash: "terminal", read: "file-text", edit: "pencil", write: "file-plus", search: "search", web: "globe", agent: "bot", script: "code", wait: "clock", generic: "wrench" };
 
 const STATUS_MAX = 28;
 const STATUS_W = (text) => Math.min(STATUS_MAX, [...text].length) * 6.3 + 18;
@@ -163,8 +165,8 @@ export function underRow(v, t, { width }) {
     .child(h_flex().flex_none().gap(0).items_center().children(right));
 }
 
-// The composer's + (bottom left, as the Claude app has it): what can go into a message: a file (@ and its
-// menu), a command (/ and its menu), an image from the clipboard.
+// The composer's + (bottom left, as the Claude app has it): what can go into a message: uploaded files
+// (native file picker), a workspace file mention (@), a command (/), or an image from the clipboard.
 export function plusButton(v, t) {
   const item = (id, name, label, hint) => h_flex().id(`plus-${id}`).h(30).px(8).gap(10).items_center().rounded(7).cursor_pointer().text_size(13)
     .hover((s) => s.bg(t.hover)).on_click((_e, cx) => v.control(`plus:${id}`, cx))
@@ -177,6 +179,7 @@ export function plusButton(v, t) {
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Add to the message")
       .child(icon("plus", 16)))
     .content(surface(t).w(220)
+      .child(item("upload", "file-plus", "Upload files…", ""))
       .child(item("file", "at-sign", "Mention a file", "@"))
       .child(item("command", "square-slash", "Commands", "/"))
       .child(item("image", "image", "Paste an image", MAC ? "⌘V" : "Ctrl+V")));
@@ -360,25 +363,33 @@ export function activityDrawer(v, s, t) {
       const newest = i === entries.length - 1;
       const live = newest && working;
       const isTool = e.kind === "tool";
+      const sp = isTool ? toolVerb(e.text) : null;
+      const kind = sp?.kind ?? "generic";
+      const verbCol = f.tool(kind);
       const mark = live
         ? div().flex_none().pt(3).child(spinner(10, t.working))
         : isTool
-          ? div().flex_none().pt(3).child(icon("wrench", 10).text_color(t.ansi4 ?? t.dim))
-          : div().flex_none().pt(6).child(div().size(4).rounded(2).bg(newest ? f.bullet : t.dim));
+          ? div().flex_none().pt(3).child(icon(ACTIVITY_ICON[kind] ?? "wrench", 10).text_color(verbCol))
+          : div().flex_none().pt(6).child(div().size(4).rounded(2).bg(newest ? f.thinking : f.thinkingRail));
+      const body = sp
+        ? h_flex().flex_1().min_w(0).gap(5).items_start().font_family(mono).text_size(11.5)
+            .child(div().flex_none().font_medium().text_color(verbCol).child(sp.verb))
+            .when(Boolean(sp.rest), (el) => el.child(div().flex_1().min_w(0).whitespace_normal().text_color(live ? t.foreground : t.muted).child(sp.rest)))
+        : div().flex_1().min_w(0).whitespace_normal()
+            .when(isTool, (el) => el.font_family(mono).text_size(11.5))
+            .text_color(live ? t.foreground : t.muted)
+            .child(e.text);
       return h_flex().id(`act-entry-${i}`).flex_none().gap(8).items_start().text_size(12).line_height("17px")
         .child(div().flex_none().font_family(mono).text_size(10.5).pt(1).text_color(t.dim).child(clockTime(e.ts)))
         .child(mark)
-        .child(div().flex_1().min_w(0).whitespace_normal()
-          .when(isTool, (el) => el.font_family(mono).text_size(11.5))
-          .text_color(live ? t.foreground : isTool ? t.dim : t.muted)
-          .child(e.text));
+        .child(body);
     })
     : [div().text_size(12).text_color(t.dim).child(working ? "Waiting for activity updates…" : "No activity info recorded for this turn.")];
   const head = h_flex().id("activity-strip").h(28).px(10).gap(8).items_center().text_size(12).cursor_pointer()
     .hover((st) => st.bg(t.hover)).tooltip(withKey("Collapse activity log", "expandInfo"))
     .on_click((_e, cx) => v.control("activity:toggle", cx))
-    .child(working ? spinner(11, t.working) : icon("info", 12).text_color(t.dim))
-    .child(div().flex_none().text_color(t.muted).child("Activity"))
+    .child(working ? spinner(11, t.working) : icon("info", 12).text_color(f.bullet))
+    .child(div().flex_none().font_medium().text_color(working ? f.thinking : t.muted).child("Activity"))
     .when(entries.length > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`· ${plural(entries.length, "update")}`)))
     .child(div().flex_1())
     .when(!v.activityFollow && entries.length > 1, (el) => el.child(div().id("activity-latest").px(6).py(1).rounded(5).text_size(11).text_color(t.accent)

@@ -33,7 +33,11 @@ import type {
 export type { ModelInfo, Capabilities };
 
 export const MAX_SNAPSHOT_ITEMS = 200;
-const MAX_SNAPSHOT_BYTES = 6 * 1024 * 1024;
+/** Wire byte budget for one snapshot or history page, kept small enough for QuickJS JSON.parse (object-dense tool spans expand heavily in JS heap). */
+export const MAX_SNAPSHOT_BYTES = 1024 * 1024;
+/** Budget for pre-highlighted tool `outputLines` / `diffLines` in a snapshot; older finished tools keep plain `output` / `diff`, which the client renders on expand. */
+const MAX_SNAPSHOT_RICH_TOOL_BYTES = 256 * 1024;
+const MAX_SNAPSHOT_RICH_TOOL_TAIL = 20;
 const SEND_REPLY_WAIT_MS = 1500;
 const STARTUP_DIALOG_HINT_MS = 10_000;
 const STARTUP_TIMEOUT_MS = 45_000;
@@ -60,6 +64,67 @@ const diffLinesOf = (diff: string, path: string) => {
   const r = diffLines(diff, path);
   return { diffLines: r.lines, added: r.added, removed: r.removed };
 };
+
+function compactToolWire(it: WireItem): WireItem {
+  if (it.kind !== "tool") return it;
+  const next = { ...it };
+  delete next.outputLines;
+  if (next.detail.type === "edit" && next.detail.diffLines) {
+    const { diffLines: _drop, ...detail } = next.detail;
+    next.detail = detail;
+  }
+  return next;
+}
+
+/**
+ * Fits a chronological slice of wire items into `budgetBytes`, keeping newest
+ * items first. Pre-highlighted tool spans (`outputLines` / `diffLines`) are
+ * kept only on the newest `richTail` rich tools up to `richBudgetBytes`; older
+ * tools drop those pre-highlighted spans and keep plain `output` / `diff`,
+ * which the client renders on expand.
+ */
+export function packWireItems(
+  items: WireItem[],
+  budgetBytes: number,
+  richBudgetBytes: number,
+  richTail: number,
+): { items: WireItem[]; trimmed: boolean } {
+  const out: WireItem[] = [];
+  let totalBytes = 2; // "[]"
+  let richBytes = 0;
+  let richCount = 0;
+  let trimmed = false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const raw = items[i]!;
+    let candidate = raw;
+    let bytes = Buffer.byteLength(JSON.stringify(candidate));
+    const hasRichTool =
+      raw.kind === "tool" &&
+      (raw.outputLines !== undefined || (raw.detail.type === "edit" && raw.detail.diffLines !== undefined));
+    if (hasRichTool) {
+      const keepRich =
+        richCount < richTail &&
+        richBytes + bytes <= richBudgetBytes &&
+        (out.length === 0 || totalBytes + bytes + 1 <= budgetBytes);
+      if (keepRich) {
+        richBytes += bytes;
+        richCount++;
+      } else {
+        candidate = compactToolWire(raw);
+        bytes = Buffer.byteLength(JSON.stringify(candidate));
+      }
+    }
+    const sep = out.length > 0 ? 1 : 0;
+    if (out.length > 0 && totalBytes + sep + bytes > budgetBytes) {
+      trimmed = true;
+      break;
+    }
+    out.push(candidate);
+    totalBytes += sep + bytes;
+  }
+  out.reverse();
+  return { items: out, trimmed };
+}
 export type ChatState = {
   phase: Phase;
   error: string | null;
@@ -341,19 +406,14 @@ export class Chat {
 
   snapshotData(): { state: ChatState; items: WireItem[]; hasOlder: boolean } {
     const all = this.timeline.items;
-    let items = all.slice(-MAX_SNAPSHOT_ITEMS);
-    for (const it of items) this.render.prepare(it);
-    let bytes = 0;
-    let start = items.length;
-    while (start > 0) {
-      const b = JSON.stringify(items[start - 1]).length;
-      if (bytes + b > MAX_SNAPSHOT_BYTES && start < items.length) break;
-      bytes += b;
-      start--;
-    }
-    items = items.slice(start);
+    const slice = all.slice(-MAX_SNAPSHOT_ITEMS);
+    for (const it of slice) this.render.prepare(it);
     // The timeline's plan: `state.plan` catches up at the next flush.
-    return { state: structuredClone({ ...this.state, plan: this.timeline.plan }), items: items.map(toWire), hasOlder: items.length < all.length };
+    const state = structuredClone({ ...this.state, plan: this.timeline.plan });
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
+    const budget = Math.max(64 * 1024, MAX_SNAPSHOT_BYTES - stateBytes - 1024);
+    const packed = packWireItems(slice.map(toWire), budget, MAX_SNAPSHOT_RICH_TOOL_BYTES, MAX_SNAPSHOT_RICH_TOOL_TAIL);
+    return { state, items: packed.items, hasOlder: packed.trimmed || slice.length < all.length };
   }
 
   /** Replace the whole timeline (new session, switch, resume). */
@@ -1532,6 +1592,14 @@ export class Chat {
     return {};
   }
 
+  /** detach_file: the file chip's ✕. Only copies inside this chat's attachments folder are removed, never while a held or queued message references them. */
+  detachFile(path: string): Record<string, never> {
+    if (![...this.held, ...this.unconfirmed.values()].some((m) => m.images.includes(path) || m.text.includes(path))) {
+      this.opts.attachments.remove(path);
+    }
+    return {};
+  }
+
   /** sweep_attachments: `open`, the chats with a pane in the app's layout (the mod's orphan sweep). */
   sweepAttachments(open: unknown): { removed: string[] } {
     if (!Array.isArray(open)) throw new Error("sweep_attachments needs open: the chats with a pane");
@@ -1548,7 +1616,8 @@ export class Chat {
   history(before: string, limit?: number): { items: WireItem[]; hasOlder: boolean } {
     const r = this.timeline.older(String(before ?? ""), typeof limit === "number" && limit > 0 ? Math.min(limit, 500) : 100);
     for (const it of r.items) this.render.prepare(it);
-    return { items: r.items.map(toWire), hasOlder: r.hasOlder };
+    const packed = packWireItems(r.items.map(toWire), MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_RICH_TOOL_BYTES, 8);
+    return { items: packed.items, hasOlder: r.hasOlder || packed.trimmed };
   }
 
   toolOutput(itemId: string): { text: string } {
@@ -1819,6 +1888,12 @@ export class Chat {
         return this.opts.attachments.fromFile(String(a.path ?? ""));
       case "detach_image":
         return this.detachImage(String(a.path ?? ""));
+      case "attach_file":
+        return this.opts.attachments.attachFile(String(a.path ?? ""), { copy: a.copy === true });
+      case "attach_text":
+        return this.opts.attachments.fromText(typeof a.text === "string" ? a.text : "", typeof a.name === "string" ? a.name : undefined);
+      case "detach_file":
+        return this.detachFile(String(a.path ?? ""));
       case "sweep_attachments":
         return this.sweepAttachments(a.open);
       case "history":

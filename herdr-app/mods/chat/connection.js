@@ -188,11 +188,14 @@ export class Connection {
       let welcomed = false;
       for (let texts; (texts = await link.next()) !== null; ) {
         const recs = [];
+        let badSnapshot = null;
         for (const text of texts) {
           try {
             recs.push(JSON.parse(text));
-          } catch {
-            this.o.log?.(`bad record: ${text.slice(0, 200)}`);
+          } catch (e) {
+            const err = message(e);
+            this.o.log?.(`bad record (${err}): ${text.slice(0, 200)}`);
+            if (/^\s*\{\s*"t"\s*:\s*"snapshot"\b/.test(text)) badSnapshot = err;
           }
         }
         for (const rec of recs) {
@@ -200,10 +203,11 @@ export class Connection {
             welcomed = true;
             this.welcome = rec;
             this.connects++;
-            this.attempt = 0;
             // The terminal view's host runs no agent (the TUI is the agent): gone, it just starts again.
             if (!this.o.attach) this.autoStart = false;
             this.set("connected", null, cx);
+          } else if (rec.t === "snapshot") {
+            this.attempt = 0;
           } else if (rec.t === "res") {
             const p = this.pending.get(rec.id);
             if (p) {
@@ -215,6 +219,10 @@ export class Connection {
           if (welcomed && rec.t !== "ping") this.o.onRecord(rec, cx); // ping: the host's keepalive
         }
         if (recs.length) this.o.onFlush?.(cx);
+        if (badSnapshot) {
+          this.set("reconnecting", `snapshot failed: ${badSnapshot}`, cx);
+          break;
+        }
       }
       if (!welcomed) {
         // A wrong token (a newer host wrote the registry) closes without a reply.

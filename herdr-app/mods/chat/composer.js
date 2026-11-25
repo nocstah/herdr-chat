@@ -16,19 +16,44 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base";
-import { alpha, fileChip, icon, thumbnail } from "./util.js";
+import { alpha, fileChip, icon, spinner, thumbnail } from "./util.js";
+import { formatMention } from "./file-picker.js";
+import { detectInsertedSpan, pasteChipTitle, pastePreviewLine, shouldCollapsePaste } from "./paste.js";
 import { follow } from "./menus.js";
 import { keyHint } from "./shortcuts.js";
 import { MAC } from "./platform.js";
 
 const CONTEXTS = ["HerdrChatMenu", "HerdrChatEmpty", "HerdrChatComposer", "HerdrChatAsk", "HerdrChatQuestions"];
+const EXTRA_INPUTS = ["HerdrChatFind", "HerdrChatDialog", "HerdrChatEditor"];
 const CARDS = ["HerdrChatAsk", "HerdrChatQuestions"];
 const DIGITS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
-// Linux: a terminal app's paste keys. Herdr's text fields paste on Ctrl+V only there, but dictation tools
-// and clipboard managers paste into a terminal app's window with Ctrl+Shift+V (or Shift+Insert),
-// whatever its pane shows; the composer takes them too.
+// Linux: a terminal app's copy/paste keys. Herdr's text fields copy/paste on Ctrl+C/V only there,
+// but desktop terminal-clipboard bindings (Super+C/V -> Ctrl+Shift+C/V), dictation tools and
+// clipboard managers send Ctrl+Shift+C/V (or Ctrl/Shift+Insert) to a terminal app's window,
+// whatever its pane shows; our chat inputs take them too.
+const COPY_KEYS = MAC ? [] : ["ctrl-shift-c", "ctrl-insert"];
 const PASTE_KEYS = MAC ? [] : ["ctrl-shift-v", "shift-insert"];
+// The composer intercepts standard Ctrl+V / Cmd+V too so large pastes collapse into chips.
+const COMPOSER_PASTE_KEYS = [MAC ? "cmd-v" : "ctrl-v", ...PASTE_KEYS];
 export const ACTIONS = ["herdrchat_enter", "herdrchat_up", "herdrchat_down", "herdrchat_tab", "herdrchat_escape", "herdrchat_space", ...DIGITS.map((d) => `herdrchat_digit_${d}`)];
+
+export function copyField(field, cx) {
+  if (!field) return;
+  const r = field.selected_range?.();
+  if (!r || r.start === r.end) return;
+  const lo = Math.min(r.start, r.end), hi = Math.max(r.start, r.end);
+  const text = String(field.value?.() ?? "").slice(lo, hi);
+  if (text) cx.write_to_clipboard(text);
+}
+
+export function pasteField(field, cx) {
+  if (!field) return;
+  let text;
+  try {
+    text = cx.read_from_clipboard();
+  } catch {}
+  if (text) field.replace?.(text);
+}
 
 // The composer's bindings in the app's keymap (keymap.js says when).
 export function bindComposerKeys(cx) {
@@ -42,7 +67,14 @@ export function bindComposerKeys(cx) {
     b.push({ keystroke: "escape", action: "herdrchat_escape", context: `${ctx} > Input` });
   }
   for (const ctx of CARDS) for (const d of DIGITS) b.push({ keystroke: d, action: `herdrchat_digit_${d}`, context: `${ctx} > Input` });
-  for (const ctx of CONTEXTS) for (const k of PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
+  for (const ctx of CONTEXTS) {
+    for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: `${ctx} > Input` });
+    for (const k of COMPOSER_PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
+  }
+  for (const ctx of EXTRA_INPUTS) {
+    for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: `${ctx} > Input` });
+    for (const k of PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
+  }
   b.push({ keystroke: "space", action: "herdrchat_space", context: "HerdrChatQuestions > Input" });
   for (const ctx of ["HerdrChatMenu", "HerdrChatEmpty", ...CARDS]) {
     b.push({ keystroke: "up", action: "herdrchat_up", context: `${ctx} > Input` });
@@ -84,21 +116,44 @@ const THUMB = { w: 64, h: 48 };
 
 export class Composer {
   // `skills()`: the chat's skill commands, [{command, name}] (main.js).
-  // `onRemoveChip(chip)`: an image chip's ✕.
-  constructor(cx, { onChange, onPasteOther, onRemoveChip, placeholder, skills }) {
+  // `onRemoveChip(chip, cx)`: a chip's ✕.
+  // `onPasteCollapse(text, cx)`: large plain-text paste collapsed into a chip.
+  constructor(cx, { onChange, onPasteOther, onPasteCollapse, onRemoveChip, placeholder, skills }) {
     this.ta = TextareaState.new({ placeholder: placeholder ?? "Message…" });
     this.ta.set_auto_grow(1, 10);
     this.skills = skills ?? (() => []);
     this.onRemoveChip = onRemoveChip;
+    this.onPasteCollapse = onPasteCollapse;
     this.value = "";
     this.cursor = 0; // where the last edit ended: the state has no getter for it
-    this.chips = []; // {path, size, label, pending}: `size` as the host reads it (protocol.md v3.7), else null
+    this.chips = []; // image, file, or collapsed paste chips
     this.menu = null; // {kind: "slash"|"files", query, items, sel, start}
     this.history = null; // {list, i, text}
     this.focused = false;
+    this.suppressPasteCollapse = false;
     this.ta.on("change", (_e, cx) => {
       const before = this.value;
-      this.value = this.ta.value();
+      const next = this.ta.value();
+      if (!this.suppressPasteCollapse && this.onPasteCollapse) {
+        const ins = detectInsertedSpan(before, next);
+        if (ins && shouldCollapsePaste(ins.inserted)) {
+          const restored = next.slice(0, ins.start) + next.slice(ins.end);
+          this.suppressPasteCollapse = true;
+          try {
+            const tokens = this.skillSpans(restored);
+            this.ta.set_value(tokens.length ? { text: restored, tokens } : restored);
+            this.ta.set_selected_range({ start: ins.start, end: ins.start });
+            this.value = restored;
+            this.cursor = ins.start;
+          } finally {
+            this.suppressPasteCollapse = false;
+          }
+          this.onPasteCollapse(ins.inserted, cx);
+          onChange?.(cx);
+          return;
+        }
+      }
+      this.value = next;
       this.cursor = editEnd(before, this.value);
       if (this.history && this.value !== this.history.text) this.history = null;
       this.pillTyped(before);
@@ -110,15 +165,29 @@ export class Composer {
     this.onPasteOther = onPasteOther;
   }
 
-  // A paste key of PASTE_KEYS: the clipboard's text where the cursor is, as Ctrl+V puts it (the
-  // field's change event follows), else what a paste of no text does (an image).
+  // A copy key of COPY_KEYS: copy the selected slice from the textarea.
+  copyKey(cx) {
+    copyField(this.ta, cx);
+  }
+
+  // A paste key of COMPOSER_PASTE_KEYS: large plain-text pastes collapse into a chip
+  // (keeping formatting verbatim and the composer tidy); short pastes go inline at the
+  // cursor; empty text falls back to image paste.
   pasteKey(cx) {
     let text;
     try {
       text = cx.read_from_clipboard();
     } catch {}
-    if (text) this.ta.replace(text);
-    else this.onPasteOther?.(cx);
+    if (text) {
+      if (shouldCollapsePaste(text) && this.onPasteCollapse) {
+        this.onPasteCollapse(text, cx);
+        cx.notify();
+      } else {
+        this.ta.replace(text);
+      }
+    } else {
+      this.onPasteOther?.(cx);
+    }
   }
 
   focus() {
@@ -127,11 +196,31 @@ export class Composer {
 
   // The text, with its skill commands as pills.
   set(text) {
-    const tokens = this.skillSpans(text);
-    this.ta.set_value(tokens.length ? { text, tokens } : text);
-    this.value = text;
-    this.cursor = text.length;
-    this.ta.set_selected_range({ start: text.length, end: text.length });
+    this.suppressPasteCollapse = true;
+    try {
+      const tokens = this.skillSpans(text);
+      this.ta.set_value(tokens.length ? { text, tokens } : text);
+      this.value = text;
+      this.cursor = text.length;
+      this.ta.set_selected_range({ start: text.length, end: text.length });
+    } finally {
+      this.suppressPasteCollapse = false;
+    }
+  }
+
+  // Inserts text directly into the textarea at the current cursor/selection without
+  // re-collapsing it (used when unpacking a paste chip via "Edit inline").
+  insertInline(text) {
+    this.suppressPasteCollapse = true;
+    try {
+      const sel = this.ta.selected_range?.();
+      const at = sel ? Math.min(sel.start, sel.end) : this.cursor;
+      this.ta.replace(text);
+      this.value = this.ta.value();
+      this.cursor = Math.min(this.value.length, at + text.length);
+    } finally {
+      this.suppressPasteCollapse = false;
+    }
   }
 
   // Where `/command` of a known skill stands as a word in `text` (one per skill).
@@ -197,16 +286,20 @@ export class Composer {
     this.menu = null;
   }
 
-  // `pending`: a dropped file the host is still copying (main.js attachImage); it gets the thumbnail's box.
-  addChip(path, { pending = false, size = null } = {}) {
-    const chip = { path, size, label: path.split("/").pop(), pending };
+  // `pending`: a dropped/picked file the host is still copying or uploading; `kind`: "image" | "file".
+  addChip(path, { pending = false, size = null, kind = "image", label = null } = {}) {
+    const chip = { path, sourcePath: path, size, kind, label: label ?? path.split("/").pop(), pending, isDir: false };
     this.chips.push(chip);
     return chip;
   }
 
-  removeChip(i) {
+  pasteChips() {
+    return this.chips.filter((ch) => ch.kind === "paste");
+  }
+
+  removeChip(i, cx) {
     const [ch] = this.chips.splice(i, 1);
-    if (ch) this.onRemoveChip?.(ch);
+    if (ch) this.onRemoveChip?.(ch, cx);
   }
 
   clear() {
@@ -217,10 +310,11 @@ export class Composer {
   }
 
   context() {
+    const empty = !this.value.trim() && !this.chips.length;
     // A menu, or a select/confirm dialog while nothing is typed: ↑ ↓ Enter choose.
-    if (this.menu?.items?.length || (this.dialogKeys && !this.value.trim())) return "HerdrChatMenu";
-    if (this.askCard && !this.value.trim()) return this.askCard === "questions" ? "HerdrChatQuestions" : "HerdrChatAsk";
-    if (!this.value.trim() || (this.history && this.value === this.history.text)) return "HerdrChatEmpty";
+    if (this.menu?.items?.length || (this.dialogKeys && empty)) return "HerdrChatMenu";
+    if (this.askCard && empty) return this.askCard === "questions" ? "HerdrChatQuestions" : "HerdrChatAsk";
+    if (empty || (this.history && this.value === this.history.text && !this.chips.length)) return "HerdrChatEmpty";
     return "HerdrChatComposer";
   }
 
@@ -271,21 +365,54 @@ export class Composer {
     follow(m);
   }
 
-  // Replace "@query" at the end with "@path ".
+  // Replace "@query" at the end with "@path " (quoted when the path has whitespace).
   insertFile(path) {
-    const v = this.value.replace(/(^|\s)@([^\s@]*)$/, (_m, pre) => `${pre}@${path} `);
+    const v = this.value.replace(/(^|\s)@([^\s@]*)$/, (_m, pre) => `${pre}${formatMention(path)} `);
     this.set(v);
     this.menu = null;
   }
 
-  // The composer card, as the Claude app draws its own: the text, image chips, then a row with the +
+  // The composer card, as the Claude app draws its own: the text, attachment chips, then a row with the +
   // (`c.plus`) at the left, what the keys do now or a flash (`c.hint`) between, and the mic (`c.mic`)
   // and the send / stop button at the right. What it runs with is under the card (chrome.js
   // underRow). `c` is the view's render context (cards.js).
   view(t, c) {
     const chips = this.chips.map((ch, i) => {
       const x = div().id(`chip-x-${i}`).cursor_pointer().rounded(4).hover((s) => s.text_color(t.foreground).bg(t.hover))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.removeChip(i); cx.notify(); }).child(icon("x", 11));
+        .on_click((_e, cx) => { cx.stop_propagation(); this.removeChip(i, cx); cx.notify(); }).child(icon("x", 11));
+      if (ch.kind === "paste") {
+        const ic = ch.pending
+          ? spinner(11, t.muted)
+          : ch.error
+            ? icon("alert", 12).text_color(t.ansi1)
+            : icon("file-text", 12).text_color(t.accent);
+        const title = pasteChipTitle(ch);
+        const preview = pastePreviewLine(ch.text);
+        const tip = ch.error
+          ? `Paste attachment failed: ${ch.error} · Click to inspect or retry`
+          : [preview, ch.mode === "file" ? "Sent as .txt attachment" : "Sent inline verbatim", "Click to preview or edit inline"].filter(Boolean).join(" · ");
+        let el = h_flex().id(`chip-${i}`).flex_none().h(26).pl(8).pr(6).gap(6).items_center().rounded(6)
+          .border_1().border_color(ch.error ? alpha(t.ansi1, 0.55) : t.border)
+          .bg(t.raised).text_size(11.5).text_color(t.foreground).cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .tooltip(tip)
+          .on_click((_e, cx) => c.previewPaste?.(ch.id, cx))
+          .child(ic)
+          .child(div().max_w(220).truncate().child(title));
+        if (ch.mode === "file") {
+          const badgeText = ch.pending ? "saving…" : ch.error ? "failed" : ".txt";
+          const badgeColor = ch.error ? t.ansi1 : ch.pending ? t.dim : t.accent;
+          el = el.child(div().flex_none().px(4).py(1).rounded(4).text_size(10)
+            .bg(ch.error ? alpha(t.ansi1, 0.14) : ch.pending ? alpha(t.muted, 0.14) : alpha(t.accent, 0.14))
+            .text_color(badgeColor).child(badgeText));
+        }
+        return el.child(x);
+      }
+      if (ch.kind === "file") {
+        const ic = ch.pending ? spinner(11, t.muted) : icon(ch.isDir ? "folder" : "file-text", 12);
+        return fileChip(`chip-${i}`, ch.label, t, { iconEl: ic, tip: ch.pending ? `Uploading ${ch.label}…` : ch.path })
+          .pr(6).bg(t.raised).child(x);
+      }
       const thumb = ch.pending
         ? h_flex().id(`chip-${i}`).flex_none().rounded(10).border_1().border_color(t.border)
           .child(h_flex().w(THUMB.w).h(THUMB.h).items_center().justify_center().text_color(t.muted).child(icon("image", 16)))
@@ -298,7 +425,8 @@ export class Composer {
     });
     let wrap = div().id("composer-box").w_full().min_w(0).key_context(this.context());
     for (const a of ACTIONS) wrap = wrap.on_action(a, (_e, cx) => c.action(a, cx));
-    if (PASTE_KEYS.length) wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
+    if (COPY_KEYS.length) wrap = wrap.on_action("herdrchat_copy", (_e, cx) => this.copyKey(cx));
+    wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
     wrap = wrap.child(Textarea.new(this.ta).w_full().px(16).pt(14).pb(8).text_size(14).text_color(t.foreground).bg(alpha(t.background, 0))
       .token((tok, _cx) => skillPillEl(tok, t)));
     const working = c.working;

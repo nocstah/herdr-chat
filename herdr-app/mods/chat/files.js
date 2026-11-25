@@ -1,14 +1,18 @@
-// Open a file a tool touched (visual-v2.md §6, "clickable file paths"):
-// 1. herdr-nvim installed (mods/herdr-nvim/bin/herdr-nvim, as gitview's
+// Open a file a tool touched or an answer linked (visual-v2.md §6, "clickable file paths"):
+// 1. Herdr's files viewer mod (`my-files` or `better-files`) when active in the layout:
+//    opens the file in a centre viewer tab (reusing an open tab or the preview tab, and
+//    jumping to `:line` / `#L10` / `#anchor` in `my-files`), on both local and remote spaces;
+// 2. else herdr-nvim installed (mods/herdr-nvim/bin/herdr-nvim, as gitview's
 //    nvim.js finds it): `herdr-nvim open --tab <tab> --space <space> <file>:<line>`;
-// 2. else $EDITOR (the login shell's; vi without one) in a terminal pane
+// 3. else $EDITOR (the login shell's; vi without one) in a terminal pane
 //    of the chat's tab (beside it, like the TUI hand-off), in the chat's folder.
 // A chat in another machine's space (machines.js): its files are there, so the
-// editor runs there (that machine's $EDITOR, `hc run --on`); herdr-nvim is this
-// computer's.
+// files viewer reads them with `{on: machine}` and the editor fallback runs there
+// (`hc run --on`); herdr-nvim is this computer's.
 
-import { appHome, exec, hc, readTextFile } from "herdr";
+import { appHome, exec, hc, layout, panes, readTextFile, run, setShared, shared, spaces } from "herdr";
 import { bare } from "./machines.js";
+import { findFilesMod, openInFilesMod, revealFolderInFilesPanel } from "./files-mod.js";
 
 const editorCache = new Map(); // machine ("" for this computer) → argv
 
@@ -33,9 +37,21 @@ async function editorArgv(machine) {
   return argv;
 }
 
-// {path (absolute), line, cwd, tab, space, machine (the space's, null for this computer)}
-//   → {how: "herdr-nvim" | "editor", terminal?}
+const herdrApi = { layout, panes, run, setShared, shared, spaces };
+
+// Reveals a folder in Herdr's Files side panel if it lies within `cwd`; else null.
+export function openFolder(o) {
+  return revealFolderInFilesPanel(o, herdrApi);
+}
+
+// {path (absolute), line, anchor, cwd, tab, space, machine (the space's, null for this computer)}
+//   → {how: "my-files" | "better-files" | "herdr-nvim" | "editor", terminal?}
 export async function openFile(o) {
+  const filesMod = findFilesMod(layout());
+  if (filesMod) {
+    const opened = openInFilesMod(filesMod, o, herdrApi);
+    if (opened) return opened;
+  }
   const machine = o.machine ?? null;
   const nvim = machine ? null : await herdrNvim();
   if (nvim && o.tab) {

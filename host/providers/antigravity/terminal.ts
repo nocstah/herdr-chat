@@ -53,6 +53,22 @@ const SENT_TTL_MS = 10 * 60_000;
 const MODELS_TTL_MS = 60_000;
 const AGENT_APPS = new Set(["antigravity", "agy"]);
 const COMPACT_WS = /\s+/g;
+const TRUNCATED_RE = /<truncated \d+ bytes>/;
+const FULL_WAIT_MS = 1500;
+
+/** Sibling `transcript_full.jsonl` written beside Antigravity's compact `transcript.jsonl`, or null. */
+export function fullTranscriptPath(path: string): string | null {
+  const next = path.replace(/([/\\])transcript\.jsonl$/, "$1transcript_full.jsonl");
+  return next !== path ? next : null;
+}
+
+/** Whether a compact transcript record had one or more fields truncated into `transcript_full.jsonl`. */
+function isTruncatedRecord(r: Rec): boolean {
+  if (Array.isArray(r.truncated_fields) && r.truncated_fields.length > 0) return true;
+  if (typeof r.content === "string" && TRUNCATED_RE.test(r.content)) return true;
+  if (typeof r.thinking === "string" && TRUNCATED_RE.test(r.thinking)) return true;
+  return false;
+}
 
 /** Shorten Antigravity's verbose always-allow prefix choice labels while preserving the full text as tooltip description. */
 function formatAgyChoiceLabel(raw: string): { label: string; description?: string } {
@@ -171,6 +187,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private dataDir: string | null = null;
   private follower: AgyTranscriptFollower | null = null;
   private offset = 0;
+  private fullOffset = 0;
+  private fullCache = new Map<number, Rec>();
+  private fullWait: { step: number; since: number } | null = null;
   private awaitingHistory = false;
   private running = false;
   private settling = false;
@@ -549,6 +568,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.conversationId = b.id;
       this.follower = null;
       this.offset = 0;
+      this.fullOffset = 0;
+      this.fullCache.clear();
+      this.fullWait = null;
       this.setQuotaWarning(null);
       this.setActivityText(null);
       this.interruptedNow = null;
@@ -564,10 +586,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
   }
 
-  /** Whole JSONL lines of the transcript from `from`, and the byte offset after the last newline. */
-  private read(from: number): { lines: string[]; next: number } {
-    const file = this.file;
-    if (!file) return { lines: [], next: from };
+  /** Whole JSONL lines of `file` from byte offset `from`, each with the byte offset after its newline. */
+  private readLines(file: string, from: number): { lines: Array<{ text: string; end: number }>; next: number } {
     let size: number;
     try {
       size = statSync(file).size;
@@ -584,7 +604,42 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
     const end = buf.lastIndexOf(0x0a);
     if (end < 0) return { lines: [], next: from };
-    return { lines: buf.subarray(0, end).toString("utf8").split("\n"), next: from + end + 1 };
+    const lines: Array<{ text: string; end: number }> = [];
+    let pos = 0;
+    while (pos <= end) {
+      const nl = buf.indexOf(0x0a, pos);
+      const stop = nl < 0 || nl > end ? end : nl;
+      lines.push({ text: buf.subarray(pos, stop).toString("utf8"), end: from + stop + 1 });
+      pos = stop + 1;
+    }
+    return { lines, next: from + end + 1 };
+  }
+
+  /** Incrementally index records from sibling `transcript_full.jsonl` (only `wanted` steps when given). */
+  private syncFull(fullFile: string, wanted?: Set<number>): void {
+    try {
+      if (statSync(fullFile).size < this.fullOffset) {
+        this.fullOffset = 0;
+        this.fullCache.clear();
+      }
+    } catch {
+      return;
+    }
+    const { lines, next } = this.readLines(fullFile, this.fullOffset);
+    this.fullOffset = next;
+    for (const { text } of lines) {
+      if (!text.trim()) continue;
+      let r: unknown;
+      try {
+        r = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (r && typeof r === "object" && !Array.isArray(r) && typeof (r as Rec).step_index === "number") {
+        const step = (r as Rec).step_index as number;
+        if (!wanted || wanted.has(step)) this.fullCache.set(step, r as Rec);
+      }
+    }
   }
 
   private tail(): void {
@@ -593,22 +648,58 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       if (!existsSync(this.file)) return;
       this.follower = new AgyTranscriptFollower({ catalog: () => this.catalog });
       this.offset = 0;
+      this.fullOffset = 0;
+      this.fullCache.clear();
+      this.fullWait = null;
     }
     try {
-      if (statSync(this.file).size < this.offset) this.offset = 0;
+      if (statSync(this.file).size < this.offset) {
+        this.offset = 0;
+        this.fullOffset = 0;
+        this.fullCache.clear();
+        this.fullWait = null;
+      }
     } catch {
       return;
     }
-    const { lines, next } = this.read(this.offset);
-    this.offset = next;
+    const { lines } = this.readLines(this.file, this.offset);
+    const fullFile = fullTranscriptPath(this.file);
     let ended = false;
-    for (const l of lines) {
-      if (!l.trim()) continue;
+    for (const { text, end } of lines) {
+      if (!text.trim()) {
+        this.offset = end;
+        continue;
+      }
       let r: unknown;
       try {
-        r = JSON.parse(l);
+        r = JSON.parse(text);
       } catch {
+        this.offset = end;
         continue;
+      }
+      if (r && typeof r === "object" && !Array.isArray(r) && isTruncatedRecord(r as Rec) && typeof (r as Rec).step_index === "number") {
+        const step = (r as Rec).step_index as number;
+        if (fullFile && existsSync(fullFile)) {
+          if (!this.fullCache.has(step)) this.syncFull(fullFile);
+          const full = this.fullCache.get(step);
+          if (full) {
+            r = full;
+            this.fullWait = null;
+          } else if (!this.fullWait || this.fullWait.step !== step) {
+            // Compact line arrived ahead of transcript_full.jsonl: pause before it until the next tick.
+            this.fullWait = { step, since: Date.now() };
+            break;
+          } else if (Date.now() - this.fullWait.since < FULL_WAIT_MS) {
+            break;
+          } else {
+            this.fullWait = null;
+          }
+        }
+      }
+      this.offset = end;
+      if (r && typeof r === "object" && !Array.isArray(r) && typeof (r as Rec).step_index === "number") {
+        const step = (r as Rec).step_index as number;
+        for (const k of this.fullCache.keys()) if (k <= step) this.fullCache.delete(k);
       }
       const before = this.follower.turn;
       for (const ev of this.follower.feed(r)) this.emit(this.matchEcho(withImages(ev)));
@@ -990,24 +1081,47 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.awaitingHistory = false;
     const file = this.file;
     if (!file || !existsSync(file)) return [];
-    const { lines, next } = this.read(0);
+    const { lines, next } = this.readLines(file, 0);
     this.offset = next;
-    const past = new AgyTranscriptFollower({ history: true, catalog: () => this.catalog });
-    const out: NormalizedEvent[] = [];
-    const now = new Map<string, NormalizedEvent>();
-    for (const l of lines) {
-      if (!l.trim()) continue;
+    this.fullOffset = 0;
+    this.fullCache.clear();
+    this.fullWait = null;
+    const parsed: Rec[] = [];
+    const truncated = new Set<number>();
+    for (const { text } of lines) {
+      if (!text.trim()) continue;
       let r: unknown;
       try {
-        r = JSON.parse(l);
+        r = JSON.parse(text);
       } catch {
         continue;
       }
-      for (const ev of past.feed(r)) {
+      if (!r || typeof r !== "object" || Array.isArray(r)) continue;
+      const rec = r as Rec;
+      parsed.push(rec);
+      if (isTruncatedRecord(rec) && typeof rec.step_index === "number") truncated.add(rec.step_index);
+    }
+    const fullFile = fullTranscriptPath(file);
+    if (fullFile && existsSync(fullFile)) {
+      if (truncated.size > 0) {
+        this.syncFull(fullFile, truncated);
+      } else {
+        try {
+          this.fullOffset = statSync(fullFile).size;
+        } catch {}
+      }
+    }
+    const past = new AgyTranscriptFollower({ history: true, catalog: () => this.catalog });
+    const out: NormalizedEvent[] = [];
+    const now = new Map<string, NormalizedEvent>();
+    for (const rec of parsed) {
+      const full = typeof rec.step_index === "number" ? this.fullCache.get(rec.step_index) ?? rec : rec;
+      for (const ev of past.feed(full)) {
         if (ev.type === "model" || ev.type === "thinking") now.set(ev.type, ev);
         else out.push(withImages(ev));
       }
     }
+    this.fullCache.clear();
     for (const ev of now.values()) this.emit(ev);
     this.usageNow = past.usage();
     if (this.usageNow.contextTokens !== null) queueMicrotask(() => this.emit({ type: "turn_end" }));

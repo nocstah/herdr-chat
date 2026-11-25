@@ -7,11 +7,11 @@
 import { div, image } from "gpui-kit";
 import { appHome } from "herdr";
 import { v_flex, h_flex, TextView } from "gpui-base";
-import { alpha, codeLine, homeRel, icon, plural, spinner } from "./util.js";
+import { alpha, codeLine, homeRel, icon, monoFont, plural, spinner } from "./util.js";
 import { SPACE } from "./space.js";
 import { linkPaths } from "./paths.js";
 import { oneLine, runsInCode } from "./bang.js";
-import { decorateInlineCode, flavorPalette, mdChunks } from "./flavor.js";
+import { decorateInlineCode, flavorPalette, mdChunks, parseInlineSpans, stripHeading } from "./flavor.js";
 
 export { mdChunks };
 
@@ -63,14 +63,82 @@ function renderList(id, items, onLink, t, f) {
   }));
 }
 
+const HEADING_STYLE = [
+  null,
+  { size: 22, lh: "28px" },
+  { size: 18, lh: "24px" },
+  { size: 15.5, lh: "21px" },
+  { size: 14, lh: "20px" },
+  { size: 13.5, lh: "19px" },
+  { size: 13, lh: "19px" },
+];
+
+// Native colored inline line for headings and table headers: gpui-shell's TextView.markdown
+// pins its style to Theme::global(cx) and resets foreground to theme.foreground, so we render
+// single-line colored headers directly with GPUI spans while keeping inline code pills, emphasis
+// and clickable links working.
+function styledInline(id, text, color, onLink, t, f, { size = 14, lh = "20px", align = "left" } = {}) {
+  const src = onLink ? linkPaths(text) : text;
+  const runs = parseInlineSpans(src);
+  const plain = runs.length === 1 && !runs[0].code && !runs[0].url && !runs[0].italic && !runs[0].strike;
+  if (plain) {
+    return div().w_full().min_w(0).whitespace_normal().text_size(size).line_height(lh).font_semibold().text_color(color)
+      .when(align === "right", (e) => e.text_right())
+      .when(align === "center", (e) => e.text_center())
+      .child(runs[0].text || " ");
+  }
+  const mono = monoFont();
+  const codeSize = Math.max(11.5, Math.round(size * 0.86 * 10) / 10);
+  const parts = [];
+  let seq = 0;
+  for (const r of runs) {
+    const styleEl = (el) => el
+      .when(Boolean(r.bold), (e) => e.font_bold())
+      .when(Boolean(r.italic), (e) => e.italic())
+      .when(Boolean(r.strike), (e) => e.line_through());
+    if (r.code) {
+      const pill = styleEl(div().flex_none().font_family(mono).text_size(codeSize).px(4).rounded(4).bg(f.codeBg)
+        .text_color(r.url ? t.accent ?? color : color))
+        .child(r.text);
+      if (r.url) {
+        const url = r.url;
+        parts.push(pill.id(`${id}-sp-${seq++}`).cursor_pointer().hover((s) => s.text_decoration_1())
+          .on_click((_e, cx) => (onLink ? onLink(url, cx) : cx.open_url(url))));
+      } else {
+        parts.push(pill);
+      }
+      continue;
+    }
+    if (r.url) {
+      const url = r.url;
+      for (const word of r.text.match(/\s+|\S+\s*/g) ?? [r.text]) {
+        parts.push(styleEl(div().id(`${id}-sp-${seq++}`).flex_none().text_color(t.accent ?? color).cursor_pointer()
+          .hover((s) => s.text_decoration_1())
+          .on_click((_e, cx) => (onLink ? onLink(url, cx) : cx.open_url(url))))
+          .child(word));
+      }
+      continue;
+    }
+    for (const word of r.text.match(/\s+|\S+\s*/g) ?? [r.text]) {
+      parts.push(styleEl(div().flex_none()).child(word));
+    }
+  }
+  return h_flex().w_full().min_w(0).flex_wrap().items_center().text_size(size).line_height(lh).font_semibold().text_color(color)
+    .when(align === "right", (e) => e.justify_end())
+    .when(align === "center", (e) => e.justify_center())
+    .children(parts);
+}
+
 function renderTable(id, chunk, onLink, t, f) {
   // Very wide tables (6+ cols) fall back to native TextView table column measurement.
   if (chunk.headers.length > 5) return prose(id, chunk.text, onLink, { t });
   const alignCell = (el, a) => (a === "right" ? el.justify_end() : a === "center" ? el.justify_center() : el);
+  const headCell = (cid, txt, a) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
+    .child(div().min_w(0).child(styledInline(cid, txt || " ", f.tableHead, onLink, t, f, { size: 13, lh: "19px", align: a })));
   const cell = (cid, txt, a, opts) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
     .child(div().min_w(0).child(prose(cid, txt || " ", onLink, opts)));
   const head = h_flex().w_full().bg(f.tableHeadBg).border_b_1().border_color(t?.border).text_size(13).font_semibold().text_color(f.tableHead)
-    .children(chunk.headers.map((h, ci) => cell(`${id}-th-${ci}`, h, chunk.aligns[ci], { t })));
+    .children(chunk.headers.map((h, ci) => headCell(`${id}-th-${ci}`, h, chunk.aligns[ci])));
   const body = chunk.rows.map((r, ri) => h_flex().w_full().text_size(13).line_height("20px")
     .when(ri > 0, (e) => e.border_t_1().border_color(alpha(t?.border, 0.55)))
     .when(ri % 2 === 1, (e) => e.bg(f.tableStripe))
@@ -82,10 +150,13 @@ function renderChunk(id, p, onLink, t, f) {
   if (!t) return prose(id, p.text, onLink);
   switch (p.kind) {
     case "heading": {
-      const col = f.heading(p.level);
-      return div().min_w(0).text_color(col)
-        .when(p.level === 1, (e) => e.w_full().pb(4).border_b_1().border_color(f.h1Rule))
-        .child(prose(id, p.text, onLink, { t }));
+      const level = Math.max(1, Math.min(6, p.level ?? 1));
+      const col = f.heading(level);
+      const st = HEADING_STYLE[level] ?? HEADING_STYLE[4];
+      const title = stripHeading(p.text);
+      return div().w_full().min_w(0)
+        .when(level === 1, (e) => e.pb(4).border_b_1().border_color(f.h1Rule))
+        .child(styledInline(id, title, col, onLink, t, f, st));
     }
     case "hr":
       return div().w_full().py(4).child(div().w_full().h(1).bg(f.hr));
