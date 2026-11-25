@@ -3385,7 +3385,7 @@ export default class HerdrChat extends View {
       activity: this.activity(), activityOpen: this.supportsActivity() && this.activityOpen, activityLogCount: this.supportsActivity() ? (s.activityLog ?? []).length : 0, failedSends: this.failedSends?.length ?? 0, lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
-      statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
+      statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, composerCompact: this.composerCompact ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
       update: { ...this.updater.dump(this.conn.welcome), healing: this.healing ?? null },
       widgetsOpen: this.prefs.widgetsOpen, themeSent: Boolean(this.themeSent), themeOk: this.themeOk ?? null,
       enlarged: this.enlarged ?? null, svgHover: this.svgHover ?? null, svgSizes: Object.fromEntries(this.svgSizes),
@@ -3621,8 +3621,14 @@ export default class HerdrChat extends View {
     const hintText = this.flashText?.text ?? (s.dialog ? (s.dialog.method === "permission" ? "Answer above · Esc denies" : "Answer above · Esc cancels") : working
       ? [sendKey && `${sendKey} ${s.capabilities?.steer === false ? "queues" : "steers"}`, followKey && `${followKey} after this run`, "Esc stops"].filter(Boolean).join(" · ")
       : this.peekMode && this.composer.focused && !this.composer.value ? "Esc closes" : null);
-    const composer = Popup.new("composer-anchor", this.composer.view(t, { ...c, working, plus: plusButton(this, t), mic: micButton(this, t),
-      hint: hintText, hintColor: this.flashText ? t.blocked : t.dim, action: (a, cx) => this.action(a, cx) }))
+    // A new chat's card is the full one (+, hint and mic in it); once there's a conversation it's a reply's, one
+    // row as in the Claude app, and those go under it.
+    // (Before the history loads it's the full card: a new chat's stays so, without a flash.)
+    const compact = (this.composerCompact = this.store.loaded && !empty);
+    const hintColor = this.flashText ? t.blocked : t.dim;
+    const plus = plusButton(this, t, { side: compact ? 26 : 30 }), mic = micButton(this, t, { side: compact ? 26 : 30 });
+    const composer = Popup.new("composer-anchor", this.composer.view(t, { ...c, working, compact, plus: compact ? null : plus, mic: compact ? null : mic,
+      hint: compact ? null : hintText, hintColor, action: (a, cx) => this.action(a, cx) }))
       .anchor("bottom_left").w_full()
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
     const quotaCard = !s.dialog ? this.quotaCard(t) : null;
@@ -3645,7 +3651,7 @@ export default class HerdrChat extends View {
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
       // Under the card, as the Claude app has it: the folder and its branch; the model, its effort and the mode.
-      .child(div().px(4).child(underRow(this, t, { width: this.colW() - 8 })));
+      .child(div().px(4).child(underRow(this, t, { width: this.colW() - 8, ...(compact ? { lead: [plus, mic], hint: hintText, hintColor } : {}) })));
     // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();

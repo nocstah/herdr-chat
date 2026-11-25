@@ -69,7 +69,9 @@ function underChip(id, t, { tip, onClick, color } = {}) {
   return el;
 }
 
-export function underRow(v, t, { width }) {
+// `lead`: the composer's + and mic, drawn here first when the card is a reply's (composer.js `compact`), and
+// `hint` (what the keys do now, or a flash) between the left and the right, where the Claude app has its line.
+export function underRow(v, t, { width, lead = [], hint = null, hintColor = null }) {
   const s = v.store.state;
   const caps = s.capabilities ?? null; // what this agent can do (null until the host says)
   const tier = footerTier(width);
@@ -77,8 +79,13 @@ export function underRow(v, t, { width }) {
   const tiny = tier === "xs", small = tiny || tier === "sm";
   const drawn = []; // what it draws, by name (the dump: footerChips)
 
-  // Left: the folder (a click copies its path), its branch, the statuses.
+  // Left: the +, the mic (a reply), the folder (a click copies its path), its branch, the statuses.
   const left = [];
+  const leadEls = lead.filter(Boolean);
+  if (leadEls.length) {
+    left.push(h_flex().id("under-lead").flex_none().gap(0).items_center().mr(2).children(leadEls));
+    drawn.push("lead");
+  }
   const cwd = (s.cwd || v.cwd || "").replace(v.homeDir, "~");
   if (cwd) {
     const name = cwd === "~" || cwd === "/" ? cwd : cwd.split("/").filter(Boolean).at(-1) ?? cwd;
@@ -135,7 +142,8 @@ export function underRow(v, t, { width }) {
 
   // Statuses: as many chips as fit between the two sides, then "+N".
   const rightW = right.length * 70 + (name ? Math.min(modelLabel(name).length * 7, 160) : 40);
-  let room = small ? 0 : Math.max(0, width - rightW - 120 - (branch ? 100 : 0));
+  // A hint takes the statuses' room (they fold into "+N").
+  let room = small || hint ? 0 : Math.max(0, width - rightW - 120 - (branch ? 100 : 0) - leadEls.length * 26);
   const list = caps?.extensionUi === false ? [] : v.visibleStatuses();
   const shown = [];
   for (const x of list) {
@@ -160,6 +168,10 @@ export function underRow(v, t, { width }) {
       .trigger(h_flex().id("statuses").gap(2).items_center().children(chips))
       .content(statusesPopover(v, t)));
   }
+  if (hint) {
+    left.push(div().id("under-hint").flex_1().min_w(0).px(6).truncate().text_size(11.5).text_color(hintColor ?? t.dim).child(hint));
+    drawn.push("hint");
+  }
   return h_flex().id("under-row").w_full().h(26).gap(8).items_center().overflow_hidden()
     .child(h_flex().flex_1().min_w(0).gap(2).items_center().overflow_hidden().children(left))
     .child(h_flex().flex_none().gap(0).items_center().children(right));
@@ -167,14 +179,14 @@ export function underRow(v, t, { width }) {
 
 // The composer's + (bottom left, as the Claude app has it): what can go into a message: uploaded files
 // (native file picker), a workspace file mention (@), a command (/), or an image from the clipboard.
-export function plusButton(v, t) {
+export function plusButton(v, t, { side = 30 } = {}) {
   const item = (id, name, label, hint) => h_flex().id(`plus-${id}`).h(30).px(8).gap(10).items_center().rounded(7).cursor_pointer().text_size(13)
     .hover((s) => s.bg(t.hover)).on_click((_e, cx) => v.control(`plus:${id}`, cx))
     .child(icon(name, 14).text_color(t.muted)).child(div().flex_1().child(label))
     .child(div().text_size(11.5).text_color(t.dim).child(hint));
   return Popover.new("plus").anchor("bottom_left").open(Boolean(v.plusOpen))
     .on_open_change((open, cx) => v.setPlusOpen(open, cx))
-    .trigger(h_flex().id("compose-plus").w(30).h(30).flex_none().rounded(8).items_center().justify_center().cursor_pointer()
+    .trigger(h_flex().id("compose-plus").w(side).h(side).flex_none().rounded(side > 26 ? 8 : 6).items_center().justify_center().cursor_pointer()
       .text_color(v.plusOpen ? t.foreground : t.muted).when(Boolean(v.plusOpen), (e) => e.bg(t.hover))
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Add to the message")
       .child(icon("plus", 16)))
@@ -187,9 +199,9 @@ export function plusButton(v, t) {
 
 // The mic (where the Claude app has it): starts or stops the desktop's dictation, the toggle Omarchy's
 // dictation keys run (omarchy-dictation), which types into the composer. None where there isn't one.
-export function micButton(v, t) {
+export function micButton(v, t, { side = 30 } = {}) {
   if (!v.dictation) return null;
-  return h_flex().id("compose-mic").w(30).h(30).flex_none().rounded(8).items_center().justify_center().cursor_pointer()
+  return h_flex().id("compose-mic").w(side).h(side).flex_none().rounded(side > 26 ? 8 : 6).items_center().justify_center().cursor_pointer()
     .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Dictate (starts or stops dictation)")
     .on_click((_e, cx) => v.control("dictate", cx)).child(icon("mic", 15));
 }
