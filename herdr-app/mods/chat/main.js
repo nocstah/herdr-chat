@@ -32,6 +32,7 @@ import { agents, appHome, closeOverlay, focused, hc, home, layout, nextCommand, 
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
 import { HANDOFF_MS, SETTLE_MS, copiedText, ctrlCCommand, messageMenuItems, swallowsStop } from "./selcopy.js";
 import { MessageMenu } from "./msgmenu.js";
+import { HOVER_CLAIM_MS, mayClaim, typedChar } from "./claim.js";
 
 // What each chat pane shows, for the agents list (mods/chat-agents/chat-focus.js): pane → agent's terminal.
 const SHOWS = "herdr-chat.panes";
@@ -202,6 +203,8 @@ export default class HerdrChat extends View {
       skills: () => this.commandList().filter((c) => c.source === "skill").map((c) => ({ command: c.name, name: c.name.replace(/^skill:/, "") })),
     });    // A copy key in the composer with no text of its own selected: the text selected in the chat (selcopy.js).
     this.composer.copyMiss = (cx) => this.handOffCopy(cx);
+    // The chat's own hold on the keyboard: a click on the conversation keeps the keys here, for typeAnywhere.
+    this.rootFocus = cx.focus_handle();
 
     this.conn = new Connection({
       chat: this.chat,
@@ -1800,8 +1803,8 @@ export default class HerdrChat extends View {
       case "mode": return toggle("permission", () => this.openModePicker(cx));
       case "cycleMode": return this.cycleMode(cx);
       case "stop":
-        // the Ctrl+C a copy asked Herdr for, with nothing selected: not the person's Stop
-        if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; return; }
+        // the Ctrl+C a copy asked Herdr for: not the person's Stop, but on to Herdr's own copy of the selection
+        if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; cx.propagate(); return; }
         if (!this.store.working()) return this.flash("Nothing to stop", cx);
         return this.abort(cx);
       case "tui":
@@ -2120,7 +2123,7 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_up") this.composer.recall(this.store.sentPrompts(), -1);
     else if (a === "herdrchat_down") this.composer.recall(this.store.sentPrompts(), 1);
     else if (a === "herdrchat_enter") this.send(cx);
-    else if (a === "herdrchat_stop") { if (swallowsStop(this.copyHandoffUntil, Date.now())) this.copyHandoffUntil = 0; else this.abort(cx); }
+    else if (a === "herdrchat_stop") { if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; cx.propagate(); } else this.abort(cx); }
     else if (a === "herdrchat_escape") {
       if (this.pastePreviewId) return this.closePastePreview(cx);
       if (this.swarm?.open || this.swarm?.startOpen) return this.swarm.close(cx);
@@ -2259,6 +2262,10 @@ export default class HerdrChat extends View {
     if (appWindow()?.platform !== "linux") return look ? this.openMessageMenu(look, null) : undefined;
     const before = read(cx);
     this.copyHandoffUntil = Date.now() + HANDOFF_MS;
+    // The composer's Ctrl+C copies its own field: while it has the keys, the chat holds them for the hand-off, so
+    // Herdr's copy sees the chat's selection, and the composer has them back after.
+    const giveBack = Boolean(this.composer?.focused && this.rootFocus);
+    if (giveBack) this.rootFocus.focus();
     cx.spawn(async (cx) => {
       await cx.sleep(0);
       const { program, args } = ctrlCCommand();
@@ -2266,6 +2273,7 @@ export default class HerdrChat extends View {
       if (r?.code === 0) await cx.sleep(SETTLE_MS);
       else this.copyHandoffUntil = 0;
       const got = r?.code === 0 ? copiedText(before, read(cx)) : null;
+      if (giveBack && this.rootFocus?.is_focused?.()) this.composer.focus();
       if (look) {
         // a look, not a copy: the clipboard's text goes back (a picture on it can't, and gives way to the text)
         if (got != null && typeof before === "string") cx.write_to_clipboard(before);
@@ -2276,6 +2284,60 @@ export default class HerdrChat extends View {
       this.debug.mark();
       cx.notify();
     });
+  }
+
+  // Something in the chat other than the composer has the keys: a question card, a picker, a dialog, find.
+  keysBusy() {
+    return Boolean(this.picker || this.store?.state?.dialog || this.find || this.composer?.askCard);
+  }
+
+  // A character typed while the chat has the keyboard outside its inputs (the conversation clicked, text selected in
+  // it): the composer takes the keyboard and the character, as in Claude's app (claim.js).
+  /** @param {import("gpui-kit").KeyEvent} e @param {import("gpui-kit").Context} cx */
+  typeAnywhere(e, cx) {
+    if (this.composer.focused || this.keysBusy()) return;
+    const ch = typedChar(e);
+    if (ch == null) return;
+    this.composer.focus();
+    this.composer.typeText(ch);
+    cx.stop_propagation();
+    cx.notify();
+  }
+
+  // Ctrl+V, Ctrl+Shift+V (Super+V) or Shift+Insert outside the chat's inputs: into the composer, as its own paste.
+  /** @param {import("gpui-kit").Context} cx */
+  pasteAnywhere(cx) {
+    if (this.keysBusy()) return;
+    this.composer.focus();
+    this.composer.pasteKey(cx);
+    cx.notify();
+  }
+
+  // The pointer coming back over the chat after a press elsewhere in the window (the sidebar, a panel, the keyboard
+  // left there) while Herdr's focus stays on its pane: the chat takes the keyboard, so what is typed or pasted next
+  // goes into the composer (typeAnywhere, pasteAnywhere; claim.js). Only after such a press: a drag in the
+  // conversation keeps its text view. The chat's own hold, not the composer's: Herdr forgets the chat's selection
+  // when an input takes the keyboard, and this keeps it for Super+C. (Herdr reports the pointer coming in, not
+  // always going out: the press is what says the keys went elsewhere.)
+  /** @param {boolean} hovered @param {import("gpui-kit").Context} cx */
+  hoverClaim(hovered, cx) {
+    this.pointerIn = hovered;
+    if (!hovered || !this.keysElsewhere) return;
+    const at = (this.pointerInAt = Date.now());
+    cx.timer.after(HOVER_CLAIM_MS, () => {
+      if (!this.pointerIn || this.pointerInAt !== at) return;
+      const me = this.myPane();
+      if (!mayClaim({ composerFocused: this.composer.focused, busy: this.keysBusy(), keysElsewhere: Boolean(this.keysElsewhere), focused: focused(), pane: me?.pane ?? null, tab: me?.tab ?? null })) return;
+      this.keysElsewhere = false;
+      this.rootFocus?.focus();
+      cx.notify();
+    });
+  }
+
+  // A press in the chat keeps the keys in it (and cancels a claim on its way); one elsewhere may have taken them.
+  pressIn() {
+    this.keysElsewhere = false;
+    this.pointerInAt = 0;
   }
 
   /** @param {{ it: any, text: string }} look @param {string | null} selection */
@@ -3230,6 +3292,7 @@ export default class HerdrChat extends View {
 
   close() {
     if (this.viewer || this.termbar || this.messageMenuView) return;
+    this.rootFocus?.release?.();
     this.activityScroll?.release?.();
     this.swarm?.release?.();
     owners.delete(this.uid);
@@ -3667,6 +3730,14 @@ export default class HerdrChat extends View {
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
     // Super+C's Ctrl+Shift+C (or Ctrl+Insert) outside an input: the text selected in the chat (selcopy.js).
     root = root.on_action("herdrchat_copy", (_e, cx) => this.handOffCopy(cx));
+    // Typing, pasting, and the pointer over the chat: the composer claims the keyboard (claim.js).
+    root = root.on_action("herdrchat_paste_anywhere", (_e, cx) => this.pasteAnywhere(cx))
+      .on_key_down((e, cx) => this.typeAnywhere(e, cx))
+      .on_hover((h, cx) => this.hoverClaim(h, cx))
+      .on_mouse_down("left", () => this.pressIn())
+      .on_mouse_down("right", () => this.pressIn())
+      .on_mouse_down_out(() => { this.keysElsewhere = true; });
+    if (this.rootFocus) root = root.track_focus(this.rootFocus);
 
     if (empty) {
       // Startup notices (an extension's warning) don't end the empty state: they show under it.

@@ -75,6 +75,8 @@ export function bindComposerKeys(cx) {
   }
   // Outside an input (an answer's text selected, the focus on the timeline): the window's selection (selcopy.js).
   for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: "HerdrChat" });
+  // A paste outside an input goes into the composer (claim.js); an input's own paste keys are nearer and win.
+  for (const k of COMPOSER_PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste_anywhere", context: "HerdrChat" });
   for (const ctx of EXTRA_INPUTS) {
     for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: `${ctx} > Input` });
     for (const k of PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
@@ -197,6 +199,11 @@ export class Composer {
 
   focus() {
     this.ta.focus();
+  }
+
+  // Text typed elsewhere in the chat (claim.js), at the cursor, as a key would type it.
+  typeText(text) {
+    this.ta.replace(text);
   }
 
   // The text, with its skill commands as pills.
