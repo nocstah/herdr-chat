@@ -107,6 +107,17 @@ export class AgyTranscriptFollower {
     return out;
   }
 
+  /** Currently executing `run_command` call's command line and human summary (FIFO: first pending is active). */
+  pendingCommandInfo(): { command: string; summary: string } | null {
+    for (const c of this.pending) {
+      if (c.name !== "run_command") continue;
+      const command = (typeof c.args.CommandLine === "string" ? c.args.CommandLine : typeof c.args.command === "string" ? c.args.command : "").trim();
+      const summary = (typeof c.args.toolSummary === "string" ? c.args.toolSummary : typeof c.args.toolAction === "string" ? c.args.toolAction : "").trim();
+      if (command || summary) return { command, summary };
+    }
+    return null;
+  }
+
   /** Switch from history replay to live tailing while keeping seen steps and pending tool calls. */
   setLive(): void {
     this.history = false;

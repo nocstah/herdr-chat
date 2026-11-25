@@ -27,7 +27,7 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyRunningCommand, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { sendAgyBang } from "./bang.ts";
 import {
@@ -39,6 +39,7 @@ import {
 } from "./swarm.ts";
 import type { SwarmActionRequest, SwarmMemberTranscript, SwarmSnapshot } from "./swarm.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
+import { firstLine } from "../../tools.ts";
 import { imageLines, pruneImages, saveImages, withImageLines } from "../sent-images.ts";
 import { waitForPrompt } from "../prompt-wait.ts";
 import type { PromptWait } from "../prompt-wait.ts";
@@ -400,6 +401,29 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.setActivityText(null);
   }
 
+  /** Replace Antigravity's generic `"Running command... 7s"` spinner text with the real pending command/summary when known. */
+  private enrichWorkingStatus(status: string, screen: string): string {
+    const m = /^Running command(?:\.{3}|…)?(?:\s*\(?((?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s)\)?)?$/i.exec(status.trim());
+    if (!m) return status;
+    const elapsed = m[1]?.replace(/\s+/g, " ").trim() || "";
+    this.tail();
+    const info = this.follower?.pendingCommandInfo() ?? null;
+    const rawCmd = info?.command || readAgyRunningCommand(screen) || "";
+    const rawSummary = info?.summary || "";
+    const suffix = elapsed ? ` · ${elapsed}` : "";
+    if (rawCmd) {
+      const cmd = firstLine(rawCmd, 96);
+      const summary = rawSummary && !/^Running command/i.test(rawSummary) && !cmd.toLowerCase().includes(rawSummary.toLowerCase())
+        ? firstLine(rawSummary, 60)
+        : "";
+      return `$ ${cmd}${summary ? ` · ${summary}` : ""}${suffix}`;
+    }
+    if (rawSummary && !/^Running command/i.test(rawSummary)) {
+      return `${firstLine(rawSummary, 96)}${suffix}`;
+    }
+    return status;
+  }
+
   private async pollWorkStatus(): Promise<void> {
     const active = () => !this.disposed && this.running && this.status !== "blocked";
     if (active() && !this.answering && this.agyRuns()) {
@@ -409,7 +433,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
         if (status) {
           this.sawWorkingScreen = true;
           this.interruptedNow = null;
-          this.setActivityText(status);
+          this.setActivityText(this.enrichWorkingStatus(status, text));
         } else {
           this.setActivityText(null);
           if (this.handleScreenInterruption(text)) {

@@ -70,6 +70,7 @@ import { themeSig } from "./flavor.js";
 import { MAC } from "./platform.js";
 import { pickFiles } from "./file-picker.js";
 import { assembleMessageWithPastes, canUnpackInline, createPastedChip, formatCount, pasteChipTitle, rebalancePasteModes } from "./paste.js";
+import { failedSendSummary, mergeDraftIntoComposer, removeFailedSend, retainFailedSend } from "./unsent.js";
 
 const COL_MAX = 800;
 const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before the app's next read (beforeAppRead)
@@ -177,6 +178,10 @@ export default class HerdrChat extends View {
     this.pasteSeq = 0;
     this.pastePreviewId = null;
     this.pastePreviewFocus = cx.focus_handle();
+    this.sendSeq = 0;
+    this.failedSends = [];
+    this.inflightSends = new Map();
+    this.retryingSendId = null;
     this.composer = new Composer(cx, {
       placeholder: `Message ${PROVIDER_NAMES[this.provider ?? DEFAULT_PROVIDER] ?? "the agent"}…`,
       onChange: (cx) => { this.updateMenu(cx); this.rebalancePastes(cx); this.debug.mark(); cx.notify(); },
@@ -903,6 +908,32 @@ export default class HerdrChat extends View {
     } else if (rec.t === "toast") {
       notify({ title: this.providerName(), body: rec.text, level: rec.level === "warning" ? "warning" : rec.level === "error" ? "error" : "info" });
       this.log(`toast ${rec.level}: ${rec.text}`);
+    } else if (rec.t === "send_rejected") {
+      const saved = rec.clientSendId ? this.inflightSends.get(rec.clientSendId) : null;
+      if (rec.clientSendId) this.inflightSends.delete(rec.clientSendId);
+      const draft = saved ?? (typeof rec.text === "string" && rec.text.trim()
+        ? {
+          id: rec.clientSendId || `late-${Date.now()}-${++this.sendSeq}`,
+          rawText: rec.text,
+          text: rec.text,
+          chips: [],
+          images: Array.isArray(rec.images) ? rec.images : [],
+          files: [],
+          pastes: [],
+          mode: "auto",
+          bang: false,
+          noBang: false,
+          hasAttachments: Array.isArray(rec.images) && rec.images.length > 0,
+          slashMatch: null,
+          at: Date.now(),
+        }
+        : null);
+      if (draft) {
+        this.failedSends = retainFailedSend(this.failedSends, draft, rec.reason);
+        this.flash("Message not sent — saved above the composer to retry", cx);
+        this.debug.mark();
+        cx.notify();
+      }
     } else if (rec.t === "bye") {
       this.log(`bye: ${rec.reason}`);
       // Closed on purpose: another chat took the session over (not our own replaceHost).
@@ -1024,24 +1055,110 @@ export default class HerdrChat extends View {
         return;
       }
     }
-    // Detach any leftover .txt file from a paste chip that ended up sent inline.
-    for (const ch of pastes) {
-      if (ch.mode === "inline" && ch.path) this.req("detach_file", { path: ch.path }).catch(() => {});
-    }
-    this.pastePreviewId = null;
-    this.composer.clear();
-    this.timeline.toBottom();
-    // The terminal view: single-line `!command` (not pasted blocks) is the TUI's shell command (bash mode), shown by its own records.
+    const snapshotChips = this.composer.chips.map((ch) => ({ ...ch }));
     const trimmedRaw = rawText.trim();
     const bang = Boolean(this.view) && !hasAttachments && !/[\r\n]/.test(trimmedRaw) && trimmedRaw.length <= 4000 && /^!\s*[^\s=!]/.test(trimmedRaw);
     const noBang = pastes.length > 0;
-    this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}), ...(noBang ? { noBang: true } : {}) }, cx, (d, cx) => {
-      this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
-      // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
-      // and the chat comes back once the TUI is at its prompt again.
-      // `/model <name>` and `/effort <level>` set it in place in the TUI (no picker opens there).
-      if (this.view && m && !hasAttachments && !VIEW_IN_PLACE.has(m[1]) && !((m[1] === "model" || m[1] === "effort") && m[2].trim())) this.visitTerminal(cx);
+    const draft = {
+      id: `s-${Date.now()}-${++this.sendSeq}`,
+      rawText,
+      text,
+      chips: snapshotChips,
+      images,
+      files,
+      pastes: snapshotChips.filter((c) => c.kind === "paste"),
+      mode,
+      bang,
+      noBang,
+      hasAttachments,
+      slashMatch: m ? [m[0], m[1], m[2]] : null,
+      at: Date.now(),
+    };
+    this.pastePreviewId = null;
+    this.composer.clear();
+    this.timeline.toBottom();
+    this.dispatchSend(draft, cx);
+  }
+
+  dispatchSend(draft, cx, { retrying = false } = {}) {
+    const now = Date.now();
+    for (const [k, v] of this.inflightSends) {
+      if (now - (v.at ?? 0) > 5 * 60_000) this.inflightSends.delete(k);
+    }
+    this.inflightSends.set(draft.id, { ...draft, at: now });
+    if (retrying) this.retryingSendId = draft.id;
+    cx.spawn(async (cx) => {
+      try {
+        const d = await this.req("send", {
+          clientSendId: draft.id,
+          text: draft.text,
+          ...(draft.images.length ? { images: draft.images } : {}),
+          mode: draft.mode,
+          ...(draft.bang ? { echo: false } : {}),
+          ...(draft.noBang ? { noBang: true } : {}),
+        }, cx);
+        if (d?.disposition !== "pending") this.inflightSends.delete(draft.id);
+        // Detach any leftover .txt file from paste chips sent inline only after send succeeds.
+        for (const ch of draft.pastes ?? []) {
+          if (ch.mode === "inline" && ch.path) this.req("detach_file", { path: ch.path }).catch(() => {});
+        }
+        this.lastSend = { text: draft.text, disposition: d?.disposition ?? null, at: Date.now() };
+        const m = draft.slashMatch;
+        // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
+        // and the chat comes back once the TUI is at its prompt again.
+        // `/model <name>` and `/effort <level>` set it in place in the TUI (no picker opens there).
+        if (this.view && m && !draft.hasAttachments && !VIEW_IN_PLACE.has(m[1]) && !((m[1] === "model" || m[1] === "effort") && m[2].trim())) this.visitTerminal(cx);
+      } catch (e) {
+        this.inflightSends.delete(draft.id);
+        this.failedSends = retainFailedSend(this.failedSends, draft, message(e));
+        this.flash("Message not sent — saved above the composer to retry", cx);
+      } finally {
+        if (this.retryingSendId === draft.id) this.retryingSendId = null;
+        this.debug.mark();
+        cx.notify();
+      }
     });
+  }
+
+  retryFailedSend(id, cx) {
+    const item = this.failedSends.find((x) => x.id === id);
+    if (!item || this.retryingSendId === id) return;
+    this.failedSends = removeFailedSend(this.failedSends, id);
+    this.timeline.toBottom();
+    this.dispatchSend(item, cx, { retrying: true });
+    this.debug.mark();
+    cx.notify();
+  }
+
+  editFailedSend(id, cx) {
+    const item = this.failedSends.find((x) => x.id === id);
+    if (!item) return;
+    this.failedSends = removeFailedSend(this.failedSends, id);
+    const merged = mergeDraftIntoComposer(this.composer.value, this.composer.chips, item);
+    this.composer.set(merged.text);
+    this.composer.chips = merged.chips;
+    this.composer.focus();
+    this.updateMenu(cx);
+    this.rebalancePastes(cx);
+    this.debug.mark();
+    cx.notify();
+  }
+
+  dismissFailedSend(id, cx) {
+    const item = this.failedSends.find((x) => x.id === id);
+    if (!item) return;
+    this.failedSends = removeFailedSend(this.failedSends, id);
+    const stillUsed = new Set([
+      ...this.composer.chips.map((c) => c.path).filter(Boolean),
+      ...this.failedSends.flatMap((x) => x.chips.map((c) => c.path).filter(Boolean)),
+    ]);
+    for (const ch of item.chips ?? []) {
+      if (!ch.path || stillUsed.has(ch.path)) continue;
+      if (ch.kind === "file" || ch.kind === "paste") this.req("detach_file", { path: ch.path }).catch(() => {});
+      else this.req("detach_image", { path: ch.path }).catch(() => {});
+    }
+    this.debug.mark();
+    cx.notify();
   }
 
   // ---- the terminal view (faces.js) -------------------------------------------------
@@ -2474,6 +2591,70 @@ export default class HerdrChat extends View {
         .child(btn("quota-dismiss", "Dismiss", false, "quota:dismiss")));
   }
 
+  // Retained unsent/rejected messages right above the composer so rejected prompts are never lost.
+  /** @param {any} t */
+  unsentCard(t) {
+    if (!this.failedSends?.length) return null;
+    const dialogOpen = Boolean(this.store.state.dialog);
+    const tone = dialogOpen ? (t.ansi3 ?? t.blocked) : t.ansi1;
+    const countLabel = this.failedSends.length === 1 ? "Message not sent" : `${this.failedSends.length} messages not sent`;
+    const btn = (id, label, { primary = false, disabled = false, ic = null, what }) => {
+      let el = h_flex().id(id).flex_none().h(26).px(10).gap(5).items_center().rounded(6)
+        .border_1().border_color(primary ? t.solid : t.input)
+        .bg(primary ? t.solid : t.raised)
+        .text_color(primary ? t.solid_foreground : t.foreground).text_size(11.5).font_medium();
+      if (disabled) el = el.opacity(0.6);
+      else el = el.cursor_pointer().hover((s) => s.opacity(0.86)).on_click((_e, cx) => this.control(what, cx));
+      if (ic) el = el.child(ic);
+      return el.child(label);
+    };
+    const rows = this.failedSends.map((item, idx) => {
+      const sum = failedSendSummary(item);
+      const retrying = this.retryingSendId === item.id;
+      return v_flex().id(`unsent-item-${idx}`).gap(6)
+        .when(idx > 0, (e) => e.pt(8).border_t_1().border_color(alpha(tone, 0.22)))
+        .child(div().text_size(12).line_height("17px").text_color(t.muted).child(item.reason))
+        .when(Boolean(sum.preview || sum.attachments.length), (e) => e.child(
+          v_flex().px(10).py(7).gap(5).rounded(7).bg(t.background).border_1().border_color(alpha(t.border, 0.9))
+            .when(Boolean(sum.preview), (b) => b.child(div().text_size(12.5).line_height("18px").text_color(t.foreground).whitespace_normal().child(sum.preview)))
+            .when(sum.attachments.length > 0, (b) => b.child(
+              h_flex().gap(5).flex_wrap().children(sum.attachments.map((label, ai) =>
+                div().id(`unsent-att-${idx}-${ai}`).px(6).py(1).rounded(4).bg(t.raised).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(label),
+              )),
+            )),
+        ))
+        .child(h_flex().gap(6).items_center().flex_wrap()
+          .child(btn(`unsent-retry-${idx}`, retrying ? "Sending…" : "Try again", {
+            primary: !dialogOpen,
+            disabled: retrying,
+            ic: retrying ? spinner(11, !dialogOpen ? t.solid_foreground : t.foreground) : icon("rotate", 11.5),
+            what: `unsent:retry:${item.id}`,
+          }))
+          .child(btn(`unsent-edit-${idx}`, "Edit", {
+            disabled: retrying,
+            ic: icon("pencil", 11),
+            what: `unsent:edit:${item.id}`,
+          }))
+          .child(btn(`unsent-copy-${idx}`, "Copy", {
+            ic: icon("copy", 11),
+            what: `unsent:copy:${item.id}`,
+          }))
+          .child(div().flex_1())
+          .child(div().id(`unsent-dismiss-${idx}`).p(4).rounded(5).cursor_pointer().text_color(t.dim)
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .tooltip("Discard unsent message")
+            .on_click((_e, cx) => this.control(`unsent:dismiss:${item.id}`, cx))
+            .child(icon("x", 12))));
+    });
+    return v_flex().id("unsent-card").w_full().gap(8).p(11).rounded(10).border_1()
+      .border_color(alpha(tone, 0.45)).bg(alpha(tone, 0.08))
+      .child(h_flex().gap(7).items_center()
+        .child(icon("alert", 13.5).text_color(tone))
+        .child(div().flex_1().min_w(0).text_size(12.5).font_semibold().text_color(tone).child(countLabel))
+        .when(dialogOpen, (e) => e.child(div().px(6).py(1).rounded(5).bg(alpha(tone, 0.16)).text_size(10.5).font_medium().text_color(tone).child("Answer above first"))))
+      .children(rows);
+  }
+
   // A file a tool touched or an answer linked, in Herdr's files viewer or an
   // editor (files.js). `mustExist`: a path an answer named, checked first (in
   // the chat's folder, on the space's machine).
@@ -2685,6 +2866,14 @@ export default class HerdrChat extends View {
       case "dialog:cancel": return this.answer("cancel", null, cx);
       case "quota:dismiss": this.dismissedQuotaId = this.store.state.quotaWarning?.id ?? null; break;
       default:
+        if (what.startsWith("unsent:retry:")) return this.retryFailedSend(what.slice(13), cx);
+        if (what.startsWith("unsent:edit:")) return this.editFailedSend(what.slice(12), cx);
+        if (what.startsWith("unsent:copy:")) {
+          const item = this.failedSends.find((x) => x.id === what.slice(12));
+          if (item) this.copy(`unsent:${item.id}`, item.text, cx);
+          break;
+        }
+        if (what.startsWith("unsent:dismiss:")) return this.dismissFailedSend(what.slice(15), cx);
         if (what.startsWith("swarm:")) return this.swarm?.control(what.slice(6), cx);
         if (what.startsWith("bg:open:")) return this.bgOpen(what.slice(8), cx);
         if (what.startsWith("bg:stop:")) return this.bgStop(what.slice(8), cx);
@@ -3139,7 +3328,7 @@ export default class HerdrChat extends View {
       width: this.width, colW: this.colW(), empty: this.isEmpty(),
       rows: space(rows).map((r) => ({ id: r.id, kind: r.kind, gap: r.gap, slot: r.slot, ...(r.kind === "group" ? group(r) : {}),
         ...(r.footer ? { footer: r.footer } : {}), ...(r.kind === "item" ? { item: r.item.kind } : {}) })),
-      activity: this.activity(), activityOpen: this.supportsActivity() && this.activityOpen, activityLogCount: this.supportsActivity() ? (s.activityLog ?? []).length : 0, lastCopy: this.lastCopy ?? null,
+      activity: this.activity(), activityOpen: this.supportsActivity() && this.activityOpen, activityLogCount: this.supportsActivity() ? (s.activityLog ?? []).length : 0, failedSends: this.failedSends?.length ?? 0, lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
       statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
@@ -3214,6 +3403,7 @@ export default class HerdrChat extends View {
         // Code Mode: a Poll says what it waits for ("Waiting for #12 Run the tests"), a script its description.
         if (it.name === "Poll" && it.title) return { text: it.title, since: it.ts };
         if (it.name === "REPL" && it.title && it.title !== "REPL") return { text: `Running ${it.title}`, since: it.ts };
+        if (it.title && it.title !== it.name) return { text: it.title, since: it.ts };
         return { text: `Running ${it.name}`, since: it.ts };
       }
       // Its row counts the seconds, or the live row of the folded card it's in (rows.js liveSteps).
@@ -3343,6 +3533,7 @@ export default class HerdrChat extends View {
       .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
       .children([widgetTray(this, above, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
+      .when(this.failedSends.length > 0, (e) => e.child(this.unsentCard(t)))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
       // Under the card, as the Claude app has it: the folder and its branch; the model, its effort and the mode.

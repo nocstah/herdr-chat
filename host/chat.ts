@@ -169,6 +169,87 @@ export type ChatState = {
 export type ActivityEntry = { text: string; ts: number; kind?: "status" | "tool" };
 
 const MAX_ACTIVITY_LOG = 200;
+const TRAILING_ELAPSED_RE = /(?:\s*[·•—–-]\s*|\s+)\(?((?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s)\)?\s*$/i;
+const TRAILING_DOTS_RE = /(?:\.{3}|…)\s*$/;
+const GENERIC_RUNNING_CMD_RE = /^Running command$/i;
+
+/** Parse trailing elapsed seconds (e.g. `"Running command... 12s"` -> 12, `"1m 5s"` -> 65), or null. */
+export function activityElapsed(text: string): { label: string; seconds: number } | null {
+  const m = TRAILING_ELAPSED_RE.exec(text);
+  if (!m?.[1]) return null;
+  const label = m[1].replace(/\s+/g, " ").trim();
+  const h = /(\d+)h/i.exec(label);
+  const min = /(\d+)m/i.exec(label);
+  const sec = /(\d+(?:\.\d+)?)s/i.exec(label);
+  const seconds = (h ? Number(h[1]) * 3600 : 0) + (min ? Number(min[1]) * 60 : 0) + (sec ? Number(sec[1]) : 0);
+  return Number.isFinite(seconds) ? { label, seconds } : null;
+}
+
+/** Strip trailing elapsed-time counters and ellipses so ticking updates share one stable stem. */
+export function activityStem(text: string): string {
+  let s = text.trim();
+  for (let i = 0; i < 3; i++) {
+    const next = s.replace(TRAILING_ELAPSED_RE, "").replace(TRAILING_DOTS_RE, "").trim();
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+/** Merge a new live status or tool entry into `log`, collapsing ticking counters and pairing command status onto its tool row. */
+export function mergeActivityLog(
+  log: ActivityEntry[],
+  raw: string | null | undefined,
+  kind: "status" | "tool" = "status",
+  now = Date.now(),
+  max = MAX_ACTIVITY_LOG,
+): ActivityEntry[] | null {
+  const text = raw?.trim();
+  if (!text) return null;
+  const last = log.length ? log[log.length - 1]! : null;
+  if (last && last.text === text && (last.kind ?? "status") === kind) return null;
+
+  const replaceLast = (nextText: string, nextKind: "status" | "tool"): ActivityEntry[] | null => {
+    if (last && last.text === nextText && (last.kind ?? "status") === nextKind) return null;
+    return [...log.slice(0, -1), { text: nextText, ts: last!.ts, kind: nextKind }];
+  };
+
+  if (last) {
+    const lastKind = last.kind ?? "status";
+    const lastStem = activityStem(last.text);
+    const nextStem = activityStem(text);
+    const prevElapsed = activityElapsed(last.text);
+    const nextElapsed = activityElapsed(text);
+    const timerReset = Boolean(prevElapsed && nextElapsed && prevElapsed.seconds - nextElapsed.seconds >= 2);
+
+    if (kind === "status" && lastKind === "status") {
+      if (lastStem && nextStem === lastStem && !timerReset) {
+        return replaceLast(text, "status");
+      }
+      if (lastStem.length >= 8 && text.startsWith(lastStem) && !timerReset) {
+        return replaceLast(text, "status");
+      }
+    } else if (kind === "status" && lastKind === "tool") {
+      if (lastStem && (nextStem === lastStem || (lastStem.length >= 4 && nextStem.startsWith(lastStem))) && !timerReset) {
+        return replaceLast(text, "tool");
+      }
+      if (lastStem.startsWith("$ ") && GENERIC_RUNNING_CMD_RE.test(nextStem) && !timerReset) {
+        return nextElapsed ? replaceLast(`${lastStem} · ${nextElapsed.label}`, "tool") : null;
+      }
+    } else if (kind === "tool" && lastKind === "status" && nextStem.startsWith("$ ")) {
+      if (GENERIC_RUNNING_CMD_RE.test(lastStem)) {
+        return replaceLast(prevElapsed && !nextElapsed ? `${text} · ${prevElapsed.label}` : text, "tool");
+      }
+      if (lastStem === nextStem || (nextStem.length >= 4 && lastStem.startsWith(nextStem))) {
+        return replaceLast(prevElapsed && !nextElapsed ? `${lastStem} · ${prevElapsed.label}` : last.text, "tool");
+      }
+    }
+  }
+
+  return log.length >= max
+    ? [...log.slice(-(max - 1)), { text, ts: now, kind }]
+    : [...log, { text, ts: now, kind }];
+}
 
 const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "queue", "error", "editorText", "handoff", "conflict", "quotaWarning"]);
 
@@ -195,6 +276,7 @@ export type Sink = {
   patch(p: Patch): void;
   snapshot(): void;
   toast(level: "info" | "warning" | "error", text: string): void;
+  sendRejected?(info: { clientSendId?: string; text: string; images: string[]; reason: string }): void;
   bye(reason: string): void;
 };
 
@@ -857,27 +939,12 @@ export class Chat {
     }
   }
 
-  /** Appends a live activity/status or tool line to the current run's scrollback history, collapsing progressive streaming prefixes. */
+  /** Appends a live activity/status or tool line to the current run's scrollback history, collapsing progressive streaming prefixes and timer ticks. */
   private pushActivity(raw: string | null | undefined, kind: "status" | "tool" = "status"): void {
     // Claude Code and Codex already render structured work/tool cards inline in the timeline.
     if (this.adapter.id === "claude" || this.adapter.id === "codex") return;
-    const text = raw?.trim();
-    if (!text) return;
-    const log = this.state.activityLog;
-    const last = log.length ? log[log.length - 1]! : null;
-    const now = Date.now();
-    if (last && last.text === text && (last.kind ?? "status") === kind) return;
-    if (kind === "status" && last && (last.kind ?? "status") === "status") {
-      const stem = last.text.replace(/(?:\.{3}|…)\s*$/, "").trim();
-      if (stem.length >= 8 && text.startsWith(stem)) {
-        this.set({ activityLog: [...log.slice(0, -1), { text, ts: last.ts, kind }] });
-        return;
-      }
-    }
-    const next = log.length >= MAX_ACTIVITY_LOG
-      ? [...log.slice(-(MAX_ACTIVITY_LOG - 1)), { text, ts: now, kind }]
-      : [...log, { text, ts: now, kind }];
-    this.set({ activityLog: next });
+    const next = mergeActivityLog(this.state.activityLog, raw, kind);
+    if (next) this.set({ activityLog: next });
   }
 
   /** The lanes: the agent's queue, then the follow-ups the host holds, with each one's id, sender and whether it can be taken back. */
@@ -1225,7 +1292,7 @@ export class Chat {
   /** `onRejected`: the agent refused the message after it was sent (the timeline item is gone again). */
   /** `echo: false`: no message of the person's on the timeline and no run of the chat's: what the agent writes
    *  for it shows instead (the terminal view's `!command`, a Bash card from Claude Code's own records). */
-  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string; echo?: boolean; noBang?: boolean }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
+  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string; echo?: boolean; noBang?: boolean; clientSendId?: string }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
     const text = String(args.text ?? "");
     const imagePaths = Array.isArray(args.images) ? args.images.map(String) : [];
     if (!text.trim() && !imagePaths.length) throw new Error("Nothing to send");
@@ -1305,16 +1372,26 @@ export class Chat {
       return { disposition: String(d.disposition) };
     });
     const exited = (e: unknown) => e instanceof AgentError && e.agentExited;
+    let raced = false;
     reply.catch((e) => {
       if (isCommand) this.clearCommandHint();
       undo();
       opts.onRejected?.();
       if (!exited(e)) {
-        this.toast("error", errText(e));
-        this.notice("error", `${this.agent} rejected the message: ${errText(e)}`);
+        const reason = errText(e);
+        this.toast("error", reason);
+        this.notice("error", `${this.agent} rejected the message: ${reason}`);
+        if (raced) {
+          for (const s of this.sinks) {
+            s.sendRejected?.({ ...(args.clientSendId ? { clientSendId: args.clientSendId } : {}), text, images: imagePaths, reason });
+          }
+        }
       }
     });
-    const pending = new Promise<{ disposition: string }>((r) => setTimeout(() => r({ disposition: "pending" }), SEND_REPLY_WAIT_MS));
+    const pending = new Promise<{ disposition: string }>((r) => setTimeout(() => {
+      raced = true;
+      r({ disposition: "pending" });
+    }, SEND_REPLY_WAIT_MS));
     // The agent exiting before it replies is reported by the exit notice, not as a failed send.
     const settled = reply.catch((e) => {
       if (exited(e)) return { disposition: "pending" };
@@ -1830,7 +1907,16 @@ export class Chat {
   async op(name: string, a: Rec): Promise<unknown> {
     switch (name) {
       case "send":
-        return this.send({ text: a.text, images: a.images, mode: a.mode, source: a.source === "external" ? "external" : "composer", from: typeof a.from === "string" ? a.from : undefined, echo: a.echo !== false, noBang: a.noBang === true });
+        return this.send({
+          text: a.text,
+          images: a.images,
+          mode: a.mode,
+          source: a.source === "external" ? "external" : "composer",
+          from: typeof a.from === "string" ? a.from : undefined,
+          echo: a.echo !== false,
+          noBang: a.noBang === true,
+          clientSendId: typeof a.clientSendId === "string" && a.clientSendId ? a.clientSendId : undefined,
+        });
       case "abort":
         return this.abort();
       // `message`, not `id`: `id` is the request's own.

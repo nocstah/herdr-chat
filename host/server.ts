@@ -267,6 +267,9 @@ export class ChatServer implements Sink {
   toast(level: "info" | "warning" | "error", text: string): void {
     for (const c of this.clients) c.send({ t: "toast", level, text });
   }
+  sendRejected(info: { clientSendId?: string; text: string; images: string[]; reason: string }): void {
+    for (const c of this.clients) c.send({ t: "send_rejected", ...info });
+  }
   bye(reason: string): void {
     for (const c of this.clients) {
       c.send({ t: "bye", reason });

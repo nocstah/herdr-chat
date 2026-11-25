@@ -813,6 +813,42 @@ export function readAgyWorkingStatus(screen: string): string | null {
   return text || null;
 }
 
+const RUNNING_CMD_HEADER_RE = /^\s*[○●◐◓◑◒⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+(?:Running\s+\((.+)\)|Running\s+command:\s*(.+)|\$\s+(.+))$/i;
+const RUNNING_CMD_LINE_RE = /^\s*(?:[│┃⎿└]\s*)?\$\s+(\S.*)$/;
+
+/**
+ * Fallback when `transcript.jsonl` hasn't flushed a `run_command` tool call yet
+ * (or during `!cmd` shell execution): inspects the lines immediately above the
+ * active `Running command...` spinner for an in-progress command header.
+ */
+export function readAgyRunningCommand(screen: string): string | null {
+  const lines = screenLines(screen);
+  if (!lines.length) return null;
+  let spinnerIdx = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
+    const m = SPINNER_LINE_RE.exec(lines[i]!);
+    if (m && /^Running command\b/i.test(m[1]!.trim())) {
+      spinnerIdx = i;
+      break;
+    }
+  }
+  if (spinnerIdx <= 0) return null;
+  for (let i = spinnerIdx - 1; i >= Math.max(0, spinnerIdx - 6); i--) {
+    const raw = lines[i]!;
+    if (blank(raw) || SOLID_RE.test(raw)) break;
+    // Completed previous tool lines (`● Ran (...)`) belong to an earlier step, not the active command.
+    if (/^\s*●\s+Ran\b/i.test(raw)) break;
+    const hdr = RUNNING_CMD_HEADER_RE.exec(raw);
+    if (hdr) {
+      const cmd = (hdr[1] ?? hdr[2] ?? hdr[3] ?? "").replace(/\s*\(ctrl\+o to expand\)\s*$/i, "").trim();
+      if (cmd) return cmd;
+    }
+    const sh = RUNNING_CMD_LINE_RE.exec(raw);
+    if (sh?.[1]) return sh[1].trim();
+  }
+  return null;
+}
+
 const VALID_HC_KEY_RE = /^(?:(?:ctrl|alt|shift)\+)*(?:[a-z0-9]|enter|tab|esc|space|up|down|left|right|f(?:[1-9]|1[0-2]))$/;
 
 /** Normalize a key chord shown on a TUI screen (e.g. `alt+m`, `⌥m`, `Ctrl+M`, `opt+m`) into an `hc keys` name. */
