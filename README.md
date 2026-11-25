@@ -117,6 +117,12 @@ Ctrl+C (Herdr's own copy), and on Ctrl+Shift+C or Ctrl+Insert too (Omarchy's
 Super+C), which ask Hyprland for that Ctrl+C. A right-click on a message
 offers Copy for what is selected in it, and Copy message.
 
+Typing or pasting anywhere in the chat goes into the composer, as in the
+Claude app: a character typed after a click on the conversation or with text
+selected in it, and Ctrl+V, Ctrl+Shift+V (Super+V) or Shift+Insert outside an
+input. After a click on the sidebar or a panel, the pointer resting over the
+chat gives it the keyboard back; a terminal clicked in a split keeps its keys.
+
 Change them, or bind a key per agent, in
 `~/.config/herdr-app/data/herdr-chat/keys.json`:
 [herdr-app/mods/chat/KEYS.md](herdr-app/mods/chat/KEYS.md).
