@@ -859,6 +859,7 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
       })
       .catch((e: Error) => {
         this.autoSubmit = 0;
+        this.log(`dialog: ${askId} not answered: ${e.message}`);
         this.emit({ type: "notice", level: "warning", source: "host", text: `Couldn't answer in Claude Code's terminal: ${e.message}` });
       })
       .finally(() => {

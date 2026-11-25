@@ -118,6 +118,19 @@ test("a multiple choice among tabs: its boxes, its Submit row, the cursor's stop
   assert.equal(promptKey(moved), promptKey(p));
 });
 
+test("a multiple choice before the last question: its Next row submits it", () => {
+  // Claude Code labels the button Next until the last question (2.1.332).
+  const screen = SCREENS.tabs
+    .replace("←  ☒ Colour  ☐ Pages  ✔ Submit  →", "←  ☒ Colour  ☐ Pages  ☐ Size  ✔ Submit  →")
+    .replace("     Submit", "     Next");
+  const p = readPrompt(screen)!;
+  assert.equal(p.kind, "question");
+  if (p.kind !== "question") return;
+  assert.equal(p.submit?.stop, 4);
+  assert.equal(p.other?.label, "Type something");
+  assert.deepEqual(movesTo(p, p.submit!), ["down", "down", "down"]);
+});
+
 test("the review of the answers, and a confirm menu's plain rows", () => {
   const r = readPrompt(SCREENS.review)!;
   assert.equal(r.kind, "review");

@@ -37,7 +37,8 @@ export type ScreenPrompt =
   | { kind: "confirm"; title: string; body: string; rows: Row[]; stops: Row[] };
 
 const ROW_RE = /^(\s*)(❯\s*)?(\d+)\.\s+(.*)$/;
-const SUBMIT_RE = /^\s*(❯\s*)?Submit$/;
+// A multiple choice's button: "Submit" on the last question, "Next" before it (Claude Code 2.1.332).
+const SUBMIT_RE = /^\s*(❯\s*)?(?:Submit|Next)$/;
 const SOLID_RE = /^\s*─{8,}/;
 const DASHED_RE = /^\s*╌{8,}\s*$/;
 const BOX_RE = /^\[([ ✔✓xX])\]\s+(.*)$/;
