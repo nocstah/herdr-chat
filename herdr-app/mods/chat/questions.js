@@ -8,7 +8,7 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { alpha, icon } from "./util.js";
+import { alpha, icon, monoFont } from "./util.js";
 import { SPACE } from "./space.js";
 import { copyField, pasteField } from "./composer.js";
 
@@ -233,10 +233,15 @@ export class QuestionsForm {
           return h_flex().id(`dlg-q-${q.id}-${i}`).min_h(32).px(10).py(5).gap(10).items_center().rounded(10)
             .border_1().border_color(lit(i) ? t.accent : on ? alpha(t.accent, 0.4) : t.border).bg(on ? alpha(t.accent, 0.08) : lit(i) ? t.hover : t.background).cursor_pointer()
             .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.pick(qi, i); cx.notify(); })
-            .child(mark)
+            .when(Boolean(o.preview), (e) => e.items_start())
+            .child(o.preview ? mark.mt(2) : mark)
             .child(v_flex().flex_1().min_w(0)
               .child(div().text_size(12.5).text_color(t.foreground).child(o.label))
-              .when(Boolean(o.description), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(o.description))))
+              .when(Boolean(o.description), (e) => e.child(div().text_size(11.5).text_color(t.dim).child(o.description)))
+              // Its preview, line for line as the agent laid it out.
+              .when(Boolean(o.preview), (e) => e.child(v_flex().mt(6).mb(2).px(10).py(7).rounded(8).border_1().border_color(t.border).bg(t.surface)
+                .font_family(monoFont()).text_size(11.5).line_height("17px").text_color(t.muted)
+                .children(o.preview.split("\n").map((l) => div().min_w(0).child(l || " "))))))
             .when(qi === this.cur.q, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.dim).child(i < 9 ? String(i + 1) : "")));
         })))
         .when(this.others.has(q.id), (e) => e.child(div().id(`dlg-other-${q.id}`).key_context("HerdrChatDialog")

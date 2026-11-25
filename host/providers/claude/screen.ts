@@ -21,6 +21,8 @@ export type Row = {
   /** A multiple choice's box: [✔] or [ ]. */
   checked?: boolean;
   input?: boolean;
+  /** A question's preview of this option, its lines as the box shows them: only the row the cursor is on has one. */
+  preview?: string;
   /** Its index in `stops`. */
   stop: number;
 };
@@ -154,9 +156,57 @@ function questionAbove(block: string[]): { question: string; rest: string[] } {
   return { question: block.slice(i).map((l) => l.trim()).join(" "), rest: block.slice(0, i) };
 }
 
-function parseQuestion(lines: string[]): ScreenPrompt | null {
-  const found = numberedRows(lines, true);
+/**
+ * A question whose options have previews (Claude Code 2.1.332): the options
+ * in a column on the left, a box beside them with the preview of the option
+ * the cursor is on, and "Notes: press n to add notes" under the box. The
+ * column's lines wrap a label (no descriptions show), and a bar (`│`) marks
+ * the question. This takes the box and what's under it out of the lines, so
+ * the options read as in the plain layout, and keeps the box's text.
+ */
+function cutPreview(lines: string[], from: number): { lines: string[]; text: string } | null {
+  let top = -1;
+  for (let i = Math.max(0, from - 2); i < lines.length && top < 0; i++) if (/┌─+┐$/.test(lines[i]!)) top = i;
+  if (top < 0) return null;
+  const x = lines[top]!.lastIndexOf("┌");
+  const width = lines[top]!.length - x;
+  // A border's column: where the top's corner is, else as far from the line's end as the box is wide (a wide character on the left).
+  const border = (l: string, chars: string) => [x, l.length - width].find((c) => c >= 0 && chars.includes(l[c] ?? "")) ?? -1;
+  const out = lines.slice();
+  const text: string[] = [];
+  let i = top;
+  out[i] = lines[i]!.slice(0, x).replace(/\s+$/, "");
+  for (i = top + 1; i < lines.length; i++) {
+    const l = lines[i]!;
+    const at = border(l, "│└");
+    if (at < 0) break; // cut off at the screen's bottom
+    out[i] = l.slice(0, at).replace(/\s+$/, "");
+    if (l[at] === "└") break;
+    text.push(l.slice(at + 1).replace(/\s*│$/, "").replace(/^ /, "").replace(/\s+$/, ""));
+  }
+  // Under the box, to the dialog's rule: its notes, beside the column's last rows.
+  for (i++; i < lines.length && !SOLID_RE.test(lines[i]!); i++) {
+    const l = lines[i]!;
+    const left = l.slice(0, x);
+    if (l.length > x && (!left.trim() || /\s{2}$/.test(left))) out[i] = left.replace(/\s+$/, "");
+  }
+  while (text.length && !text[0]!.trim()) text.shift();
+  while (text.length && !text.at(-1)!.trim()) text.pop();
+  return { lines: out, text: text.join("\n") };
+}
+
+function parseQuestion(screen: string[]): ScreenPrompt | null {
+  let lines = screen;
+  let found = numberedRows(lines, true);
   if (!found) return null;
+  const preview = cutPreview(lines, found.first);
+  if (preview) {
+    lines = preview.lines;
+    found = numberedRows(lines, false);
+    if (!found) return null;
+    const on = found.stops.find((r) => r.selected && r.n !== null);
+    if (on && preview.text) on.preview = preview.text;
+  }
   const { stops } = found;
   // "Chat about this" (after a divider) isn't an answer.
   const chat = stops.find((r) => /^Chat about this$/i.test(r.label));
@@ -182,7 +232,10 @@ function parseQuestion(lines: string[]): ScreenPrompt | null {
     tabs = [...headLine.replace(/^\s*←/, "").replace(/→\s*$/, "").matchAll(/([☐☒☑✔])\s+(.+?)(?=\s{2,}|\s*$)/g)]
       .filter((m) => m[1] !== "✔").map((m) => ({ label: m[2]!.trim(), answered: m[1] !== "☐" }));
   } else if (CHIP_RE.test(headLine)) header = CHIP_RE.exec(headLine)![1]!.trim();
-  const question = lines.slice(head + 1, found.first).map((l) => l.trim()).filter(Boolean).join(" ");
+  const asked = lines.slice(head + 1, found.first).map((l) => l.trim()).filter(Boolean);
+  // A bar before each of its lines (beside a preview): not part of it.
+  const barred = asked.length > 0 && asked.every((l) => /^│(?:\s|$)/.test(l));
+  const question = (barred ? asked.map((l) => l.replace(/^│\s?/, "")) : asked).join(" ");
   if (!question || !rows.length) return null;
   return { kind: "question", header, tabs, question, rows, other, submit, multi, stops };
 }

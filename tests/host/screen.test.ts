@@ -103,6 +103,82 @@ test("one question: its chip, its options with descriptions, Type something, not
   assert.equal(p.multi, false);
 });
 
+// Options with previews (Claude Code 2.1.332, read off its screen): the box beside the options shows the cursor's option.
+const beside = (left: string, right = "") => (right ? `${left.padEnd(34)}${right}` : left);
+const BOX = (rows: string[]) => {
+  const w = Math.max(...rows.map((r) => r.length)) + 2;
+  return [`┌${"─".repeat(w)}┐`, ...rows.map((r) => `│ ${r.padEnd(w - 2)} │`), `└${"─".repeat(w)}┘`];
+};
+const previewScreen = (left: string[], box: string[], question = ["│ Force-push and reply in each of the three review threads?"]) => {
+  const rows = Math.max(left.length, box.length);
+  return [
+    RULE, " ☐ PR #15774", "", ...question, "",
+    ...Array.from({ length: rows }, (_, i) => beside(left[i] ?? "", box[i] ?? "")).map((l) => l.replace(/\s+$/, "")),
+    "", beside("", "Notes: press n to add notes"), "", RULE,
+    "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+  ].join("\n");
+};
+const REPLY = ["Force-push the rebased branch to PR #15774.", "Then reply in each of the three review threads", "  with the commit that addresses the comment.", "", "Resolve each thread once its reply is posted."];
+const LEFT = ["❯ 1. Push and reply", "    (Recommended)", "  2. Push only", "  3. P1 fix only"];
+
+test("a question with previews: the box beside the options isn't part of them, and its text is the cursor's option's", () => {
+  const p = readPrompt(previewScreen(LEFT, BOX(REPLY)))!;
+  assert.equal(p.kind, "question");
+  if (p.kind !== "question") return;
+  assert.equal(p.header, "PR #15774");
+  assert.equal(p.question, "Force-push and reply in each of the three review threads?", "the bar before it left out");
+  assert.deepEqual(p.rows.map((r) => [r.label, r.description ?? null]), [["Push and reply (Recommended)", null], ["Push only", null], ["P1 fix only", null]]);
+  assert.equal(p.rows[0]!.preview, REPLY.join("\n"));
+  assert.equal(p.rows[1]!.preview, undefined);
+  assert.equal(p.other, null, "no Type something beside previews");
+  assert.deepEqual(movesTo(p, p.rows[2]!), ["down", "down"]);
+  // The cursor on another option shows its preview: the same dialog.
+  const moved = readPrompt(previewScreen(LEFT.map((l) => l.replace("❯ 1.", "  1.").replace("  2.", "❯ 2.")), BOX(["Leave the three review threads as they are."])))!;
+  assert.equal(promptKey(moved), promptKey(p));
+  if (moved.kind === "question") assert.deepEqual(moved.rows.map((r) => r.preview ?? null), [null, "Leave the three review threads as they are.", null]);
+});
+
+test("a question with previews: a wrapped question, more options than the box is tall, notes beside an option", () => {
+  const left = ["❯ 1. Alpha", "  2. Beta", "  3. Gamma", "  4. Delta", "  5. Epsilon with a label", "     that wraps"];
+  const box = BOX(["one", "two"]);
+  const screen = previewScreen(left, box, ["│ PR #15774: I fixed the P1 and did both test suggestions. Force-push (lease on", "│ d8dc1359d) and reply?"])
+    .replace(`\n\n${beside("", "Notes: press n to add notes")}\n`, "\n")
+    .replace("     that wraps", beside("     that wraps", "Notes: press n to add notes"));
+  const p = readPrompt(screen)!;
+  assert.equal(p.kind, "question");
+  if (p.kind !== "question") return;
+  assert.equal(p.question, "PR #15774: I fixed the P1 and did both test suggestions. Force-push (lease on d8dc1359d) and reply?");
+  assert.deepEqual(p.rows.map((r) => r.label), ["Alpha", "Beta", "Gamma", "Delta", "Epsilon with a label that wraps"]);
+  assert.equal(p.rows[0]!.preview, "one\ntwo");
+});
+
+test("a question with previews, as Claude Code 2.1.332 draws it", () => {
+  const screen = [
+    RULE, " ☐ PR #15774", "",
+    "│ Force-push and reply in each of the three review threads? This is a long question so it wraps onto a second line when the terminal is narrow enough.",
+    "",
+    "❯ 1. Push and reply               ┌──────────────────────────────────────────────────┐",
+    "    (Recommended)                 │ Force-push the rebased branch to PR #15774.      │",
+    "  2. Push only                    │ Then reply in each of the three review threads   │",
+    "  3. P1 fix only                  │   with the commit that addresses the comment.    │",
+    "                                  │                                                  │",
+    "                                  │ Resolve each thread once its reply is posted.    │",
+    "                                  │   Reviewers can reopen any that still need work. │",
+    "                                  └──────────────────────────────────────────────────┘",
+    "", "                                  Notes: press n to add notes", "", RULE,
+    "  Chat about this", "", "Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+  ].join("\n");
+  const p = readPrompt(screen)!;
+  assert.equal(p.kind, "question");
+  if (p.kind !== "question") return;
+  assert.match(p.question, /^Force-push and reply .* narrow enough\.$/);
+  assert.deepEqual(p.rows.map((r) => r.label), ["Push and reply (Recommended)", "Push only", "P1 fix only"]);
+  assert.equal(p.rows[0]!.preview, [
+    "Force-push the rebased branch to PR #15774.", "Then reply in each of the three review threads", "  with the commit that addresses the comment.",
+    "", "Resolve each thread once its reply is posted.", "  Reviewers can reopen any that still need work.",
+  ].join("\n"));
+});
+
 test("a multiple choice among tabs: its boxes, its Submit row, the cursor's stop", () => {
   const p = readPrompt(SCREENS.tabs)!;
   assert.equal(p.kind, "question");
