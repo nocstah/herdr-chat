@@ -715,3 +715,70 @@ An older host answers both with "Unknown op"; the mod then says "Restart the cha
 - The activity line under the timeline says the running Poll's title, or "Running <description>" for a running REPL call.
 
 Not shown yet: a script's own calls while it runs (Claude Code writes them when it ends), and stopping an agent from the strip.
+
+## v3.10: Claude Code mods drawn in the chat (additive)
+
+A Claude Code mod (a plugin's hooks module) draws a pane beside the chat, a band above the prompt, toasts and a status line. Claude Code hands a drawing to any client that joins its session as a *surface*, over the same stream-json control channel the chat already uses. The host joins as the `vscode` surface and passes the drawings on as plain-data trees; the mod draws them with GPUI and sends back what the person does. Nothing changes for Pi, Codex or a Claude Code from before mods (it answers `ui_attach` "Unsupported": no `modUi`, no change). `HERDR_CHAT_MOD_UI=0` in the host's environment leaves it off.
+
+### Claude Code's side (checked on 2.1.332; marked internal there, so it may change)
+
+Control requests the host sends (`host/providers/claude/modui.ts`), every one with `client_id: "herdr-chat"` and `surface: "vscode"`:
+
+| request | when | answer |
+| --- | --- | --- |
+| `ui_attach {viewport:{columns,rows,isFullscreen}}` | after `initialize` | `{surfaces}`; an error: no mods here |
+| `ui_panes` | after attaching | the roster (below) |
+| `ui_render {component, instance_id, props, viewport}` | on every `ui_invalidate`, 16 ms debounced: `AbovePrompt`/`above-prompt`, and `Pane`/`<pane id>` with `props:{placement:"dock"\|"inline"}` | `{tree, hooked}`; `hooked:false`: no mod draws there |
+| `ui_press {plugin, handle, key, href?}` | a Button, or a Markdown link a mod answers | `{handled}`; false: the drawing was stale |
+| `ui_input {plugin, handle, kind:"change"\|"submit", value, key, component, instance_id}` | an Input's text or Enter | `{handled}` |
+| `ui_select {plugin, handle, value, key}` | a Select's pick | `{handled}` |
+| `ui_close {id}` / `ui_pane_show {id}` / `ui_pane_focus {id\|null}` | the pane's ×, a tab, focus | `{closed}` / `{shown_id}` / `{focused_id}` |
+
+System records Claude Code pushes: `ui_invalidate` (redraw), `ui_panes` (the roster: `{panes:[{id,title,plugin,close_on_escape?,background_color?,rows?,columns?}], shown_id, focused_id, focus_requested_id}`), `ui_toast {plugin,text}`, `ui_notify {plugin,text}`, `ui_status {plugin,text|null}`, `ui_log {plugin,text}`. The host swallows every other `ui_*` record (`ui_placed`, `ui_scroll`, `ui_focus`, `ui_notify_cancel`). A pane asking for focus (`focus_requested_id`) is answered once with `ui_pane_focus null`: the composer keeps the keyboard.
+
+A tree node is `{type, props?, children?, press?:{plugin,handle}}`, a string is text. Types on this surface: Box, Text, Button, Input, Select, Svg, Link, Code, Markdown, Progress (Claude Code lowers Progress to Boxes for `vscode`). Colors are Claude Code theme keys (`success`, `claude`, `userMessageBackground`…), Ink names or `#hex`. Sizes, gaps and margins are in terminal cells.
+
+### ChatState
+
+```ts
+modUi: ModUi | null      // null: nothing drawn (no mods, an old CLI, or every site empty)
+
+type ModUi = {
+  band: ModTree | null;                     // every mod's AbovePrompt row, as Claude Code stacked them
+  panes: { id: string; title: string; plugin: string; closeOnEscape?: true; rows?: number; columns?: number; background?: string }[];
+  shown: string | null;                     // the pane shown (tabs when several)
+  focused: string | null;
+  bodies: Record<string, ModTree | null>;   // each pane's last drawing
+};
+type ModTree = string | { type: string; props?: object; children?: ModTree[]; press?: { plugin: string; handle: number };
+  lines?: Span[][];                         // Code: its source highlighted (as items' code)
+  path?: string;                            // Svg: the file its markup was written to (the markup is dropped)
+  size?: { w?: number; h?: number; ratio?: number } };   // Svg: the markup's own width, height, shape
+```
+
+The host readies each tree (`host/modui.ts`): `engine` nodes (Claude Code's own drawing) dropped, Code highlighted (200-entry cache), Svg written to `<imageDir>/mod-<sha1>.svg`, a Shader replaced by its Svg child, at most 5000 nodes, depth 64 and 1 MiB of JSON (else one dim line saying so).
+
+A mod's status line is a status with key `mod:<plugin>` (gone when the chat ends); `capabilities.extensionUi` turns true once attached, so the footer shows it. Toasts and notifies are the `toast` record; logs are notices.
+
+### Ops
+
+```ts
+{ op: "mod_ui", action: "press",  plugin, handle, key?, href? }                         →  { handled: boolean }
+{ op: "mod_ui", action: "input",  plugin, handle, key?, kind: "change"|"submit", value, component, instance }  →  { handled }
+{ op: "mod_ui", action: "select", plugin, handle, key?, value }                         →  { handled }
+{ op: "mod_ui", action: "close",  pane }                                                →  { closed: boolean }
+{ op: "mod_ui", action: "show",   pane }                                                →  { shown: string | null }
+{ op: "mod_ui", action: "focus",  pane: string | null }                                 →  { focused: string | null }
+{ op: "mod_ui", action: "viewport", band: {columns, rows}, pane: {columns, rows}, docked: boolean }  →  {}
+```
+
+A pane is named `pane`, never `id` (the request's own). `handled:false` redraws. Without a surface (another provider, an old CLI, `HERDR_CHAT_MOD_UI=0`) the op fails "Claude Code's mods aren't drawn in this chat".
+
+### The mod (`herdr-app/mods/chat/modui.js`)
+
+- The band sits last in the column above the composer. The shown pane docks at the chat's right (width from its `columns`, 300 px to 45% of the chat) when the chat is 880 px or wider, else sits above the band (height from its `rows`, at most 360 px, scrolling).
+- A cell is 7.5 × 18 px for widths and heights; gaps, margins and padding use 6 px a cell (a terminal's blank line is too much room in a window); `xs`…`xl` are 2–16 px.
+- Inputs are InputStates made after a state change (`afterState`), never in render; the person's typing stands until the mod draws another value. A Select's pick shows at once.
+- The room each site has, in cells, goes back with `viewport` on every resize, for the mods' `e.viewport`.
+
+Not drawn: a Client (a desktop surface module, which needs a web runtime) and Shader programs (their Svg stands in); placed rows in the timeline (`ui_placed`) and the message, tool and spinner rewrites; a mod's theme, sounds and backdrop (Claude Code applies those to the desktop and mobile surfaces only).

@@ -648,14 +648,91 @@ function steerIn(text, uuid) {
   v?.wait?.(uuid);
 }
 
+// ---------- mods drawn by a remote surface (scenario.mods: the host's mod UI, protocol.md v3.10) ----------
+// One mod, "probe": a band with a counter and an "Add one" button; after the chat attaches it opens a
+// pane "probe" with a field and a picker. Handles change with each drawing, as the real engine's do.
+const mods = { count: 0, picked: "a", panes: [], shown: null, gen: 0, attached: false };
+const modRoster = () => ({ panes: mods.panes.map((id) => ({ id, title: "Probe", plugin: "probe", close_on_escape: true })), shown_id: mods.shown, focused_id: null, focus_requested_id: null });
+const modPush = (subtype, extra) => out({ type: "system", subtype, ...extra, ...base() });
+function modTree(component, instance) {
+  const g = mods.gen;
+  if (component === "AbovePrompt") {
+    return { type: "Box", props: { flexDirection: "row", columnGap: 2 }, part: { plugin: "probe" }, children: [
+      { type: "Text", children: [`count ${mods.count}`] },
+      { type: "Button", props: { key: "inc", label: "Add one" }, press: { plugin: "probe", handle: 1000 + g } },
+    ] };
+  }
+  if (component === "Pane" && instance === "probe" && mods.panes.includes("probe")) {
+    return { type: "Box", props: { flexDirection: "column", gap: 1 }, part: { plugin: "probe" }, children: [
+      { type: "Text", props: { bold: true }, children: ["Probe pane"] },
+      { type: "Input", props: { key: "name", label: "Name", placeholder: "type" }, press: { plugin: "probe", handle: 2000 + g } },
+      { type: "Select", props: { key: "pick", options: [{ value: "a" }, { value: "b", label: "Bee" }], value: mods.picked }, press: { plugin: "probe", handle: 3000 + g } },
+      { type: "Code", props: { source: "const x = 1;", language: "js" } },
+      { type: "Svg", props: { source: '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 1 1"><rect width="1" height="1" fill="#d97757"/></svg>', alt: "a square" } },
+    ] };
+  }
+  return { type: "engine", ref: 0 };
+}
+function modRedraw() {
+  mods.gen++;
+  modPush("ui_invalidate", { event: "ui.render" });
+}
+function modControl(request, ok, fail) {
+  const g = mods.gen;
+  switch (request.subtype) {
+    case "ui_attach":
+      mods.attached = true;
+      ok({ surfaces: [request.surface] });
+      // The mod opens its pane on its own a moment later.
+      setTimeout(() => {
+        mods.panes = ["probe"];
+        mods.shown = "probe";
+        modPush("ui_panes", modRoster());
+      }, 30);
+      return;
+    case "ui_panes":
+      return ok(modRoster());
+    case "ui_render":
+      return ok({ tree: modTree(request.component, request.instance_id), props: request.props ?? {}, rewritten: false, hooked: true, drawn_by: ["probe"] });
+    case "ui_press":
+      if (request.plugin !== "probe" || request.handle !== 1000 + g) return ok({ handled: false });
+      mods.count++;
+      modRedraw();
+      return ok({ handled: true, element: "inc" });
+    case "ui_input":
+      if (request.handle !== 2000 + g) return ok({ handled: false });
+      if (request.kind === "submit") modPush("ui_toast", { plugin: "probe", text: `hi ${request.value}`, timeout_ms: 4000 });
+      return ok({ handled: true, element: "name" });
+    case "ui_select":
+      if (request.handle !== 3000 + g) return ok({ handled: false });
+      mods.picked = request.value;
+      modRedraw();
+      return ok({ handled: true, element: "pick" });
+    case "ui_close":
+      mods.panes = mods.panes.filter((id) => id !== request.id);
+      if (mods.shown === request.id) mods.shown = mods.panes.at(-1) ?? null;
+      modPush("ui_panes", modRoster());
+      return ok({ closed: true });
+    case "ui_pane_show":
+      mods.shown = request.id;
+      return ok({ shown_id: mods.shown });
+    case "ui_pane_focus":
+      return ok({ focused_id: request.id });
+  }
+  return fail(`Unsupported control request subtype: ${request.subtype}`);
+}
+
 // ---------- control requests from the host ----------
 async function control(rec) {
   const { request_id, request } = rec;
   const ok = (response = {}) => out({ type: "control_response", response: { subtype: "success", request_id, response } });
   const fail = (error) => out({ type: "control_response", response: { subtype: "error", request_id, error } });
+  if (scenario.mods && request.subtype.startsWith("ui_")) return modControl(request, ok, fail);
   switch (request.subtype) {
     case "initialize": {
       const init = scenario.initialize ?? {};
+      // As the real CLI: a mod's status line from session.start comes before initialize's answer.
+      if (scenario.mods) modPush("ui_status", { plugin: "probe", text: "probe status line" });
       if (init.delayMs) await sleep(init.delayMs);
       if (init.hang) return;
       if (init.fail) return fail(init.fail);
