@@ -112,7 +112,10 @@ On Linux the chat's keys use Ctrl where macOS uses ⌘, on chords Herdr's own
 Linux keys leave free: Ctrl+Shift+M / Ctrl+Shift+I / Ctrl+Shift+A for the
 pickers, Ctrl+Alt+T for `/tui`, Ctrl+Shift+R to resume, Ctrl+Alt+N for a new
 chat. Ctrl+C copies in the composer and stops the run elsewhere in the chat;
-Esc stops it anywhere.
+Esc stops it anywhere. Text selected in an answer or a message copies on
+Ctrl+C (Herdr's own copy), and on Ctrl+Shift+C or Ctrl+Insert too (Omarchy's
+Super+C), which ask Hyprland for that Ctrl+C. A right-click on a message
+offers Copy for what is selected in it, and Copy message.
 
 Change them, or bind a key per agent, in
 `~/.config/herdr-app/data/herdr-chat/keys.json`:

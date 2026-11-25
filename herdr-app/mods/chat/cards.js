@@ -104,8 +104,10 @@ function actions(it, footer, c, { align = "start", text } = {}) {
     .children(foot ? [foot] : []).children(acts ? [acts] : []);
 }
 
-function hoverable(el, it, c) {
-  return el.id(`msg-${it.id}`).on_hover((h, cx) => c.setHover(it.id, h, cx));
+// A message's row: its hover actions, and its right-click menu (Copy for the text selected, Copy message: `text`).
+function hoverable(el, it, c, text = it.text) {
+  return el.id(`msg-${it.id}`).on_hover((h, cx) => c.setHover(it.id, h, cx))
+    .on_mouse_down("right", (_e, cx) => c.messageMenu?.(it, text ?? "", cx));
 }
 
 // A long message of yours (a pasted log, a spec) folds to its first lines in
@@ -153,7 +155,7 @@ function user(it, c) {
   else if (!text) content = [h_flex().child(skillPill(it, c)), ...skillBody];
   else if (!text.includes("\n") && text.length <= 80) content = [h_flex().gap(8).items_center().child(skillPill(it, c)).child(body("-i").flex_1().min_w(0)), ...skillBody];
   else content = [h_flex().child(skillPill(it, c)), ...skillBody, body("-s")];
-  return hoverable(v_flex().items_end(), it, c)
+  return hoverable(v_flex().items_end(), it, c, typedText(it, text))
     .child(v_flex().relative().max_w(Math.round(c.colW * 0.85)).gap(6).px(b.x).py(b.y).rounded(b.r).bg(t.raised).border_1().border_color(f.userBorder)
       .child(div().absolute().right_full().bottom(2).pr(6).child(actions(it, null, c, { align: "end", text: typedText(it, text) })))
       .when(tags.length > 0, (e) => e.child(h_flex().gap(8).text_size(11).text_color(t.dim).children(tags)))

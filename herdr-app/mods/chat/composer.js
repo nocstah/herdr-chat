@@ -37,13 +37,15 @@ const PASTE_KEYS = MAC ? [] : ["ctrl-shift-v", "shift-insert"];
 const COMPOSER_PASTE_KEYS = [MAC ? "cmd-v" : "ctrl-v", ...PASTE_KEYS];
 export const ACTIONS = ["herdrchat_enter", "herdrchat_up", "herdrchat_down", "herdrchat_tab", "herdrchat_escape", "herdrchat_space", ...DIGITS.map((d) => `herdrchat_digit_${d}`)];
 
+// Copies a field's selected slice: true when it copied something.
 export function copyField(field, cx) {
-  if (!field) return;
+  if (!field) return false;
   const r = field.selected_range?.();
-  if (!r || r.start === r.end) return;
+  if (!r || r.start === r.end) return false;
   const lo = Math.min(r.start, r.end), hi = Math.max(r.start, r.end);
   const text = String(field.value?.() ?? "").slice(lo, hi);
   if (text) cx.write_to_clipboard(text);
+  return Boolean(text);
 }
 
 export function pasteField(field, cx) {
@@ -71,6 +73,8 @@ export function bindComposerKeys(cx) {
     for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: `${ctx} > Input` });
     for (const k of COMPOSER_PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
   }
+  // Outside an input (an answer's text selected, the focus on the timeline): the window's selection (selcopy.js).
+  for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: "HerdrChat" });
   for (const ctx of EXTRA_INPUTS) {
     for (const k of COPY_KEYS) b.push({ keystroke: k, action: "herdrchat_copy", context: `${ctx} > Input` });
     for (const k of PASTE_KEYS) b.push({ keystroke: k, action: "herdrchat_paste", context: `${ctx} > Input` });
@@ -165,9 +169,10 @@ export class Composer {
     this.onPasteOther = onPasteOther;
   }
 
-  // A copy key of COPY_KEYS: copy the selected slice from the textarea.
+  // A copy key of COPY_KEYS: copy the selected slice from the textarea; with none, the text selected in the chat
+  // (copyMiss: main.js handOffCopy).
   copyKey(cx) {
-    copyField(this.ta, cx);
+    if (!copyField(this.ta, cx)) this.copyMiss?.(cx);
   }
 
   // A paste key of COMPOSER_PASTE_KEYS: large plain-text pastes collapse into a chip
