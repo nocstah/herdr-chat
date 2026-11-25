@@ -377,8 +377,21 @@ export class Composer {
   // and the send / stop button at the right. What it runs with is under the card (chrome.js
   // underRow). `c` is the view's render context (cards.js).
   view(t, c) {
+    const stopDown = (_e, cx) => cx.stop_propagation();
+    const focusBar = (_e, cx) => {
+      cx.stop_propagation();
+      this.focus();
+      cx.notify();
+    };
+    const focusCard = (_e, cx) => {
+      if (!this.focused) {
+        this.focus();
+        cx.notify();
+      }
+    };
     const chips = this.chips.map((ch, i) => {
       const x = div().id(`chip-x-${i}`).cursor_pointer().rounded(4).hover((s) => s.text_color(t.foreground).bg(t.hover))
+        .on_mouse_down("left", stopDown)
         .on_click((_e, cx) => { cx.stop_propagation(); this.removeChip(i, cx); cx.notify(); }).child(icon("x", 11));
       if (ch.kind === "paste") {
         const ic = ch.pending
@@ -396,6 +409,7 @@ export class Composer {
           .bg(t.raised).text_size(11.5).text_color(t.foreground).cursor_pointer()
           .hover((s) => s.bg(t.hover))
           .tooltip(tip)
+          .on_mouse_down("left", stopDown)
           .on_click((_e, cx) => c.previewPaste?.(ch.id, cx))
           .child(ic)
           .child(div().max_w(220).truncate().child(title));
@@ -411,19 +425,19 @@ export class Composer {
       if (ch.kind === "file") {
         const ic = ch.pending ? spinner(11, t.muted) : icon(ch.isDir ? "folder" : "file-text", 12);
         return fileChip(`chip-${i}`, ch.label, t, { iconEl: ic, tip: ch.pending ? `Uploading ${ch.label}…` : ch.path })
-          .pr(6).bg(t.raised).child(x);
+          .pr(6).bg(t.raised).on_mouse_down("left", stopDown).child(x);
       }
       const thumb = ch.pending
         ? h_flex().id(`chip-${i}`).flex_none().rounded(10).border_1().border_color(t.border)
           .child(h_flex().w(THUMB.w).h(THUMB.h).items_center().justify_center().text_color(t.muted).child(icon("image", 16)))
         : thumbnail(`chip-${i}`, ch, THUMB.w, THUMB.h, c);
       if (thumb) {
-        return div().relative().flex_none().child(thumb.tooltip(ch.label))
+        return div().relative().flex_none().on_mouse_down("left", stopDown).child(thumb.tooltip(ch.label))
           .child(x.absolute().top(4).right(4).p(1).bg(t.raised).border_1().border_color(t.border).text_color(t.muted));
       }
-      return fileChip(`chip-${i}`, ch.label, t).pr(6).bg(t.raised).child(x);
+      return fileChip(`chip-${i}`, ch.label, t).pr(6).bg(t.raised).on_mouse_down("left", stopDown).child(x);
     });
-    let wrap = div().id("composer-box").w_full().min_w(0).key_context(this.context());
+    let wrap = div().id("composer-box").w_full().min_w(0).cursor_text().key_context(this.context());
     for (const a of ACTIONS) wrap = wrap.on_action(a, (_e, cx) => c.action(a, cx));
     if (COPY_KEYS.length) wrap = wrap.on_action("herdrchat_copy", (_e, cx) => this.copyKey(cx));
     wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
@@ -437,15 +451,18 @@ export class Composer {
       .text_color(stop ? t.background : typed ? t.solid_foreground : t.dim)
       .hover((s) => s.opacity(0.85))
       .tooltip(stop ? `Stop (Esc${keyHint("stop") ? ` · ${keyHint("stop")}` : ""})` : working ? "Steer (Enter)" : "Send (Enter)")
+      .on_mouse_down("left", stopDown)
       .on_click((_e, cx) => c.action(stop ? "herdrchat_stop" : "herdrchat_enter", cx))
       .child(icon(stop ? "square" : "arrow-up", stop ? 11 : 15));
-    return v_flex().w_full().rounded(18).border_1().border_color(this.focused ? alpha(t.foreground, 0.2) : t.input).bg(t.surface).shadow_sm()
+    return v_flex().id("composer-card").w_full().rounded(18).border_1().border_color(this.focused ? alpha(t.foreground, 0.2) : t.input).bg(t.surface).shadow_sm()
+      .cursor_text().on_mouse_down("left", focusCard)
       .child(wrap)
-      .when(chips.length > 0, (e) => e.child(h_flex().px(14).pb(6).gap(6).flex_wrap().children(chips)))
-      .child(h_flex().h(44).pl(8).pr(8).gap(6).items_center()
-        .child(c.plus ?? div())
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(c.hintColor ?? t.dim).child(c.hint ?? "")) // clips, never under the buttons
-        .children([c.mic].filter(Boolean))
+      .when(chips.length > 0, (e) => e.child(h_flex().id("composer-chips").px(14).pb(6).gap(6).flex_wrap().cursor_text().on_mouse_down("left", focusBar).children(chips)))
+      .child(h_flex().id("composer-bar").h(44).pl(8).pr(8).gap(6).items_center().cursor_text().on_mouse_down("left", focusBar)
+        .when(Boolean(c.plus), (e) => e.child(div().id("composer-plus-wrap").flex_none().on_mouse_down("left", stopDown).child(c.plus)))
+        .child(h_flex().id("composer-hint").flex_1().min_w(0).h_full().items_center().cursor_text()
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(c.hintColor ?? t.dim).child(c.hint ?? ""))) // clips, never under the buttons
+        .when(Boolean(c.mic), (e) => e.child(div().id("composer-mic-wrap").flex_none().on_mouse_down("left", stopDown).child(c.mic)))
         .child(btn));
   }
 }
