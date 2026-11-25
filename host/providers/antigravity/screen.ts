@@ -883,3 +883,209 @@ export function readAgySendNowKey(screen: string): string | null {
   }
   return null;
 }
+
+const ANSI_ESCAPE_RE = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-9;?]*[ -/]*[@-~])/g;
+const CHROME_RULE_RE = /^\s*[─━═]{8,}\s*$/;
+const CHROME_FOOTER_RE = /^\s*(?:\?\s+for shortcuts\b|esc to cancel\b|ctrl\+c\s+to\s+(?:cancel|interrupt)\b|activated bash mode\b|shift\+tab\b|press up to edit queued messages\b|(?:auto|plan|accept-edits)\s*·|bypass permissions\b|\d+%\s+context\s+left\b|[›❯>!]\s*$)/i;
+const SHELL_RUNNING_HINT_RE = /\b(?:esc to cancel|ctrl\+c\s+to\s+(?:cancel|interrupt)|running\s+command)\b/i;
+const SHELL_MAX_OUTPUT_CHARS = 32_768;
+const SHELL_OUTPUT_HEAD_CHARS = 8_192;
+const SHELL_OUTPUT_TAIL_CHARS = SHELL_MAX_OUTPUT_CHARS - SHELL_OUTPUT_HEAD_CHARS;
+
+const normWs = (text: string) => text.replace(/\s+/g, " ").trim();
+
+function capAgyShellOutput(text: string): string {
+  if (text.length <= SHELL_MAX_OUTPUT_CHARS) return text;
+  return `${text.slice(0, SHELL_OUTPUT_HEAD_CHARS).trimEnd()}\n… trimmed …\n${text.slice(-SHELL_OUTPUT_TAIL_CHARS).trimStart()}`;
+}
+
+/**
+ * Strip ANSI escape sequences, Antigravity's bottom composer/status bar, and any
+ * trailing `Tip:` callout or active spinner line, returning only transcript/output lines.
+ */
+export function stripAgyTerminalChrome(screen: string): string[] {
+  const lines = String(screen ?? "").replace(ANSI_ESCAPE_RE, "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, ""));
+  while (lines.length > 0 && !lines[lines.length - 1]!.trim()) lines.pop();
+  if (lines.length === 0) return [];
+
+  const searchStart = Math.max(0, lines.length - 18);
+  let bottomRule = -1;
+  for (let i = lines.length - 1; i >= searchStart; i--) {
+    if (CHROME_RULE_RE.test(lines[i]!)) {
+      bottomRule = i;
+      break;
+    }
+  }
+  let cut = lines.length;
+  if (bottomRule >= 0) {
+    const below = lines.slice(bottomRule + 1).filter((l) => l.trim());
+    const looksLikeFooter = below.length === 0
+      || (below.length <= 4 && below.every((l) => CHROME_FOOTER_RE.test(l) || Boolean(readAgyStatusBar(l)) || /\s{6,}\S/.test(l) || /\b(?:low|medium|high|xhigh|max)\s*$/i.test(l)));
+    if (looksLikeFooter) {
+      let topRule = -1;
+      for (let i = bottomRule - 1; i >= Math.max(0, bottomRule - 8); i--) {
+        if (CHROME_RULE_RE.test(lines[i]!)) {
+          topRule = i;
+          break;
+        }
+      }
+      cut = topRule >= 0 ? topRule : bottomRule;
+    }
+  }
+
+  const body = lines.slice(0, cut);
+  while (body.length > 0) {
+    const last = body[body.length - 1]!;
+    if (!last.trim() || CHROME_FOOTER_RE.test(last) || SPINNER_LINE_RE.test(last) || TIP_START_RE.test(last) || /^esc to dismiss\s*$/i.test(last.trim())) {
+      body.pop();
+      continue;
+    }
+    // Wrapped continuation of a trailing `Tip:` callout right above the composer.
+    let tipAt = -1;
+    for (let j = body.length - 2; j >= Math.max(0, body.length - 5); j--) {
+      const prev = body[j]!;
+      if (TIP_START_RE.test(prev)) {
+        tipAt = j;
+        break;
+      }
+      if (!prev.trim() || CHROME_RULE_RE.test(prev) || SPINNER_LINE_RE.test(prev) || WORK_BLOCK_START_RE.test(prev)) break;
+    }
+    if (tipAt >= 0) {
+      body.length = tipAt;
+      continue;
+    }
+    break;
+  }
+  while (body.length > 0 && !body[0]!.trim()) body.shift();
+  return body;
+}
+
+/** Whether the live Antigravity terminal screen still shows an active `!` shell execution. */
+export function screenShowsAgyShellRunning(screen: string): boolean {
+  const plain = String(screen ?? "").replace(ANSI_ESCAPE_RE, "").replace(/\r\n?/g, "\n");
+  if (agyInShellMode(plain)) return true;
+  if (readAgyWorkingStatus(plain) !== null) return true;
+  const tail = plain.split("\n").map((l) => l.trim()).filter(Boolean).slice(-6);
+  return tail.some((line) => SHELL_RUNNING_HINT_RE.test(line));
+}
+
+/** Extract an explicit exit code printed by a shell runner, or null when none is shown. */
+export function parseAgyShellExitCode(output: string): number | null {
+  if (!output) return null;
+  const tail = output.split("\n").slice(-10).join("\n");
+  const match = /^\[exit\s+(\d+)\]/m.exec(tail)
+    ?? /\b(?:command\s+exited\s+with\s+code|process\s+exited\s+with\s+code|exited\s+with\s+(?:exit\s+)?(?:code|status)|exit\s+(?:code|status))\s*[:=]?\s*(\d+)\b/i.exec(tail)
+    ?? /[✗✖×]\s*[^\n]*?\bexit\s+(?:code\s+)?(\d+)\b/i.exec(tail);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1]!, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function stripLeadingCommandEcho(lines: string[], command: string): string[] {
+  const out = [...lines];
+  while (out.length > 0 && !out[0]!.trim()) out.shift();
+  if (out.length === 0) return out;
+  const target = normWs(command);
+  if (!target) return out;
+  const first = out[0]!.trim();
+  const promptPrefix = /^(?:[●▸]\s*)?[!$❯›●▸]\s*/;
+  if (!promptPrefix.test(first)) return out;
+  const firstBody = normWs(
+    first
+      .replace(promptPrefix, "")
+      .replace(/^Ran\s+\((.+)\)(?:\s*\(ctrl\+o to expand\))?$/i, "$1")
+      .replace(/^!\s*/, ""),
+  );
+  if (!firstBody) return out;
+  if (firstBody === target) {
+    out.shift();
+  } else if (target.startsWith(firstBody) && firstBody.length >= Math.min(12, target.length)) {
+    let combined = firstBody;
+    let consumed = 1;
+    while (consumed < out.length && combined.length < target.length) {
+      const piece = normWs(out[consumed]!.replace(/^[│┃\s]+/, ""));
+      if (!piece) break;
+      const joined = normWs(`${combined} ${piece}`);
+      const compact = `${combined}${piece}`;
+      if (target.startsWith(joined)) {
+        combined = joined;
+        consumed += 1;
+      } else if (target.startsWith(compact)) {
+        combined = compact;
+        consumed += 1;
+      } else {
+        break;
+      }
+    }
+    if (combined === target || (combined.length >= 24 && target.startsWith(combined))) out.splice(0, consumed);
+  }
+  while (out.length > 0 && !out[0]!.trim()) out.shift();
+  return out;
+}
+
+/**
+ * Extract the newly printed CLI output of a `!` bash-mode command by diffing
+ * the post-run Antigravity terminal screen against the pre-run baseline (both
+ * stripped of TUI chrome), falling back to locating the echoed command when
+ * long output scrolls past the baseline.
+ */
+export function extractAgyShellOutput(
+  beforeScreen: string | null,
+  afterScreen: string,
+  command: string,
+): { output: string; exitCode: number | null; running: boolean } {
+  const running = screenShowsAgyShellRunning(afterScreen);
+  const afterLines = stripAgyTerminalChrome(afterScreen);
+  const beforeLines = beforeScreen ? stripAgyTerminalChrome(beforeScreen) : [];
+  let delta: string[] | null = null;
+  if (beforeLines.length > 0 && afterLines.length > 0) {
+    const maxK = Math.min(beforeLines.length, 12);
+    for (let k = maxK; k >= 1; k--) {
+      if (k === 1 && beforeLines[beforeLines.length - 1]!.trim().length < 6) continue;
+      const suffix = beforeLines.slice(beforeLines.length - k);
+      let found = -1;
+      for (let i = afterLines.length - k; i >= 0; i--) {
+        let ok = true;
+        for (let j = 0; j < k; j++) {
+          if (afterLines[i + j] !== suffix[j]) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) {
+          found = i;
+          break;
+        }
+      }
+      if (found >= 0) {
+        delta = afterLines.slice(found + k);
+        break;
+      }
+    }
+  }
+  if (delta === null && afterLines.length > 0) {
+    const target = normWs(command);
+    const probe = target.slice(0, Math.min(28, target.length));
+    let echoIdx = -1;
+    if (probe.length >= 4) {
+      for (let i = afterLines.length - 1; i >= 0; i--) {
+        const trimmed = afterLines[i]!.trim();
+        if (/^(?:[●▸]\s*)?[!$❯›●▸│]\s*/.test(trimmed) && normWs(trimmed.replace(/^(?:[●▸]\s*)?[!$❯›●▸│]\s*/, "")).startsWith(probe)) {
+          echoIdx = i;
+          break;
+        }
+      }
+    }
+    if (echoIdx >= 0) {
+      delta = stripLeadingCommandEcho(afterLines.slice(echoIdx), command);
+    } else if (afterLines.join("\n") !== beforeLines.join("\n")) {
+      delta = afterLines;
+    } else {
+      delta = [];
+    }
+  }
+  const cleaned = stripLeadingCommandEcho(delta ?? [], command);
+  while (cleaned.length > 0 && !cleaned[cleaned.length - 1]!.trim()) cleaned.pop();
+  const output = capAgyShellOutput(cleaned.join("\n"));
+  return { output, exitCode: parseAgyShellExitCode(output), running };
+}

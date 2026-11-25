@@ -1,7 +1,7 @@
 // Antigravity CLI's TUI screen reader (host/providers/antigravity/screen.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "../../host/providers/antigravity/screen.ts";
+import { agyAtPrompt, agyInShellMode, agyMovesTo, agyPromptKey, extractAgyShellOutput, parseAgyPermissionBody, parseAgyShellExitCode, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus, screenShowsAgyShellRunning, stripAgyTerminalChrome } from "../../host/providers/antigravity/screen.ts";
 
 const IDLE_AUTO = `
 ────────────────────────────────────────────────────────────────────────
@@ -479,4 +479,78 @@ test("readAgySendNowKey reads default and custom immediate-send hints from the q
   assert.equal(readAgySendNowKey(withHint("(Ctrl+Enter to send immediately)")), "ctrl+enter");
   assert.equal(readAgySendNowKey(withHint("(not a valid key to send immediately)")), null);
   assert.equal(readAgySendNowKey(IDLE_AUTO), null);
+});
+
+test("extractAgyShellOutput strips TUI chrome, Tips, ANSI escapes, and command echo while capturing live and finished output", () => {
+  const before = [
+    "Ready to install:",
+    "! sample-install --from ./dist",
+    "│ Tip: Press ctrl+o to expand",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+
+  const running = [
+    "Ready to install:",
+    "! sample-install --from ./dist",
+    "! sample-install --from ./dist",
+    "\x1b[32mUnpacking archive...\x1b[0m",
+    "⠋ Running command... 1s",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "esc to cancel                               auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+
+  const done = [
+    "Ready to install:",
+    "! sample-install --from ./dist",
+    "! sample-install --from ./dist",
+    "\x1b[32mUnpacking archive...\x1b[0m",
+    "Installed sample-app 1.0.0",
+    "│ Tip: Use /model to switch models",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+
+  assert.deepEqual(stripAgyTerminalChrome(before), ["Ready to install:", "! sample-install --from ./dist"]);
+  assert.equal(screenShowsAgyShellRunning(running), true);
+  assert.equal(screenShowsAgyShellRunning(done), false);
+
+  const mid = extractAgyShellOutput(before, running, "sample-install --from ./dist");
+  assert.deepEqual(mid, { output: "Unpacking archive...", exitCode: null, running: true });
+
+  const fin = extractAgyShellOutput(before, done, "sample-install --from ./dist");
+  assert.deepEqual(fin, { output: "Unpacking archive...\nInstalled sample-app 1.0.0", exitCode: null, running: false });
+
+  // Unchanged screen produces empty output.
+  assert.equal(extractAgyShellOutput(before, before, "sample-install --from ./dist").output, "");
+
+  // Wrapped command echo + scrolled-past baseline falls back cleanly to command echo.
+  const longCmd = "sample-tool --workspace /tmp/example-project --flag alpha --output build/out.tar.gz";
+  const scrolled = [
+    "! sample-tool --workspace /tmp/example-project --flag",
+    "  alpha --output build/out.tar.gz",
+    "step 1 ok",
+    "Exit code: 2",
+    "────────────────────────────────────────────────────────────────────────",
+    ">",
+    "────────────────────────────────────────────────────────────────────────",
+    "? for shortcuts                             auto · Gemini 4 Neon · xhigh",
+  ].join("\n");
+  assert.deepEqual(extractAgyShellOutput(before, scrolled, longCmd), {
+    output: "step 1 ok\nExit code: 2",
+    exitCode: 2,
+    running: false,
+  });
+
+  // Explicit exit code parsing variants.
+  assert.equal(parseAgyShellExitCode("ok\n[exit 0]"), 0);
+  assert.equal(parseAgyShellExitCode("error: missing file\nProcess exited with code 127"), 127);
+  assert.equal(parseAgyShellExitCode("Command exited with code 1."), 1);
+  assert.equal(parseAgyShellExitCode("all good"), null);
 });

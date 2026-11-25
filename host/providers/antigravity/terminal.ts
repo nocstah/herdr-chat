@@ -27,7 +27,7 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyRunningCommand, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, extractAgyShellOutput, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyRunningCommand, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { sendAgyBang } from "./bang.ts";
 import {
@@ -57,6 +57,14 @@ const TAIL_MS = () => num(process.env.HERDR_CHAT_TAIL_MS, 150);
 const SESSION_MS = () => num(process.env.HERDR_CHAT_SESSION_MS, 1500);
 const ASK_MS = () => num(process.env.HERDR_CHAT_ASK_MS, 500);
 const WORK_STATUS_MS = () => num(process.env.HERDR_CHAT_WORK_STATUS_MS, 500);
+const BANG_POLL_MS = () => num(process.env.HERDR_CHAT_BANG_POLL_MS, 300);
+const BANG_SLOW_MS = () => Math.max(BANG_POLL_MS(), Math.round(BANG_POLL_MS() * 2.2));
+const BANG_FAST_WINDOW_MS = 4_000;
+const BANG_SETTLE_ACTIVE_MS = () => Math.max(60, Math.round(BANG_POLL_MS() * 1.5));
+const BANG_SETTLE_OUTPUT_MS = () => Math.max(90, Math.round(BANG_POLL_MS() * 2.5));
+const BANG_SETTLE_QUIET_MS = () => Math.max(180, Math.round(BANG_POLL_MS() * 7));
+const BANG_MAX_MS = 120_000;
+const BANG_DEDUP_TTL_MS = 60_000;
 const ASK_SETTLE_MS = 700;
 const SENT_TTL_MS = 10 * 60_000;
 const MODELS_TTL_MS = 60_000;
@@ -231,6 +239,19 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private catalogAt = 0;
   private catalogLoading: Promise<AgyModelGroup[]> | null = null;
   private promptWaits = 0;
+  private bangSeq = 0;
+  private bangWatchers = new Map<string, {
+    callId: string;
+    command: string;
+    normCmd: string;
+    args: Rec;
+    startedAt: number;
+    controller: AbortController;
+    done: boolean;
+    output: string;
+    exitCode: number | null;
+  }>();
+  private recentBangs: Array<{ normCmd: string; at: number }> = [];
   private snapshot: Promise<void>;
   private gotSnapshot: () => void = () => {};
 
@@ -482,6 +503,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (!this.live) return;
     this.live = false;
     this.log(why);
+    this.settleAllBangRuns();
     this.setQuotaWarning(null);
     this.stopWorkStatus();
     this.settle(true);
@@ -565,8 +587,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       });
   }
 
-  private async screenText(): Promise<string | null> {
-    const r = await this.hc(["read", "--json", this.opts.terminal], 5000);
+  private async screenText(lines = 0): Promise<string | null> {
+    const argv = lines > 0 ? ["read", "--lines", String(lines), "--json", this.opts.terminal] : ["read", "--json", this.opts.terminal];
+    const r = await this.hc(argv, 5000);
     try {
       const text = JSON.parse(r.stdout)?.text;
       return typeof text === "string" ? text : null;
@@ -643,6 +666,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.interruptedNow = null;
       this.abortRequested = false;
       this.sawWorkingScreen = false;
+      this.abortAllBangRuns();
+      this.recentBangs.length = 0;
       this.clearQueued();
       this.swarmEtag = null;
       if (!first) this.awaitingHistory = true;
@@ -771,7 +796,14 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
         for (const k of this.fullCache.keys()) if (k <= step) this.fullCache.delete(k);
       }
       const before = this.follower.turn;
-      for (const ev of this.follower.feed(r)) this.emit(this.matchEcho(withImages(ev)));
+      const fed = this.follower.feed(r);
+      if (r && typeof r === "object" && !Array.isArray(r) && (r as Rec).type === "USER_INPUT" && this.bangWatchers.size > 0) {
+        this.settleAllBangRuns();
+      }
+      if (r && typeof r === "object" && !Array.isArray(r) && (r as Rec).type === "SHELL_EXEC" && this.consumeNativeShellExec(r as Rec, fed)) {
+        continue;
+      }
+      for (const ev of fed) this.emit(this.matchEcho(withImages(ev)));
       if (this.follower.turn !== before) ended = this.follower.turn === "ended";
     }
     this.usageNow = this.follower.usage();
@@ -1212,8 +1244,12 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     if (bang) {
       // `hc send` bracketed-pastes `!cmd`, which `agy` treats as a literal LLM prompt instead of
       // opening bash mode; type raw `!` over `hc connect` (`terminal.attach`), verify bash mode,
-      // then paste the command and press Enter.
-      await sendAgyBang({ hc: this.opts.hc, terminal: this.opts.terminal, command: bang[1]!.trim() });
+      // then paste the command and press Enter. Antigravity CLI keeps `!` shell output on its TUI
+      // screen without writing `SHELL_EXEC` to `transcript.jsonl`, so we mirror it live into a
+      // standalone `you-bash-live-*` Bash card by observing `hc read` against the pre-run screen.
+      const cmd = bang[1]!.trim();
+      const { before } = await sendAgyBang({ hc: this.opts.hc, terminal: this.opts.terminal, command: cmd });
+      this.startBangRun(cmd, before);
       return { disposition: "handled" };
     }
     if (p.images.length && !this.opts.sentDir) throw new Error(NO_IMAGES);
@@ -1320,8 +1356,213 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.kill();
   }
 
+  private sleepAbortable(ms: number, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted || this.disposed) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(!this.disposed && !signal.aborted);
+      }, ms);
+      timer.unref();
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /** Start a standalone `you-bash-live-*` card and mirror the `!` command's TUI output until it settles. */
+  private startBangRun(command: string, beforeScreen: string): void {
+    if (this.bangWatchers.size > 0) this.settleAllBangRuns();
+    const callId = `you-bash-live-${++this.bangSeq}`;
+    const args: Rec = { CommandLine: command };
+    const entry = {
+      callId,
+      command,
+      normCmd: norm(command),
+      args,
+      startedAt: Date.now(),
+      controller: new AbortController(),
+      done: false,
+      output: "",
+      exitCode: null as number | null,
+    };
+    this.bangWatchers.set(callId, entry);
+    this.emit({ type: "tool_call", callId, name: "run_command", args });
+    this.emit({ type: "tool_started", callId, name: "run_command", args });
+    void this.watchBangRun(entry, beforeScreen);
+  }
+
+  private finishBangRun(
+    entry: {
+      callId: string;
+      normCmd: string;
+      args: Rec;
+      startedAt: number;
+      controller: AbortController;
+      done: boolean;
+      output: string;
+      exitCode: number | null;
+    },
+    res: { output: string; exitCode: number | null; isError: boolean },
+  ): void {
+    if (entry.done) return;
+    entry.done = true;
+    entry.controller.abort();
+    this.bangWatchers.delete(entry.callId);
+    const now = Date.now();
+    this.recentBangs = this.recentBangs.filter((x) => now - x.at < BANG_DEDUP_TTL_MS);
+    this.recentBangs.push({ normCmd: entry.normCmd, at: now });
+    this.emit({
+      type: "tool_ended",
+      callId: entry.callId,
+      name: "run_command",
+      args: entry.args,
+      isError: res.isError,
+      output: res.output,
+      durationMs: Math.max(0, now - entry.startedAt),
+      ...(res.exitCode !== null ? { result: { structuredContent: { exit_code: res.exitCode } } } : {}),
+    });
+  }
+
+  private settleAllBangRuns(): void {
+    for (const entry of [...this.bangWatchers.values()]) {
+      this.finishBangRun(entry, {
+        output: entry.output,
+        exitCode: entry.exitCode,
+        isError: entry.exitCode !== null && entry.exitCode !== 0,
+      });
+    }
+  }
+
+  private abortAllBangRuns(): void {
+    for (const entry of [...this.bangWatchers.values()]) {
+      entry.done = true;
+      entry.controller.abort();
+    }
+    this.bangWatchers.clear();
+  }
+
+  /** Deduplicate a native `SHELL_EXEC` transcript step 1-to-1 against an active or recently settled live `!` run. */
+  private consumeNativeShellExec(r: Rec, fed: NormalizedEvent[]): boolean {
+    const normCmd = norm(typeof r.command === "string" ? r.command : "");
+    if (!normCmd) return false;
+    for (const entry of this.bangWatchers.values()) {
+      if (entry.normCmd !== normCmd) continue;
+      const ended = fed.find((e) => e.type === "tool_ended") as Extract<NormalizedEvent, { type: "tool_ended" }> | undefined;
+      const exitCode = typeof r.exit_code === "number" && Number.isFinite(r.exit_code) ? r.exit_code : entry.exitCode;
+      const isError = ended ? ended.isError : r.status === "ERROR" || (exitCode !== null && exitCode !== 0);
+      this.finishBangRun(entry, {
+        output: ended?.output ?? entry.output,
+        exitCode,
+        isError,
+      });
+      return true;
+    }
+    const now = Date.now();
+    this.recentBangs = this.recentBangs.filter((x) => now - x.at < BANG_DEDUP_TTL_MS);
+    const idx = this.recentBangs.findIndex((x) => x.normCmd === normCmd);
+    if (idx >= 0) {
+      this.recentBangs.splice(idx, 1);
+      return true;
+    }
+    return false;
+  }
+
+  private async watchBangRun(
+    entry: {
+      callId: string;
+      command: string;
+      normCmd: string;
+      args: Rec;
+      startedAt: number;
+      controller: AbortController;
+      done: boolean;
+      output: string;
+      exitCode: number | null;
+    },
+    beforeScreen: string,
+  ): Promise<void> {
+    const signal = entry.controller.signal;
+    const pollMs = BANG_POLL_MS();
+    const slowMs = BANG_SLOW_MS();
+    const settleActiveMs = BANG_SETTLE_ACTIVE_MS();
+    const settleOutputMs = BANG_SETTLE_OUTPUT_MS();
+    const settleQuietMs = BANG_SETTLE_QUIET_MS();
+    let sawActive = false;
+    let lastOutput = "";
+    let stableSince = 0;
+
+    if (!(await this.sleepAbortable(pollMs, signal))) return;
+    while (!signal.aborted && !this.disposed && !entry.done) {
+      if (!this.live) {
+        this.finishBangRun(entry, {
+          output: entry.output,
+          exitCode: entry.exitCode,
+          isError: entry.exitCode !== null && entry.exitCode !== 0,
+        });
+        return;
+      }
+      const elapsed = Date.now() - entry.startedAt;
+      const screen = await this.screenText(80);
+      if (signal.aborted || this.disposed || entry.done) return;
+
+      let screenRunning = false;
+      if (screen !== null) {
+        const parsed = extractAgyShellOutput(beforeScreen, screen, entry.command);
+        if (parsed.output.length > 0 && parsed.output !== entry.output) {
+          entry.output = parsed.output;
+          this.emit({ type: "tool_progress", callId: entry.callId, name: "run_command", args: entry.args, output: entry.output });
+        }
+        if (parsed.exitCode !== null) entry.exitCode = parsed.exitCode;
+        screenRunning = parsed.running;
+      }
+
+      const active = this.status === "working" || screenRunning;
+      if (active) {
+        sawActive = true;
+        stableSince = 0;
+      } else if (this.status === "blocked") {
+        stableSince = 0;
+      } else {
+        const now = Date.now();
+        if (entry.output !== lastOutput) {
+          lastOutput = entry.output;
+          stableSince = now;
+        } else if (stableSince === 0) {
+          stableSince = now;
+        }
+        const stableFor = now - stableSince;
+        const settled = (sawActive && stableFor >= settleActiveMs)
+          || (entry.output.length > 0 && stableFor >= settleOutputMs)
+          || (elapsed >= settleQuietMs && stableFor >= settleOutputMs);
+        if (settled) {
+          this.finishBangRun(entry, {
+            output: entry.output,
+            exitCode: entry.exitCode,
+            isError: entry.exitCode !== null && entry.exitCode !== 0,
+          });
+          return;
+        }
+      }
+
+      if (elapsed >= BANG_MAX_MS) {
+        this.finishBangRun(entry, {
+          output: entry.output,
+          exitCode: entry.exitCode,
+          isError: entry.exitCode !== null && entry.exitCode !== 0,
+        });
+        return;
+      }
+      const delay = elapsed < BANG_FAST_WINDOW_MS ? pollMs : slowMs;
+      if (!(await this.sleepAbortable(delay, signal))) return;
+    }
+  }
+
   kill(): void {
     this.disposed = true;
+    this.abortAllBangRuns();
     for (const t of [this.tailTimer, this.sessionTimer, this.eventsRetry, this.askTimer, this.workTimer]) if (t) clearTimeout(t);
     this.events?.kill();
     this.events = null;

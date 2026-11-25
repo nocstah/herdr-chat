@@ -194,7 +194,9 @@ export const ANTIGRAVITY_TOOLS: ToolMap = {
         return null;
     }
   },
-  exitCode(_result, isError, output) {
+  exitCode(result, isError, output) {
+    const sc = result?.structuredContent;
+    if (sc && typeof sc === "object" && "exit_code" in sc) return num((sc as Rec).exit_code) ?? null;
     const m = /^Command exited with code (\d+)\.?$/m.exec(output);
     if (m) return Number(m[1]);
     if (/Command aborted|Tool execution was canceled/i.test(output)) return null;

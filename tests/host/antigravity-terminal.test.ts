@@ -861,3 +861,121 @@ test("Chat queue_edit and queue_send_now on Antigravity hold steers editably, cl
     r.done();
   }
 });
+
+test("Antigravity `!` bang runs mirror live TUI output into a standalone you-bash card and deduplicate native SHELL_EXEC", async () => {
+  const prevPoll = process.env.HERDR_CHAT_BANG_POLL_MS;
+  process.env.HERDR_CHAT_BANG_POLL_MS = "30";
+  const r = rig();
+  try {
+    const beforeScreen = [
+      "Run this command:",
+      "! sample-install --from ./dist",
+      "────────────────────────────────────",
+      "> Auto mode: edits & safe commands auto-approved",
+      "────────────────────────────────────",
+      "? for shortcuts        auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nBuild it\n</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-4-neon-xhigh", content: "```bash\n! sample-install --from ./dist\n```" },
+    ]);
+    r.screen(beforeScreen);
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "idle" } }] });
+
+    const chat = new Chat({
+      chat: "c-bang-live",
+      cwd: r.d,
+      session: null,
+      adapter: r.adapter,
+      terminal: null,
+      attachments: new Attachments(join(r.d, "att")),
+      view: "t5",
+      log: () => {},
+    });
+    chat.start(null);
+    await chat.whenReady(5000);
+
+    // Click "Run in Antigravity" (`echo: false`): immediately adds a standalone running you-bash card.
+    const res = (await chat.op("send", { text: "! sample-install --from ./dist", mode: "auto", echo: false })) as { disposition: string };
+    assert.equal(res.disposition, "handled");
+    await until("live you-bash card running", () =>
+      chat.timeline.items.some((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-live-") && it.status === "running"),
+    );
+
+    // Stream intermediate TUI output while command is still running (`esc to cancel`).
+    r.screen([
+      "Run this command:",
+      "! sample-install --from ./dist",
+      "! sample-install --from ./dist",
+      "Unpacking bundle...",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    await until("live output streamed", () =>
+      chat.timeline.items.some((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-live-") && it.output.includes("Unpacking bundle...")),
+    );
+
+    // Command completes and returns to idle prompt -> card settles with complete output and exitCode 0.
+    r.screen([
+      "Run this command:",
+      "! sample-install --from ./dist",
+      "! sample-install --from ./dist",
+      "Unpacking bundle...",
+      "Installed sample-app 1.2.3",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "? for shortcuts        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    await until("live card settled done", () =>
+      chat.timeline.items.some((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-live-") && it.status === "done"),
+    );
+    const bashCard = chat.timeline.items.find((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-live-")) as any;
+    assert.equal(bashCard.detail.type, "bash");
+    assert.equal(bashCard.detail.command, "sample-install --from ./dist");
+    assert.equal(bashCard.detail.exitCode, 0);
+    assert.equal(bashCard.output, "Unpacking bundle...\nInstalled sample-app 1.2.3");
+
+    // If Antigravity later also writes a matching native SHELL_EXEC record, it deduplicates 1-to-1 instead of duplicating the card.
+    r.write(A, [
+      { step_index: 2, type: "SHELL_EXEC", status: "DONE", command: "sample-install --from ./dist", exit_code: 0, output: "Installed sample-app 1.2.3" },
+    ]);
+    await pause(250);
+    assert.equal(chat.timeline.items.filter((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-")).length, 1);
+
+    // A failing `!` command captures its non-zero exit code and renders with status "error".
+    const failBefore = [
+      "Installed sample-app 1.2.3",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "? for shortcuts        auto · Gemini 4 Neon · xhigh",
+    ].join("\n");
+    r.screen(failBefore);
+    await chat.op("send", { text: "! sample-check --strict", mode: "auto", echo: false });
+    r.screen([
+      "Installed sample-app 1.2.3",
+      "! sample-check --strict",
+      "error: assertion failed",
+      "Exit code: 1",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "? for shortcuts        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    await until("failed bang card settled", () =>
+      chat.timeline.items.some((it) => it.kind === "tool" && it.detail.type === "bash" && it.detail.command === "sample-check --strict" && it.status === "error"),
+    );
+    const failCard = chat.timeline.items.find((it) => it.kind === "tool" && it.detail.type === "bash" && it.detail.command === "sample-check --strict") as any;
+    assert.equal(failCard.detail.exitCode, 1);
+    assert.equal(failCard.output, "error: assertion failed\nExit code: 1");
+
+    await chat.shutdown();
+  } finally {
+    if (prevPoll === undefined) delete process.env.HERDR_CHAT_BANG_POLL_MS;
+    else process.env.HERDR_CHAT_BANG_POLL_MS = prevPoll;
+    r.done();
+  }
+});

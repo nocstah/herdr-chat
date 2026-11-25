@@ -60,7 +60,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export async function sendAgyBang(opts: SendAgyBangOptions): Promise<void> {
+export async function sendAgyBang(opts: SendAgyBangOptions): Promise<{ before: string }> {
   const cmd = opts.command.replace(/\x1b\[20[01]~/g, "").trim();
   if (!cmd) throw new Error("Empty shell command.");
   if (/[\r\n]/.test(cmd)) throw new Error("Multi-line commands cannot run in Antigravity bash mode.");
@@ -238,6 +238,8 @@ export async function sendAgyBang(opts: SendAgyBangOptions): Promise<void> {
     if (agyInShellMode(before)) {
       throw new Error("Antigravity is already in shell mode in its terminal: finish or cancel it there first.");
     }
+    const beforeHistRead = await rpc("terminal.read", { terminal: opts.terminal, lines: 80 }).catch(() => null);
+    const beforeSnapshot = typeof beforeHistRead?.text === "string" && beforeHistRead.text ? beforeHistRead.text : before;
 
     const att = await rpc("terminal.attach", { terminal: opts.terminal, cols, rows, history: 0 });
     const ch = att?.channel;
@@ -270,6 +272,7 @@ export async function sendAgyBang(opts: SendAgyBangOptions): Promise<void> {
       writeRaw(encodeFrame(ch, FRAME_DATA, `${PASTE_START}${cmd}${PASTE_END}`));
       await sleep(enterDelayMs);
       writeRaw(encodeFrame(ch, FRAME_DATA, "\r"));
+      return { before: beforeSnapshot };
     } finally {
       await closeChannel(ch);
     }

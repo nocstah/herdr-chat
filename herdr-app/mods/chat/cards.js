@@ -50,7 +50,7 @@ export function item(it, c, footer, slot = true) {
     case "user": return user(it, c);
     case "assistant": return assistant(it, c, footer, slot);
     case "thinking": return thinking(it, c);
-    case "tool": return tool(it, c, { flat: true });
+    case "tool": return tool(it, c, { flat: !String(it.toolCallId ?? "").startsWith("you-") });
     case "notice": return notice(it, c);
     case "custom": return custom(it, c);
     case "plan": return plan(it, c);
@@ -310,12 +310,27 @@ export function tool(it, c, { flat = false } = {}) {
     .when(d.type === "bash" && d.exitCode != null && d.exitCode !== 0, (e) => e.child(chip(`exit ${d.exitCode}`, t.ansi1, t)))
     .when(it.durationMs != null && it.durationMs >= 100, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(it.durationMs))))
     .when(!flat || it.status !== "done", (e) => e.child(statusIcon(it.status, t)));
+  const isUserBash = String(it.toolCallId ?? "").startsWith("you-") && d.type === "bash";
   let body = null;
   if (open) body = toolBody(it, d, c, flat);
   else if (it.status === "running" && it.output) {
     // Running: the output's last lines, so a long command shows life.
     const lines = it.outputLines?.length ? it.outputLines.slice(-4) : asLines(it.output).slice(-4);
     body = (flat ? div().py(4) : div().border_t_1().border_color(c.line).px(10).py(6)).child(outputBox(`${it.id}-tail`, lines, c, { color: t.dim }));
+  } else if (isUserBash && it.status !== "running" && it.status !== "pending") {
+    const fullText = c.full.get(it.id);
+    const out = fullText ?? it.output ?? "";
+    if (out) {
+      const lines = fullText == null && it.outputLines?.length ? it.outputLines : asLines(out);
+      const previewMax = 10;
+      const clipped = lines.length > previewMax || it.outputTruncated;
+      const shown = clipped ? lines.slice(0, previewMax) : lines;
+      body = v_flex().border_t_1().border_color(c.line).px(10).py(6).gap(6)
+        .child(outputBox(`${it.id}-preview`, shown, c, { color: t.muted }))
+        .when(clipped, (e) => e.child(div().id(`you-more-${it.id}`).text_size(11.5).text_color(t.accent).cursor_pointer()
+          .on_click((_e, cx) => c.toggle(it.id, cx))
+          .child(it.outputTruncated ? "Show full output" : `Show all ${plural(lines.length, "line")}`)));
+    }
   }
   if (flat) {
     const under = [
