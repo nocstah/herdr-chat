@@ -65,6 +65,7 @@ import { Updater, quiet } from "./update.js";
 import { CodeView, owners } from "./codeview.js";
 import { Viewer, readSvgSize } from "./viewer.js";
 import { TermBar } from "./termbar.js";
+import { DOCK_MIN, ModUi } from "./modui.js";
 import { DEFAULT_PROVIDER, MOD, PROVIDERS, PROVIDER_NAMES, alpha, homeRel, icon, message, monoFont, plural, relTime, spansText, spinner, tildePath, typedText, unwrapHc } from "./util.js";
 import { themeSig } from "./flavor.js";
 import { MAC } from "./platform.js";
@@ -114,6 +115,8 @@ export default class HerdrChat extends View {
     this.provider = p.provider ?? null; // an id of PROVIDERS; null: the registry's, else DEFAULT_PROVIDER
     this.cwd = p.cwd || null;
     this.store = new Store();
+    // What the agent's mods draw (Claude Code: panes, the band above the composer): modui.js.
+    this.modUi = new ModUi(this);
     this.timeline = new Timeline("herdr-chat-timeline");
     this.expanded = new Set();
     this.full = new Map();
@@ -943,6 +946,8 @@ export default class HerdrChat extends View {
 
   afterState(cx) {
     const s = this.store.state;
+    this.modUi.sync(cx);
+    this.reportModRoom(cx);
     // A permission or questions card leaves the keyboard in the composer
     // (number keys, Enter and Esc answer while it's empty).
     this.dialog.sync(s.dialog);
@@ -3293,7 +3298,8 @@ export default class HerdrChat extends View {
         ...this.dialog.form?.debugState() } : null,
       quotaWarning: s.quotaWarning ?? null,
       statuses: s.statuses.map((x) => ({ key: x.key, text: x.spans.map((y) => y.text).join("") })),
-      widgets: s.widgets.map((w) => w.key), commands: s.commands.length, commandNames: s.commands.map((c) => c.name),
+      widgets: s.widgets.map((w) => w.key), commands: s.commands.length,
+      modUi: s.modUi ? { band: Boolean(s.modUi.band), panes: s.modUi.panes.map((p) => p.id), shown: s.modUi.shown, docked: Boolean(this.modDock), fields: [...this.modUi.fields.keys()] } : null, commandNames: s.commands.map((c) => c.name),
       items: this.store.items.map((it) => ({ id: it.id, kind: it.kind, ...(it.parent ? { parent: it.parent } : {}), ...(it.status ? { status: it.status } : {}), ...(it.streaming ? { streaming: true } : {}),
         ...(it.detail?.type === "agent" ? { live: cardLive(it, rows.children).map((x) => x.id) } : {}),
         ...(it.kind === "user" ? { text: it.text.slice(0, 200), source: it.source, from: it.from ?? null, skill: it.skill?.name ?? null } : {}),
@@ -3420,6 +3426,54 @@ export default class HerdrChat extends View {
   }
 
   // The widths the chat was laid out at, newest last (the E2E counts a split's reflows).
+  // ---- what the agent's mods draw (modui.js)
+
+  /** A mod's pane sits beside the timeline when the chat is wide enough, else above the composer. */
+  modDocked() {
+    if (!this.modUi?.ui?.panes?.length) return (this.modDock = false);
+    const w = this.modDock ? this.outerW ?? this.width : this.width;
+    return (this.modDock = Boolean(w && w >= DOCK_MIN));
+  }
+
+  modPaneW() {
+    const ui = this.modUi.ui;
+    const p = ui?.panes?.find((x) => x.id === ui.shown) ?? ui?.panes?.at(-1);
+    const want = p?.columns ? p.columns * 7.5 + 26 : 380;
+    return Math.round(Math.min(Math.max(want, 300), (this.outerW ?? this.width ?? 1000) * 0.45));
+  }
+
+  modInlineH() {
+    const ui = this.modUi.ui;
+    const p = ui?.panes?.find((x) => x.id === ui.shown);
+    return Math.min(p?.rows ? p.rows * 18 + 60 : 300, 360);
+  }
+
+  /** The chat, and a docked pane at its right. Without one, the chat as it was. */
+  withModDock(el, cx) {
+    if (!this.modDocked()) return el;
+    const t = theme();
+    const w = this.modPaneW();
+    return h_flex().id("chat-outer").size_full().min_h(0)
+      .on_size_change((sz, cx) => {
+        if (Math.abs(sz.width - (this.outerW ?? 0)) > 0.5 || Math.abs(sz.height - (this.outerH ?? 0)) > 0.5) {
+          this.outerW = sz.width;
+          this.outerH = sz.height;
+          this.reportModRoom(cx);
+          cx.notify();
+        }
+      })
+      .child(div().flex_1().min_w(0).h_full().child(el))
+      .child(div().flex_none().h_full().w(w).child(this.modUi.pane(t, this.ctx(t), { docked: true })));
+  }
+
+  /** The room the band and the pane have, for the mods' `e.viewport`. */
+  reportModRoom(cx) {
+    if (!this.modUi?.any()) return;
+    const docked = this.modDocked();
+    const pane = docked ? { w: this.modPaneW() - 26, h: (this.outerH ?? 600) - 60 } : { w: this.colW() - 26, h: this.modInlineH() - 60 };
+    this.modUi.report(this.colW(), pane, docked, cx);
+  }
+
   sized(w) {
     (this.widths ??= []).push(Math.round(w));
     if (this.widths.length > 16) this.widths.shift();
@@ -3479,7 +3533,7 @@ export default class HerdrChat extends View {
     const t0 = Date.now();
     let el;
     try {
-      el = this.renderChat(cx);
+      el = this.withModDock(this.renderChat(cx), cx);
     } catch (e) {
       // A render that throws keeps the last frame: say why in the dump (and on screen).
       this.renderError = `${message(e)} ${String(e?.stack ?? "").split("\n").slice(0, 4).join(" | ")}`;
@@ -3522,6 +3576,8 @@ export default class HerdrChat extends View {
       .anchor("bottom_left").w_full()
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
     const quotaCard = !s.dialog ? this.quotaCard(t) : null;
+    // A mod's pane where there's no room beside the timeline: above the composer.
+    const modInline = !this.modDocked() ? this.modUi.pane(t, c, { docked: false, maxH: this.modInlineH() }) : null;
     // Its height is in the dump: an open menu must not change it (an overlay, not the flow).
     const actEntries = this.supportsActivity() && Array.isArray(s.activityLog) ? s.activityLog : [];
     if (actEntries.length < this.activityScrollCount) this.activityScrollCount = actEntries.length;
@@ -3534,7 +3590,7 @@ export default class HerdrChat extends View {
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
       .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
-      .children([widgetTray(this, above, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
+      .children([modInline, widgetTray(this, above, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t), this.modUi.band(t, c)].filter(Boolean))
       .when(this.failedSends.length > 0, (e) => e.child(this.unsentCard(t)))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
@@ -3545,7 +3601,7 @@ export default class HerdrChat extends View {
     const floats = pill && this.viewFloats();
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_size_change((sz, cx) => {
-        if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); cx.notify(); }
+        if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); this.reportModRoom(cx); cx.notify(); }
         // A hidden pane gets no room: shown or hidden, by this app's flip or another's, the face is read again now.
         if (this.view) { this.faceReadAt = 0; this.faceAgain = this.faceReading; }
       })

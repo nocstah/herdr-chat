@@ -7,7 +7,7 @@ export const EMPTY_STATE = {
   phase: "starting", error: null, cwd: "", sessionFile: null, sessionName: null, agentVersion: null,
   model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null,
   dialogsPending: 0, statuses: [], widgets: [], title: null, editorText: null, commands: [], quotaWarning: null,
-  activityText: null, activityLog: [], swarm: null,
+  activityText: null, activityLog: [], swarm: null, modUi: null,
 };
 
 export class Store {

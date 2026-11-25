@@ -8,6 +8,7 @@
 import type { ToolDetail, UserSource, StopReason, Usage, NoticeItem, PlanStep } from "../timeline.ts";
 import type { ToolMap } from "../tools.ts";
 import type { SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest } from "./antigravity/swarm.ts";
+import type { ModUi } from "../modui.ts";
 
 export type { ToolDetail, UserSource, StopReason, Usage, PlanStep, SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest };
 
@@ -262,6 +263,10 @@ export type NormalizedEvent = Common &
     | { type: "activity_text"; text: string | null }
     /** `once: "run"`: at most one such notice per run. */
     | { type: "notice"; level: NoticeItem["level"]; source: NoticeItem["source"]; text: string; once?: "run" }
+    /** A passing message for the person (a mod's `$.ui.toast`): a toast, not a timeline item. */
+    | { type: "toast"; level: "info" | "warning" | "error"; text: string }
+    /** What the agent's mods draw now (Claude Code: panes and the band above the prompt); null: nothing. */
+    | { type: "mod_ui"; ui: ModUi | null }
 
     // ---- session
     /**
@@ -466,6 +471,11 @@ export interface ProviderAdapter {
    */
   awaitPrompt?(): Promise<{ back: boolean }>;
   setPermissionMode(mode: string): Promise<void>;
+  /**
+   * Optional: what the person did in something the agent's mods drew (protocol.md v3.10): `press`,
+   * `input`, `select`, `close`, `show`, `focus`, `viewport`. Resolves with the op's data.
+   */
+  modUi?(action: string, args: Record<string, unknown>): Promise<unknown>;
   /** Resolves when compaction is done; rejects when it fails. */
   compact(instructions?: string): Promise<void>;
   newSession(): Promise<void>;

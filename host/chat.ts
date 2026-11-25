@@ -24,6 +24,8 @@ import { loadImages } from "./clipboard.ts";
 import type { Attachments } from "./attachments.ts";
 import type { ImageFile } from "./imagesize.ts";
 import { Renderer, diffLines } from "./render.ts";
+import { prepareModUi } from "./modui.ts";
+import type { ModUi } from "./modui.ts";
 import { presentTool, prettyArgs } from "./tools.ts";
 import { AgentError } from "./providers/types.ts";
 import type {
@@ -164,6 +166,8 @@ export type ChatState = {
   activityLog: ActivityEntry[];
   /** Live Antigravity `/swarm` snapshot for this conversation; null when no swarm is active. */
   swarm: SwarmSnapshot | null;
+  /** What the agent's mods draw (Claude Code: panes, the band above the prompt; protocol.md v3.10); null: nothing. */
+  modUi: ModUi | null;
 };
 
 export type ActivityEntry = { text: string; ts: number; kind?: "status" | "tool" };
@@ -397,7 +401,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [], swarm: null,
+      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [], swarm: null, modUi: null,
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -858,6 +862,12 @@ export class Chat {
         return;
       case "ask_closed":
         this.removeDialog(ev.id);
+        return;
+      case "toast":
+        this.toast(ev.level, ev.text);
+        return;
+      case "mod_ui":
+        this.set({ modUi: prepareModUi(ev.ui, { svgDir: this.opts.imageDir ?? null, log: (m) => this.opts.log(m) }) });
         return;
       case "status":
         if (ev.text !== null) this.statusMap.set(ev.key, toSpans(ev.text.replace(/\n/g, " ")));
@@ -1955,6 +1965,12 @@ export class Chat {
       case "set_permission_mode":
         await this.setPermissionMode(String(a.mode ?? ""));
         return {};
+      case "mod_ui": {
+        // Something a mod drew was used: a press, a field, a pick, a pane closed or picked (v3.10).
+        const agent = this.requireAgent();
+        if (!agent.modUi) throw new Error(`${this.agent} has no mods to draw`);
+        return (await agent.modUi(String(a.action ?? ""), a)) ?? {};
+      }
       case "compact":
         await this.compact(typeof a.instructions === "string" && a.instructions ? a.instructions : undefined);
         return {};

@@ -17,6 +17,7 @@ import type {
   AgentCommand, AgentModel, SessionSource, UsageInfo, PromptMode, Disposition, PermissionMode, PermissionChoice, ForkPoint, Question,
 } from "../types.ts";
 import { CLAUDE_TOOLS } from "./tools.ts";
+import { ClaudeModSurface, modUiEnabled } from "./modui.ts";
 
 type Rec = Record<string, any>;
 
@@ -68,6 +69,8 @@ export class ClaudeAdapter implements ProviderAdapter {
   /** The model alias we launch with (`--model`), once the user picked one. */
   private modelValue: string | null = null;
   private effort: string | null;
+  /** The chat as a surface of this process: what its mods draw (modui.ts). */
+  private surface: ClaudeModSurface | null = null;
   private background = new BackgroundPoller((b) => this.emit({ type: "background", background: b }));
   private permissionMode: string;
   private costBase = 0;
@@ -152,6 +155,9 @@ export class ClaudeAdapter implements ProviderAdapter {
     delete env.NODE_OPTIONS; // the inspector or ESM loaders break the CLI (as the SDK does)
     const p = new ClaudeProcess({ command: this.opts.command, args, cwd: this.opts.cwd, env });
     this.proc = p;
+    this.surface?.dispose();
+    const surface = new ClaudeModSurface((req, ms) => p.control(req, ms), (ev) => this.emit(ev), (m) => host.log(m));
+    this.surface = surface;
     p.onRecord = (r) => this.proc === p && this.onRecord(r);
     p.onOversized = (o) => {
       if (this.proc !== p) return;
@@ -164,6 +170,8 @@ export class ClaudeAdapter implements ProviderAdapter {
     p.onExit = (info) => {
       if (this.proc !== p) return;
       this.proc = null;
+      if (this.surface === surface) this.surface = null;
+      surface.dispose();
       this.stopTimers();
       host.emit({ type: "exited", code: info.code, signal: info.signal, stderrTail: info.stderr, ...(info.spawnError ? { spawnError: info.spawnError } : {}), command: this.opts.command });
     };
@@ -185,6 +193,8 @@ export class ClaudeAdapter implements ProviderAdapter {
     this.emitModel();
     if (this.effort) this.emit({ type: "thinking", level: this.effort });
     const other = liveHolder(id, p.pid);
+    // Its mods' panes and band, drawn in the chat (modui.ts). Not awaited: drawing never holds up the start.
+    if (modUiEnabled()) void surface.attach();
     if (other) this.emit({ type: "notice", level: "warning", source: "host", text: `This session is also open in another Claude Code process (pid ${other.pid}${other.kind ? `, ${other.kind}` : ""}). Two writers on one session can lose turns.` });
     return { streaming: false, hasHistory: Boolean(fork) || (resume && hasMessages(this.file)) };
   }
@@ -216,6 +226,8 @@ export class ClaudeAdapter implements ProviderAdapter {
     const p = this.proc;
     if (!p) return;
     this.proc = null;
+    this.surface?.dispose();
+    this.surface = null;
     this.stopTimers();
     this.costBase += this.mapper.totalCost;
     this.mapper.totalCost = 0;
@@ -264,6 +276,15 @@ export class ClaudeAdapter implements ProviderAdapter {
   // ---------------------------------------------------------------- records
 
   private onRecord(rec: ClaudeRecord): void {
+    // What mods draw and say (ui_invalidate, ui_panes, ui_toast…): UI only, never the run's progress.
+    if (rec.type === "system" && typeof rec.subtype === "string" && rec.subtype.startsWith("ui_")) {
+      try {
+        this.surface?.onSystem(rec);
+      } catch (e) {
+        this.host?.log(`mod ui: ${String(rec.subtype)}: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      }
+      return;
+    }
     this.lastRecordAt = Date.now();
     this.emit({ type: "heartbeat" });
     if (this.settleTimer && rec.type !== "control_response") {
@@ -649,6 +670,12 @@ export class ClaudeAdapter implements ProviderAdapter {
     await this.require().control({ subtype: "apply_flag_settings", settings: { effortLevel: level } }, 15_000);
     this.effort = level;
     this.emit({ type: "thinking", level });
+  }
+
+  async modUi(action: string, args: Record<string, unknown>): Promise<unknown> {
+    this.require();
+    if (!this.surface) throw new Error("Claude Code's mods aren't drawn in this chat");
+    return this.surface.act(action, args);
   }
 
   async setPermissionMode(mode: string): Promise<void> {
