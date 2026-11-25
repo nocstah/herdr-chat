@@ -42,7 +42,8 @@ const ERROR_SETTLE_MS = 60_000;
 const STUCK_MS = 10 * 60_000;
 const QUOTA_RE = /RESOURCE_EXHAUSTED|quota|\b429\b|exhausted your capacity|rate.?limit/i;
 const ROLE_NAME_RE = /^(?:narrator|monitor)(?:-\d+)?$/;
-const SCREENSHOT_LINE_RE = /^\s*Screenshot:\s*(\/[^\s|]+\.(?:png|jpe?g|webp|gif))(?:\s*\|\s*(.*))?$/i;
+const SCREENSHOT_LINE_RE = /^\s*(?:[-*]\s*)?Screenshot:\s*`?(\/[^\s`|]+\.(?:png|jpe?g|webp|gif))`?(?:\s*\|\s*(.+?))?\s*$/i;
+const MAX_POSTED_FRAMES = 24;
 
 const FRAME_MIMES: Record<string, string> = {
   ".png": "image/png",
@@ -371,6 +372,7 @@ interface RawMember {
   last_park_blocked_seq: number;
   killed: boolean;
   channels: string[];
+  all_channels: boolean;
   workspace_mode: string;
   workspace: string | null;
 }
@@ -385,15 +387,19 @@ function parseMembersFile(raw: Obj): { title: string; members: Map<string, RawMe
     const m = asObj(value);
     if (!m) continue;
     const convId = asStr(m.conversation_id, 64);
-    const channels = Array.isArray(m.channels)
-      ? m.channels.filter((c): c is string => typeof c === "string" && CHANNEL_RE.test(c))
-      : [DEFAULT_CHANNEL];
+    const role = asStr(m.role, 40) || (name === "coordinator" ? "coordinator" : "worker");
+    const hasExplicitChannels = Array.isArray(m.channels);
+    const rawChannels = hasExplicitChannels ? (m.channels as unknown[]) : [];
+    const allChannels = hasExplicitChannels
+      ? rawChannels.includes("*")
+      : role === "coordinator" || isRoleWorker(name, role);
+    const channels = rawChannels.filter((c): c is string => typeof c === "string" && CHANNEL_RE.test(c));
     if (!channels.includes(DEFAULT_CHANNEL)) channels.unshift(DEFAULT_CHANNEL);
     map.set(name, {
       name,
       conversation_id: UUID_RE.test(convId) ? convId : "",
       model: asStr(m.model, 120),
-      role: asStr(m.role, 40) || (name === "coordinator" ? "coordinator" : "worker"),
+      role,
       wake_mode: asStr(m.wake_mode, 40),
       wait_since: asNum(m.wait_since, 0),
       last_read_seq: asNum(m.last_read_seq, 0),
@@ -401,6 +407,7 @@ function parseMembersFile(raw: Obj): { title: string; members: Map<string, RawMe
       last_park_blocked_seq: asNum(m.last_park_blocked_seq, 0),
       killed: m.killed === true,
       channels,
+      all_channels: allChannels,
       workspace_mode: asStr(m.workspace_mode, 24) || "inherit",
       workspace: typeof m.workspace === "string" && m.workspace.length > 0 ? m.workspace.slice(0, 500) : null,
     });
@@ -475,6 +482,7 @@ interface ParsedStep {
   type: string;
   status: string;
   content: string;
+  error: string;
   thinking: string;
   created_at: string | null;
   tool_calls: Array<{ name: string; args: Obj }>;
@@ -502,43 +510,59 @@ function parseStepLine(line: string): ParsedStep | null {
     type: obj.type,
     status: asStr(obj.status, 40),
     content: typeof obj.content === "string" ? obj.content : "",
+    error: typeof obj.error === "string" ? obj.error : "",
     thinking,
     created_at: typeof obj.created_at === "string" ? obj.created_at : null,
     tool_calls,
   };
 }
 
+/** Antigravity logs `tool_calls[].args` values as JSON-encoded strings (e.g. `'"/path/file.ts"'`). */
+function unquoteArg(value: unknown, max = 240): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === "string") return parsed.slice(0, max);
+    } catch {
+      return trimmed.slice(1, -1).slice(0, max);
+    }
+  }
+  return trimmed.slice(0, max);
+}
+
 function summarizeToolCall(name: string, args: Obj): string {
-  const explicit = asStr(args.toolSummary, 100).trim() || asStr(args.toolAction, 100).trim();
-  if (explicit) return explicit;
+  if (name === "post_message" || name === "swarm_post") return "Posting to board";
+  if (name === "read_board" || name === "swarm_read") return "Reading board";
+  if (name === "swarm_wait") return "Waiting on board";
+  const explicit = unquoteArg(args.toolSummary, 100).trim() || unquoteArg(args.toolAction, 100).trim();
+  if (explicit) return explicit.replace(/\s+/g, " ");
   if (name === "run_command") {
-    const cmd = asStr(args.CommandLine ?? args.command, 80).replace(/\s+/g, " ").trim();
+    const cmd = unquoteArg(args.CommandLine ?? args.command, 80).replace(/\s+/g, " ").trim();
     return cmd ? `Run ${cmd}` : "Running command";
   }
   if (name === "read_file" || name === "view_file") {
-    const p = asStr(args.Path ?? args.AbsolutePath ?? args.file_path, 240);
+    const p = unquoteArg(args.Path ?? args.AbsolutePath ?? args.file_path, 240);
     return p ? `Read ${basename(p)}` : "Reading file";
   }
   if (name === "write_file" || name === "write_to_file") {
-    const p = asStr(args.Path ?? args.TargetFile ?? args.file_path, 240);
+    const p = unquoteArg(args.Path ?? args.TargetFile ?? args.file_path, 240);
     return p ? `Write ${basename(p)}` : "Writing file";
   }
   if (name === "edit_file" || name === "replace_file_content" || name === "multi_replace_file_content") {
-    const p = asStr(args.Path ?? args.TargetFile ?? args.file_path, 240);
+    const p = unquoteArg(args.Path ?? args.TargetFile ?? args.file_path, 240);
     return p ? `Edit ${basename(p)}` : "Editing file";
   }
-  if (name === "grep_search" || name === "find_by_name" || name === "search_web") {
-    const q = asStr(args.Query ?? args.query ?? args.Pattern ?? args.pattern, 60).trim();
+  if (name === "code_search" || name === "grep_search" || name === "find_by_name" || name === "search_web") {
+    const q = unquoteArg(args.Query ?? args.query ?? args.Pattern ?? args.pattern, 60).replace(/\s+/g, " ").trim();
     return q ? `Search ${q}` : "Searching";
   }
   if (name === "swarm") {
-    const action = asStr(args.action, 24);
-    const target = asStr(args.name, 24);
+    const action = unquoteArg(args.action, 24);
+    const target = unquoteArg(args.name, 24);
     return [action ? `swarm ${action}` : "swarm", target].filter(Boolean).join(" ");
   }
-  if (name === "swarm_post") return "Posting to board";
-  if (name === "swarm_read") return "Reading board";
-  if (name === "swarm_wait") return "Waiting on board";
   return name.replaceAll("_", " ");
 }
 
@@ -670,7 +694,7 @@ function inspectMemberTranscript(brainDir: string, m: RawMember, nowMs: number):
         activity = heading;
         break;
       }
-      break;
+      continue;
     }
   }
 
@@ -683,8 +707,9 @@ function inspectMemberTranscript(brainDir: string, m: RawMember, nowMs: number):
       at: loaded.mtimeMs,
     };
   } else if (newest.type === "ERROR_MESSAGE" || (newest.status === "ERROR" && ageMs >= ERROR_SETTLE_MS)) {
-    const snippet = newest.content.replace(/\s+/g, " ").trim().slice(0, 220) || "Encountered an error";
-    const isQuota = QUOTA_RE.test(newest.content);
+    const errText = newest.error || newest.content;
+    const snippet = errText.replace(/\s+/g, " ").trim().slice(0, 220) || "Encountered an error";
+    const isQuota = QUOTA_RE.test(errText);
     failure = {
       kind: isQuota ? "quota" : "error",
       message: snippet,
@@ -817,7 +842,7 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
   const messages: SwarmMessageView[] = [];
   const postsByMember = new Map<string, number>();
   const edgeMap = new Map<string, SwarmEdgeView>();
-  const frames: SwarmFrameView[] = [];
+  const frameMap = new Map<string, SwarmFrameView>();
   let headSeq = 0;
 
   if (loaded && loaded.text) {
@@ -840,7 +865,11 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
       const channel = CHANNEL_RE.test(asStr(raw.channel, 32)) ? asStr(raw.channel, 32) : DEFAULT_CHANNEL;
 
       if (!channelState.has(channel)) {
-        channelState.set(channel, { topic: "", archived: false, members: new Set(), count: 0, lastSeq: 0 });
+        const seeded = new Set<string>();
+        for (const m of members.values()) {
+          if (!m.killed && m.all_channels) seeded.add(m.name);
+        }
+        channelState.set(channel, { topic: "", archived: false, members: seeded, count: 0, lastSeq: 0 });
       }
       const chInfo = channelState.get(channel)!;
       chInfo.count += 1;
@@ -852,7 +881,11 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
         const op = ctrlRaw.op;
         const targetCh = ctrlRaw.channel;
         if (!channelState.has(targetCh)) {
-          channelState.set(targetCh, { topic: "", archived: false, members: new Set(), count: 0, lastSeq: 0 });
+          const seeded = new Set<string>();
+          for (const m of members.values()) {
+            if (!m.killed && m.all_channels) seeded.add(m.name);
+          }
+          channelState.set(targetCh, { topic: "", archived: false, members: seeded, count: 0, lastSeq: 0 });
         }
         const st = channelState.get(targetCh)!;
         const ctrlMembers = Array.isArray(ctrlRaw.members)
@@ -869,6 +902,14 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
         } else if (op === "unsubscribe") {
           for (const mName of ctrlMembers ?? [agent]) st.members.delete(mName);
         }
+        const nextMap = asObj(ctrlRaw.next);
+        if (nextMap && (op === "subscribe" || op === "unsubscribe")) {
+          for (const [mName, nextSet] of Object.entries(nextMap)) {
+            if (!MEMBER_RE.test(mName) || !Array.isArray(nextSet)) continue;
+            if (nextSet.includes("*") || nextSet.includes(targetCh)) st.members.add(mName);
+            else st.members.delete(mName);
+          }
+        }
         control = {
           op,
           channel: targetCh,
@@ -880,7 +921,13 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
       postsByMember.set(agent, (postsByMember.get(agent) ?? 0) + 1);
 
       const subscribers = new Map<string, Set<string>>();
-      for (const [k, v] of channelState) subscribers.set(k, v.members);
+      for (const [k, v] of channelState) {
+        const subs = new Set(v.members);
+        for (const m of members.values()) {
+          if (!m.killed && m.all_channels) subs.add(m.name);
+        }
+        subscribers.set(k, subs);
+      }
       const { mentions, all_targets, has_all, channel_mentions } = resolveMentions(text, agent, channel, members, subscribers);
 
       const senderMember = members.get(agent);
@@ -906,8 +953,12 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
       }
 
       const screenshots = extractScreenshots(brainDir, text);
-      for (const shot of screenshots) {
-        frames.push({ path: shot.path, seq, caption: shot.caption, agent });
+      // Only non-role worker posts feed the progress reel (coordinator briefs often quote the Screenshot: format).
+      if (senderMember && senderMember.role !== "coordinator" && !senderIsRole) {
+        for (const shot of screenshots) {
+          frameMap.delete(shot.path);
+          frameMap.set(shot.path, { path: shot.path, seq, caption: shot.caption, agent });
+        }
       }
 
       messages.push({
@@ -936,14 +987,17 @@ function parseBoard(brainDir: string, swarmDir: string, members: Map<string, Raw
     const subChannels = new Set(m.channels);
     let unread = 0;
     for (const msg of messages) {
+      if (msg.control) continue;
       if (msg.seq <= m.last_read_seq) continue;
       if (msg.agent === m.name) continue;
-      if (subChannels.has(msg.channel) || msg.mentions.includes(m.name) || msg.all_targets.includes(m.name)) {
+      if (m.all_channels || subChannels.has(msg.channel) || msg.mentions.includes(m.name) || msg.all_targets.includes(m.name)) {
         unread += 1;
       }
     }
     unreadByMember.set(m.name, unread);
   }
+
+  const frames = [...frameMap.values()].slice(-MAX_POSTED_FRAMES);
 
   const channels: SwarmChannelView[] = [...channelState.entries()]
     .map(([name, st]) => ({
@@ -1013,10 +1067,24 @@ function sanitizeRefs(value: unknown, headSeq: number): number[] {
   if (!Array.isArray(value)) return [];
   const out: number[] = [];
   for (const item of value) {
-    const n = typeof item === "number" ? item : typeof item === "string" ? Number(item.replace(/^#/, "")) : NaN;
+    let rawSeq: unknown = item;
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      rawSeq = (item as Obj).seq;
+    }
+    const n = typeof rawSeq === "number" ? rawSeq : typeof rawSeq === "string" ? Number(rawSeq.replace(/^#/, "")) : NaN;
     if (Number.isSafeInteger(n) && n >= 1 && (headSeq === 0 || n <= headSeq) && !out.includes(n)) out.push(n);
   }
   return out.slice(0, 12);
+}
+
+function firstMemberRef(value: unknown, memberNames: Set<string>): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  for (const item of value) {
+    const obj = asObj(item);
+    const name = obj && typeof obj.member === "string" ? obj.member.trim() : "";
+    if (name && memberNames.has(name)) return name;
+  }
+  return undefined;
 }
 
 function sanitizeWorkstream(raw: unknown, idx: number, headSeq: number): SwarmWorkstreamView | null {
@@ -1043,7 +1111,7 @@ function sanitizeWorkstream(raw: unknown, idx: number, headSeq: number): SwarmWo
   };
 }
 
-function sanitizeAttention(raw: unknown, idx: number, headSeq: number): SwarmAttentionItem | null {
+function sanitizeAttention(raw: unknown, idx: number, headSeq: number, memberNames: Set<string>): SwarmAttentionItem | null {
   const a = asObj(raw);
   if (!a) return null;
   const title = asStr(a.title, 200).trim();
@@ -1054,9 +1122,28 @@ function sanitizeAttention(raw: unknown, idx: number, headSeq: number): SwarmAtt
   const severity: SwarmAttentionSeverity = VALID_SEVERITIES.has(rawSev) ? rawSev : "med";
   const refs = sanitizeRefs(a.refs, headSeq);
   const actions: SwarmAttentionAction[] = [];
-  if (refs[0] !== undefined) {
+  if (Array.isArray(a.actions)) {
+    for (const actRaw of a.actions.slice(0, 6)) {
+      const act = asObj(actRaw);
+      if (!act || typeof act.type !== "string") continue;
+      const label = asStr(act.label, 60).trim();
+      if (act.type === "open_conv" && typeof act.target === "string" && memberNames.has(act.target)) {
+        actions.push({ kind: "open_member", label: label || `Open @${act.target}`, member: act.target });
+      } else if (act.type === "board_post") {
+        const seq = typeof act.target === "number" ? act.target : typeof act.target === "string" ? Number(act.target.replace(/^#/, "")) : NaN;
+        if (Number.isSafeInteger(seq) && seq >= 1 && (headSeq === 0 || seq <= headSeq)) {
+          actions.push({ kind: "jump_seq", label: label || `View #${seq}`, seq });
+        }
+      }
+    }
+  }
+  if (refs[0] !== undefined && !actions.some((act) => act.kind === "jump_seq" && act.seq === refs[0])) {
     actions.push({ kind: "jump_seq", label: `View #${refs[0]}`, seq: refs[0] });
   }
+  const member =
+    typeof a.member === "string" && memberNames.has(a.member)
+      ? a.member
+      : firstMemberRef(a.refs, memberNames);
   return {
     id: asStr(a.id, 64) || `attn-${idx + 1}`,
     kind,
@@ -1065,9 +1152,16 @@ function sanitizeAttention(raw: unknown, idx: number, headSeq: number): SwarmAtt
     why: asStr(a.why, 500).trim(),
     ...(typeof a.short === "string" && a.short.trim() ? { short: a.short.trim().slice(0, 160) } : {}),
     refs,
+    ...(member ? { member } : {}),
     source: "narrator",
     actions,
   };
+}
+
+function narratorRank(m: RawMember): number {
+  if (m.role !== "narrator" && !/^narrator(?:-\d+)?$/.test(m.name)) return -1;
+  const match = /-(\d+)$/.exec(m.name);
+  return match?.[1] ? Number(match[1]) : 1;
 }
 
 function parseNarratorView(
@@ -1078,13 +1172,19 @@ function parseNarratorView(
   headSeq: number,
   extraFrames: SwarmFrameView[],
 ): SwarmNarratorView {
-  let narratorMember: RawMember | null = null;
+  let liveNarrator: { member: RawMember; rank: number } | null = null;
+  let deadNarrator: { member: RawMember; rank: number } | null = null;
   for (const m of members.values()) {
-    if (!m.killed && (m.role === "narrator" || /^narrator(?:-\d+)?$/.test(m.name))) {
-      narratorMember = m;
-      break;
+    const rank = narratorRank(m);
+    if (rank < 0) continue;
+    if (m.killed) {
+      if (!deadNarrator || rank > deadNarrator.rank) deadNarrator = { member: m, rank };
+    } else if (!liveNarrator || rank > liveNarrator.rank) {
+      liveNarrator = { member: m, rank };
     }
   }
+  const narratorMember = (liveNarrator ?? deadNarrator)?.member ?? null;
+  const memberNames = new Set(members.keys());
   const candidates = [join(swarmDir, "view.json")];
   if (narratorMember && UUID_RE.test(narratorMember.conversation_id)) {
     candidates.push(join(brainDir, narratorMember.conversation_id, "swarm_view", "view.json"));
@@ -1097,7 +1197,7 @@ function parseNarratorView(
   }
 
   const empty: SwarmNarratorView = {
-    status: narratorMember ? (memberViews.get(narratorMember.name)?.status === "working" ? "active" : "idle") : "none",
+    status: narratorMember && !narratorMember.killed ? (memberViews.get(narratorMember.name)?.status === "working" ? "active" : "idle") : "none",
     member: narratorMember?.name ?? null,
     as_of_seq: null,
     updated_at: null,
@@ -1118,7 +1218,7 @@ function parseNarratorView(
   const stale = asOfSeq !== null && headSeq - asOfSeq >= 5;
   const status: SwarmNarratorView["status"] = stale
     ? "stale"
-    : narratorMember
+    : narratorMember && !narratorMember.killed
       ? memberViews.get(narratorMember.name)?.status === "working" ? "active" : "idle"
       : "idle";
 
@@ -1141,7 +1241,7 @@ function parseNarratorView(
   }
 
   const attention = Array.isArray(raw.attention)
-    ? raw.attention.map((item, idx) => sanitizeAttention(item, idx, headSeq)).filter((x): x is SwarmAttentionItem => x !== null)
+    ? raw.attention.map((item, idx) => sanitizeAttention(item, idx, headSeq, memberNames)).filter((x): x is SwarmAttentionItem => x !== null)
     : [];
   const workstreams = Array.isArray(raw.workstreams)
     ? raw.workstreams.map((item, idx) => sanitizeWorkstream(item, idx, headSeq)).filter((x): x is SwarmWorkstreamView => x !== null)
@@ -1163,7 +1263,7 @@ function parseNarratorView(
           ? t.workstreams.map((w, idx) => sanitizeWorkstream(w, idx, headSeq)).filter((x): x is SwarmWorkstreamView => x !== null)
           : [],
         attention: Array.isArray(t.attention)
-          ? t.attention.map((a, idx) => sanitizeAttention(a, idx, headSeq)).filter((x): x is SwarmAttentionItem => x !== null)
+          ? t.attention.map((a, idx) => sanitizeAttention(a, idx, headSeq, memberNames)).filter((x): x is SwarmAttentionItem => x !== null)
           : [],
       });
     }
@@ -1171,20 +1271,20 @@ function parseNarratorView(
 
   const milestones: SwarmNarratorView["milestones"] = [];
   if (Array.isArray(raw.milestones)) {
-    for (const item of raw.milestones.slice(0, 20)) {
+    for (const item of raw.milestones.slice(0, 30)) {
       const m = asObj(item);
       if (!m) continue;
-      const title = asStr(m.title, 200).trim();
-      if (title) milestones.push({ title, state: asStr(m.state, 32) || "pending", note: asStr(m.note, 300).trim() });
+      const title = asStr(m.title, 200).trim() || asStr(m.text, 200).trim();
+      if (title) milestones.push({ title, state: asStr(m.state, 32) || (m.text && !m.title ? "done" : "pending"), note: asStr(m.note, 300).trim() });
     }
   }
 
   const risks: SwarmNarratorView["risks"] = [];
   if (Array.isArray(raw.risks)) {
-    for (const item of raw.risks.slice(0, 20)) {
+    for (const item of raw.risks.slice(0, 30)) {
       const r = asObj(item);
       if (!r) continue;
-      const title = asStr(r.title, 200).trim();
+      const title = asStr(r.title, 200).trim() || asStr(r.text, 200).trim();
       if (title) risks.push({ title, severity: asStr(r.severity, 16) || "med", note: asStr(r.note, 300).trim() });
     }
   }
@@ -1458,7 +1558,7 @@ export function readSwarmMemberTranscript(
         kind: "error",
         ts: step.created_at,
         status: step.status || "ERROR",
-        text: step.content.trim().slice(0, 3000) || "Error",
+        text: (step.error || step.content).trim().slice(0, 3000) || "Error",
         error: true,
       });
       continue;
@@ -1492,7 +1592,7 @@ export function readSwarmMemberTranscript(
       continue;
     }
     if (step.type === "GENERIC") {
-      const text = step.content.trim();
+      const text = (step.content || step.error).trim();
       const isErr = step.status === "ERROR";
       const isBlocked = BLOCKED_STATUSES.has(step.status);
       if (text || isErr || isBlocked) {

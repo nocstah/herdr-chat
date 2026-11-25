@@ -1,7 +1,7 @@
 // Pure helpers for Antigravity `/swarm` state in Herdr Chat view.
 // Kept free of gpui-kit / herdr imports so Node unit tests exercise it directly.
 
-const SCREENSHOT_LINE_RE = /^\s*Screenshot:\s*\/[^\s|]+\.(?:png|jpe?g|webp|gif)(?:\s*\|\s*.*)?$/i;
+const SCREENSHOT_LINE_RE = /^\s*(?:[-*]\s*)?Screenshot:\s*`?\/[^\s`|]+\.(?:png|jpe?g|webp|gif)`?(?:\s*\|\s*.*)?$/i;
 const SEQ_REF_RE = /(?:^|[^a-zA-Z0-9_])#(\d{1,5})\b/g;
 
 /** Concise status counts + busiest worker's live activity for the docked swarm strip. */

@@ -519,6 +519,7 @@ test("swarm-logic pure UI helpers summarize, filter, group, and step replay accu
     assert.equal(filterSwarmMessages(snap, { search: "header name" }).length, 1);
 
     assert.equal(stripScreenshotLines("Hello\nScreenshot: /tmp/a.png | cap\nDone"), "Hello\nDone");
+    assert.equal(stripScreenshotLines("Hello\n- Screenshot: `/tmp/a.png` | cap\nDone"), "Hello\nDone");
     assert.deepEqual(extractSeqRefs("See #1 and #2 and #999", 3), [1, 2]);
 
     const attn = collectAttention(snap);
@@ -537,6 +538,183 @@ test("swarm-logic pure UI helpers summarize, filter, group, and step replay accu
     assert.equal(nextReplaySeq([1, 2, 3], 2, -1, 3), 1);
     assert.equal(nextReplaySeq([1, 2, 3], 1, 1, 3), 2);
     assert.equal(nextReplaySeq([1, 2, 3], 2, 1, 3), null);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("swarm reader handles real Antigravity JSON-quoted args, step.error, view.json object refs/text items, bulleted screenshots, and wildcard channels", () => {
+  clearSwarmReaderCache();
+  const d = mkdtempSync(join(tmpdir(), "herdr-chat-swarm-real-schema-"));
+  const dataDir = join(d, "agy-data");
+  try {
+    const swarmDir = join(dataDir, "brain", COORD_ID, ".system_generated", "swarm");
+    mkdirSync(swarmDir, { recursive: true });
+    const workerShot = join(dataDir, "brain", WORKER_A_ID, "after.png");
+    const coordExampleShot = join(dataDir, "brain", COORD_ID, "example.png");
+    mkdirSync(dirname(workerShot), { recursive: true });
+    writeFileSync(workerShot, PNG_BYTES);
+    writeFileSync(coordExampleShot, PNG_BYTES);
+
+    writeFileSync(
+      join(swarmDir, "members.json"),
+      JSON.stringify({
+        title: "Real AGY format",
+        members: {
+          coordinator: {
+            conversation_id: COORD_ID,
+            model: "gemini-2.5-pro",
+            role: "coordinator",
+            wake_mode: "mentions",
+            last_read_seq: 1,
+            killed: false,
+            channels: ["*"],
+          },
+          "api-1": {
+            conversation_id: WORKER_A_ID,
+            model: "gemini-2.5-pro",
+            role: "worker",
+            wake_mode: "working",
+            last_read_seq: 1,
+            killed: false,
+            channels: ["main", "ui"],
+          },
+          "db-1": {
+            conversation_id: WORKER_C_ID,
+            model: "gemini-2.5-flash",
+            role: "worker",
+            wake_mode: "working",
+            last_read_seq: 0,
+            killed: false,
+          },
+          "narrator-1": {
+            conversation_id: NARRATOR_ID,
+            model: "gemini-2.5-flash",
+            role: "narrator",
+            wake_mode: "anything",
+            last_read_seq: 3,
+            killed: false,
+          },
+        },
+      }),
+    );
+
+    writeJsonl(transcriptPath(dataDir, WORKER_A_ID), [
+      {
+        step_index: 0,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        tool_calls: [{ name: "edit_file", args: { Path: JSON.stringify("/repo/src/panel.tsx") } }],
+      },
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "RUNNING",
+        thinking: "continuing without bold heading",
+        tool_calls: [],
+      },
+    ]);
+
+    writeJsonl(transcriptPath(dataDir, WORKER_C_ID), [
+      {
+        step_index: 0,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        tool_calls: [{ name: "code_search", args: { Query: JSON.stringify("swarm_wait") } }],
+      },
+      {
+        step_index: 1,
+        type: "ERROR_MESSAGE",
+        status: "ERROR",
+        content: "",
+        error: "429 RESOURCE_EXHAUSTED: exhausted your capacity",
+      },
+    ]);
+
+    writeJsonl(transcriptPath(dataDir, COORD_ID), [
+      { step_index: 0, type: "PLANNER_RESPONSE", status: "DONE", tool_calls: [{ name: "post_message", args: { message: JSON.stringify("hi") } }] },
+    ]);
+
+    writeJsonl(join(swarmDir, "board.jsonl"), [
+      {
+        seq: 1,
+        agent: "coordinator",
+        text: `Brief: report progress using\nScreenshot: ${coordExampleShot} | template`,
+        time: "2026-11-24 10:00:00",
+        channel: "main",
+      },
+      {
+        seq: 2,
+        agent: "coordinator",
+        text: "Created #ui",
+        time: "2026-11-24 10:01:00",
+        channel: "ui",
+        control: { op: "create", channel: "ui", topic: "UI", members: ["api-1"] },
+      },
+      {
+        seq: 3,
+        agent: "api-1",
+        text: `@#ui updated card\n- Screenshot: \`${workerShot}\` | After polish`,
+        time: "2026-11-24 10:02:00",
+        channel: "ui",
+      },
+    ]);
+
+    writeFileSync(
+      join(swarmDir, "view.json"),
+      JSON.stringify({
+        version: 1,
+        as_of_seq: 3,
+        updated_at: "2026-11-24T10:02:10Z",
+        headline: "UI polish complete",
+        attention: [
+          {
+            id: "a1",
+            kind: "review",
+            severity: "high",
+            title: "Verify UI screenshot",
+            why: "api-1 posted final capture",
+            refs: [{ seq: 3 }, { member: "api-1" }],
+            actions: [
+              { type: "open_conv", target: "api-1", label: "Inspect api-1" },
+              { type: "board_post", target: 3, label: "Jump #3" },
+            ],
+          },
+        ],
+        workstreams: [
+          { id: "w1", title: "UI pass", owners: ["api-1"], state: "review", note: "Ready", refs: [{ seq: 3 }] },
+        ],
+        milestones: [{ id: "m1", text: "Card polish landed", refs: [{ seq: 3 }] }],
+        risks: [{ id: "r1", text: "db-1 rate limited", refs: [{ member: "db-1" }] }],
+      }),
+    );
+
+    const snap = readSwarmSnapshot(dataDir, COORD_ID);
+    assert.ok(snap);
+    const byName = new Map(snap.members.map((m) => [m.name, m]));
+
+    assert.equal(byName.get("api-1")?.activity, "Edit panel.tsx");
+    assert.equal(byName.get("coordinator")?.activity, "Posting to board");
+    assert.equal(byName.get("coordinator")?.unread, 1);
+    assert.equal(byName.get("db-1")?.failure?.kind, "quota");
+    assert.match(byName.get("db-1")?.failure?.message ?? "", /RESOURCE_EXHAUSTED/);
+
+    const tr = readSwarmMemberTranscript(dataDir, COORD_ID, "db-1");
+    assert.equal(tr?.events.find((e) => e.kind === "tool")?.tool_summary, "Search swarm_wait");
+    assert.match(tr?.events.find((e) => e.kind === "error")?.text ?? "", /RESOURCE_EXHAUSTED/);
+
+    assert.deepEqual(snap.frames.map((f) => f.path), [workerShot]);
+    assert.equal(snap.frames[0]?.caption, "After polish");
+
+    assert.deepEqual(snap.narrator.attention[0]?.refs, [3]);
+    assert.equal(snap.narrator.attention[0]?.member, "api-1");
+    assert.deepEqual(snap.narrator.attention[0]?.actions, [
+      { kind: "open_member", label: "Inspect api-1", member: "api-1" },
+      { kind: "jump_seq", label: "Jump #3", seq: 3 },
+    ]);
+    assert.deepEqual(snap.narrator.workstreams[0]?.refs, [3]);
+    assert.deepEqual(snap.narrator.milestones, [{ title: "Card polish landed", state: "done", note: "" }]);
+    assert.deepEqual(snap.narrator.risks, [{ title: "db-1 rate limited", severity: "med", note: "" }]);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
