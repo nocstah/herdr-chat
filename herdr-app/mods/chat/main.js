@@ -1416,7 +1416,15 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
+  /** Claude Code and Codex already render structured work/tool cards inline in the timeline,
+   *  so the live Activity log drawer is disabled for them and kept for TUI-driven providers (e.g. Antigravity). */
+  supportsActivity() {
+    const p = this.providerId();
+    return p !== "claude" && p !== "codex";
+  }
+
   toggleActivity(cx) {
+    if (!this.supportsActivity()) return;
     const entries = this.store.state.activityLog ?? [];
     if (!this.store.working() && !entries.length) {
       return this.flash("No activity info recorded for this turn", cx);
@@ -1705,7 +1713,7 @@ export default class HerdrChat extends View {
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
       else if (this.runAsk) this.runAsk = null;
       else if (this.store.working()) this.abort(cx);
-      else if (this.activityOpen && (this.store.state.activityLog?.length ?? 0) > 0) this.activityOpen = false;
+      else if (this.supportsActivity() && this.activityOpen && (this.store.state.activityLog?.length ?? 0) > 0) this.activityOpen = false;
       else if (this.peekMode) return this.closePeek();
     }
     this.debug.mark();
@@ -2800,7 +2808,7 @@ export default class HerdrChat extends View {
       width: this.width, colW: this.colW(), empty: this.isEmpty(),
       rows: space(rows).map((r) => ({ id: r.id, kind: r.kind, gap: r.gap, slot: r.slot, ...(r.kind === "group" ? group(r) : {}),
         ...(r.footer ? { footer: r.footer } : {}), ...(r.kind === "item" ? { item: r.item.kind } : {}) })),
-      activity: this.activity(), activityOpen: this.activityOpen, activityLogCount: (s.activityLog ?? []).length, lastCopy: this.lastCopy ?? null,
+      activity: this.activity(), activityOpen: this.supportsActivity() && this.activityOpen, activityLogCount: this.supportsActivity() ? (s.activityLog ?? []).length : 0, lastCopy: this.lastCopy ?? null,
       codeBlocks: [...this.codeSel].map(([key, v]) => ({ key, linesW: Math.round(v.linesW), viewW: Math.round(v.viewW), sel: v.sel, focused: Boolean(v.focus?.is_focused?.()) })), lastOpen: this.lastOpen ?? null, editorTerm: this.editorTerm ?? null, lastQuote: this.lastQuote ?? null,
       find: this.find ? { query: this.find.query, matches: this.find.matches.length, total: this.find.total, cur: this.find.cur, current: this.find.current?.id ?? null, rowId: this.find.rowId, busy: this.find.busy, label: this.find.label() } : null,
       statusesShown: this.visibleStatuses().map((x) => x.key), statusesHidden: this.prefs.hiddenStatuses, footerChips: this.footerChips ?? null, branch: this.branchShown ?? null, plusOpen: Boolean(this.plusOpen), dictation: this.dictation ?? null,
@@ -2906,11 +2914,12 @@ export default class HerdrChat extends View {
   }
 
   ctx(t) {
+    const hasActivity = this.supportsActivity();
     return {
       t, mono: monoFont(), expanded: this.expanded, full: this.full, cwd: this.cwd, colW: this.colW(), now: Date.now(),
       codeBg: t.background, line: alpha(t.border, 0.7), hover: this.hover, activity: this.activity(),
-      activityOpen: this.activityOpen, activityLogCount: (this.store.state.activityLog ?? []).length,
-      activityKey: keyHint("expandInfo"), toggleActivity: (cx) => this.toggleActivity(cx),
+      activityOpen: hasActivity && this.activityOpen, activityLogCount: hasActivity ? (this.store.state.activityLog ?? []).length : 0,
+      activityKey: hasActivity ? keyHint("expandInfo") : null, toggleActivity: hasActivity ? (cx) => this.toggleActivity(cx) : null,
       codeView: (key) => this.codeViews.get(key)?.entity ?? null,
       toggle: (id, cx) => this.toggle(id, cx), more: (id, cx) => this.more(id, cx),
       copy: (id, text, cx) => this.copy(id, text, cx), copied: (id) => this.copiedAt.has(id),
@@ -2990,7 +2999,7 @@ export default class HerdrChat extends View {
       .when(Boolean(menu), (e) => e.content(div().w(this.colW()).pb(8).child(menu)));
     const quotaCard = !s.dialog ? this.quotaCard(t) : null;
     // Its height is in the dump: an open menu must not change it (an overlay, not the flow).
-    const actEntries = Array.isArray(s.activityLog) ? s.activityLog : [];
+    const actEntries = this.supportsActivity() && Array.isArray(s.activityLog) ? s.activityLog : [];
     if (actEntries.length < this.activityScrollCount) this.activityScrollCount = actEntries.length;
     else if (this.activityOpen && this.activityFollow && actEntries.length > this.activityScrollCount) {
       this.activityScrollCount = actEntries.length;

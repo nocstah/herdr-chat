@@ -5,7 +5,7 @@
 // Extension-agnostic: statuses and widgets are shown by key, as sent.
 
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, Popover } from "gpui-base";
+import { v_flex, h_flex, Popover, Scrollbar } from "gpui-base";
 import { MOD, alpha, count, icon, money, monoFont, plural, providerIcon, spans, spansText, spinner, unwrapHc } from "./util.js";
 import { keyHint, withKey } from "./shortcuts.js";
 import { planProgress, planSteps } from "./cards.js";
@@ -348,7 +348,7 @@ function clockTime(ts) {
 // Expandable live activity/info scrollback above the composer (Ctrl+O), preserving
 // every status/thinking update and tool call of the current or most recent run.
 export function activityDrawer(v, s, t) {
-  if (!v.activityOpen) return null;
+  if (!v.supportsActivity?.() || !v.activityOpen) return null;
   const entries = Array.isArray(s.activityLog) ? s.activityLog : [];
   const working = v.store.working();
   if (!working && !entries.length) return null;
@@ -365,7 +365,7 @@ export function activityDrawer(v, s, t) {
         : isTool
           ? div().flex_none().pt(3).child(icon("wrench", 10).text_color(t.ansi4 ?? t.dim))
           : div().flex_none().pt(6).child(div().size(4).rounded(2).bg(newest ? f.bullet : t.dim));
-      return h_flex().id(`act-entry-${i}`).gap(8).items_start().text_size(12).line_height("17px")
+      return h_flex().id(`act-entry-${i}`).flex_none().gap(8).items_start().text_size(12).line_height("17px")
         .child(div().flex_none().font_family(mono).text_size(10.5).pt(1).text_color(t.dim).child(clockTime(e.ts)))
         .child(mark)
         .child(div().flex_1().min_w(0).whitespace_normal()
@@ -385,11 +385,15 @@ export function activityDrawer(v, s, t) {
       .hover((st) => st.bg(t.hover)).on_click((_e, cx) => { cx.stop_propagation(); v.control("activity:latest", cx); }).child("↓ Latest")))
     .when(Boolean(hint), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(hint)))
     .child(icon("chevron-down", 11).text_color(t.dim));
+  // Use plain overflow_y_scroll() + paired Scrollbar.vertical() rather than overflow_y_scrollbar():
+  // gpui-kit's Scrollable wrapper clones max_h() onto both the viewport and inner content box, which clamps
+  // content height to max_h and prevents scrolling when entries overflow.
   return v_flex().id("activity-drawer").w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
-    .child(v_flex().id("activity-log").max_h(240).overflow_y_scrollbar().track_scroll(v.activityScroll).px(10).py(8).gap(4)
-      .border_b_1().border_color(alpha(t.border, 0.6))
-      .on_scroll_wheel((e, cx) => { if (e.delta.y > 0 && v.activityFollow) { v.activityFollow = false; cx.notify(); } })
-      .children(rows))
+    .child(div().relative().w_full().border_b_1().border_color(alpha(t.border, 0.6))
+      .child(v_flex().id("activity-log").w_full().max_h(240).overflow_y_scroll().track_scroll(v.activityScroll).pl(10).pr(14).py(8).gap(4)
+        .on_scroll_wheel((e, cx) => { if (e.delta.y > 0 && v.activityFollow) { v.activityFollow = false; cx.notify(); } })
+        .children(rows))
+      .child(Scrollbar.vertical("activity-log").absolute().inset_0()))
     .child(head);
 }
 

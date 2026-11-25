@@ -793,6 +793,8 @@ export class Chat {
 
   /** Appends a live activity/status or tool line to the current run's scrollback history, collapsing progressive streaming prefixes. */
   private pushActivity(raw: string | null | undefined, kind: "status" | "tool" = "status"): void {
+    // Claude Code and Codex already render structured work/tool cards inline in the timeline.
+    if (this.adapter.id === "claude" || this.adapter.id === "codex") return;
     const text = raw?.trim();
     if (!text) return;
     const log = this.state.activityLog;
