@@ -1,4 +1,6 @@
 // Open a file a tool touched or an answer linked (visual-v2.md §6, "clickable file paths"):
+// 0. a page of this computer (.html …) that another mod shares a click opener for (files-mod.js pageOpener: Inapse
+//    Spaces opens it in the space's browser, its card turned to it); if that refuses, on as below, with why;
 // 1. Herdr's files viewer mod (`my-files` or `better-files`) when active in the layout:
 //    opens the file in a centre viewer tab (reusing an open tab or the preview tab, and
 //    jumping to `:line` / `#L10` / `#anchor` in `my-files`), on both local and remote spaces;
@@ -12,7 +14,7 @@
 
 import { appHome, exec, hc, layout, panes, readTextFile, run, setShared, shared, spaces } from "herdr";
 import { bare } from "./machines.js";
-import { findFilesMod, openInFilesMod, revealFolderInFilesPanel } from "./files-mod.js";
+import { findFilesMod, openInFilesMod, pageOpener, revealFolderInFilesPanel } from "./files-mod.js";
 
 const editorCache = new Map(); // machine ("" for this computer) → argv
 
@@ -45,8 +47,18 @@ export function openFolder(o) {
 }
 
 // {path (absolute), line, anchor, cwd, tab, space, machine (the space's, null for this computer)}
-//   → {how: "my-files" | "better-files" | "herdr-nvim" | "editor", terminal?}
+//   → {how: "browser" | "my-files" | "better-files" | "herdr-nvim" | "editor", terminal?, refused?}
+// refused: why the page's opener didn't take it (its last line of complaint), when it was tried.
 export async function openFile(o) {
+  const page = pageOpener(o, herdrApi);
+  if (!page) return openInViewer(o);
+  const r = await exec(page.command[0], [...page.command.slice(1), o.path], { timeout: 60000 }).catch((e) => ({ code: 1, stdout: "", stderr: String(e?.message ?? e) }));
+  if (r.code === 0) return { how: "browser" };
+  const refused = String(r.stderr || r.stdout || "").trim().split("\n").pop() || `${page.name} could not open it`;
+  return { ...(await openInViewer(o)), refused };
+}
+
+async function openInViewer(o) {
   const filesMod = findFilesMod(layout());
   if (filesMod) {
     const opened = openInFilesMod(filesMod, o, herdrApi);
