@@ -774,17 +774,18 @@ export class ClaudeTerminalAdapter implements ProviderAdapter {
   }
 
   /** Typed into the terminal, as the person would; Claude Code takes a message mid-run and queues it itself. */
-  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }> {
+  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean; noBang?: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Claude Code's terminal has ended.", true);
     if (!this.registry()) throw new Error("Claude Code isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
     // Typing would answer its question (hc send refuses too).
     if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
     // `!command`: Claude Code's bash mode runs it in the agent's shell, and the agent sees what it
-    // printed; it comes back as a Bash card (sessions.ts bashEvents). Only at rest, as Ctrl+! does.
-    const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
+    // printed; it comes back as a Bash card (sessions.ts bashEvents). Only at rest, single-line, as Ctrl+! does.
+    const trimmed = p.text.trim();
+    const bang = !p.noBang && !/[\r\n]/.test(trimmed) && trimmed.length <= 4000 ? /^!\s*([^\s=!].*)$/.exec(trimmed) : null;
     if (bang && this.status === "working") throw new Error(BUSY);
     // A command is the TUI's (its screen, or a run it starts itself): what it writes shows as it comes.
-    const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
+    const command = Boolean(bang) || /^\/\S/.test(trimmed);
     if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
     const files = p.images.length ? this.sendImages(p.images) : [];
     const words = p.text.trim() ? p.text : files.length ? "" : p.text;

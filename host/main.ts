@@ -98,8 +98,9 @@ async function serve(a: Args, extra: { hint?: string; warning?: string | null } 
   // --attach <terminal>: the terminal view. The agent is the person's own TUI in that terminal;
   // this host reads its session and types into it (providers/claude|codex|antigravity/terminal.ts), never runs it.
   const hcBin = process.env.HERDR_CHAT_HC || "hc";
+  const imageDir = join(stateDir, "images", chatId);
   const adapter = view && provider === "antigravity"
-    ? new AntigravityTerminalAdapter({ cwd, args: [], log, command: agentCommand ?? "agy", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent") })
+    ? new AntigravityTerminalAdapter({ cwd, args: [], log, command: agentCommand ?? "agy", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent"), imageDir })
     : view && provider === "codex"
       ? new CodexTerminalAdapter({ cwd, args: [], log, command: "codex", terminal: view, hc: hcBin, sentDir: join(stateDir, "sent") })
       : view

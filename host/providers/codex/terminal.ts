@@ -678,14 +678,15 @@ export class CodexTerminalAdapter implements ProviderAdapter {
   }
 
   /** Typed into the terminal, as the person would; mid-run Codex takes it into the turn. */
-  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }> {
+  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean; noBang?: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Codex's terminal has ended.", true);
     if (!this.codexRuns()) throw new Error("Codex isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
     if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
-    // `!command`: Codex runs it in a shell of its own and shows it; only at rest, as Ctrl+! does.
-    const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
+    // `!command`: Codex runs it in a shell of its own and shows it; only at rest, single-line, as Ctrl+! does.
+    const trimmed = p.text.trim();
+    const bang = !p.noBang && !/[\r\n]/.test(trimmed) && trimmed.length <= 4000 ? /^!\s*([^\s=!].*)$/.exec(trimmed) : null;
     if (bang && this.status === "working") throw new Error(BUSY);
-    const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
+    const command = Boolean(bang) || /^\/\S/.test(trimmed);
     if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
     if (p.images.length && !this.opts.sentDir) throw new Error(NO_IMAGES);
     // Images: saved as files and named in the message, which Codex opens with its image viewer (sent-images.ts).

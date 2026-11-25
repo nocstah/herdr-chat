@@ -54,6 +54,7 @@ import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { activityDrawer, backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
+import { SwarmPanel, swarmDrawer, swarmModal, swarmStrip } from "./swarm.js";
 import { bgDetailLines, bgTicking } from "./background.js";
 import { openFile, openFolder } from "./files.js";
 import { Composer } from "./composer.js";
@@ -78,7 +79,7 @@ const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
 // The terminal view: commands whose result shows in the chat (its records have it); any other opens a screen in the TUI.
 // Not /usage or /cost (its alias): Claude Code's opens its Settings screen on the Usage tab and writes nothing to the
 // transcript, and Codex's /usage shows in the terminal only.
-const VIEW_IN_PLACE = new Set(["compact", "clear", "context", "init", "review", "memory", "export", "new", "plan", "goal", "grill-me", "learn", "boost", "btw"]);
+const VIEW_IN_PLACE = new Set(["compact", "clear", "context", "init", "review", "memory", "export", "new", "plan", "goal", "grill-me", "learn", "boost", "swarm", "btw"]);
 
 // A model provider's name for the model picker's scope tabs: its id with the dashes
 // out. The agent names its providers (two Claude Code logins are two providers, so an
@@ -121,6 +122,7 @@ export default class HerdrChat extends View {
     this.activityFollow = true;
     this.activityScroll = ScrollHandle.new();
     this.activityScrollCount = 0;
+    this.swarm = new SwarmPanel(this);
     this.picker = null;
     this.handoff = null;
     this.transcript = false;
@@ -403,6 +405,7 @@ export default class HerdrChat extends View {
       if (this.redirectFocus(cx)) changed = true;
     }
     if (this.view && this.viewTick(me, cx)) changed = true;
+    if (this.swarm?.tick(cx)) changed = true;
     // The background strip's times move on once a second while something runs; an opened row reads its detail again.
     const bgTasks = this.store.state.background?.tasks ?? [];
     if (this.bgOpenId && !bgTasks.some((x) => x.id === this.bgOpenId)) {
@@ -1006,6 +1009,12 @@ export default class HerdrChat extends View {
       this.composer.clear();
       return this.openThinkingPicker(cx);
     }
+    if (this.view && m?.[1] === "swarm" && !m[2].trim() && !hasAttachments && this.providerId() === "antigravity") {
+      this.pastePreviewId = null;
+      this.composer.clear();
+      if (this.store.state.swarm) return this.swarm.openTab("overview", cx);
+      return this.swarm.openStart(cx);
+    }
     if (m && !hasAttachments) {
       const cmd = this.commandList().find((c) => c.name === m[1]);
       if (cmd?.handler === "client") {
@@ -1022,9 +1031,11 @@ export default class HerdrChat extends View {
     this.pastePreviewId = null;
     this.composer.clear();
     this.timeline.toBottom();
-    // The terminal view: `!command` is the TUI's shell command (Claude Code's bash mode), shown by its own records (a card).
-    const bang = Boolean(this.view) && !hasAttachments && /^!\s*[^\s=!]/.test(rawText.trim());
-    this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}) }, cx, (d, cx) => {
+    // The terminal view: single-line `!command` (not pasted blocks) is the TUI's shell command (bash mode), shown by its own records.
+    const trimmedRaw = rawText.trim();
+    const bang = Boolean(this.view) && !hasAttachments && !/[\r\n]/.test(trimmedRaw) && trimmedRaw.length <= 4000 && /^!\s*[^\s=!]/.test(trimmedRaw);
+    const noBang = pastes.length > 0;
+    this.fire("send", { text, ...(images.length ? { images } : {}), mode, ...(bang ? { echo: false } : {}), ...(noBang ? { noBang: true } : {}) }, cx, (d, cx) => {
       this.lastSend = { text, disposition: d?.disposition ?? null, at: Date.now() };
       // The terminal view: a command typed into the TUI opens its screen there (as Ovis peeks the terminal),
       // and the chat comes back once the TUI is at its prompt again.
@@ -1979,6 +1990,7 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_stop") this.abort(cx);
     else if (a === "herdrchat_escape") {
       if (this.pastePreviewId) return this.closePastePreview(cx);
+      if (this.swarm?.open || this.swarm?.startOpen) return this.swarm.close(cx);
       if (m) this.composer.menu = null;
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
       else if (this.runAsk) this.runAsk = null;
@@ -2673,6 +2685,7 @@ export default class HerdrChat extends View {
       case "dialog:cancel": return this.answer("cancel", null, cx);
       case "quota:dismiss": this.dismissedQuotaId = this.store.state.quotaWarning?.id ?? null; break;
       default:
+        if (what.startsWith("swarm:")) return this.swarm?.control(what.slice(6), cx);
         if (what.startsWith("bg:open:")) return this.bgOpen(what.slice(8), cx);
         if (what.startsWith("bg:stop:")) return this.bgStop(what.slice(8), cx);
         if (what.startsWith("bg:output:")) {
@@ -2976,6 +2989,7 @@ export default class HerdrChat extends View {
   close() {
     if (this.viewer || this.termbar) return;
     this.activityScroll?.release?.();
+    this.swarm?.release?.();
     owners.delete(this.uid);
     // A sub-agent's host is its parent's: closing its peek or its tab leaves it running.
     if (this.sub || hostTerminal(this.chat)?.parent) {
@@ -3085,6 +3099,7 @@ export default class HerdrChat extends View {
       plan: s.plan?.steps?.length ? { ...planProgress(s.plan), steps: s.plan.steps.map((x) => [x.text, x.status]), open: Boolean(this.planOpen) } : null,
       background: s.background ? { rows: (this.bgShown ?? []).map((r) => [r.kind, r.name, r.state, r.meta]), shells: s.background.shells, monitors: s.background.monitors, open: !this.bgClosed,
         opened: this.bgOpenId ?? null, detail: this.bgDetail ? { kind: this.bgDetail.kind ?? null, state: this.bgDetail.state ?? null, lines: bgDetailLines(this.bgDetail).length, stoppable: Boolean(this.bgDetail.stoppable), error: this.bgDetail.error ?? null } : null } : null,
+      swarm: this.swarm?.dump(s.swarm) ?? null,
       dialog: s.dialog ? { id: s.dialog.id, method: s.dialog.method, title: s.dialog.title, value: this.dialog.field ? this.dialog.value() : null,
         ...this.dialog.form?.debugState() } : null,
       quotaWarning: s.quotaWarning ?? null,
@@ -3327,7 +3342,7 @@ export default class HerdrChat extends View {
       .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
       .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
-      .children([widgetTray(this, above, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
+      .children([widgetTray(this, above, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t)].filter(Boolean))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
       // Under the card, as the Claude app has it: the folder and its branch; the model, its effort and the mode.
@@ -3383,6 +3398,8 @@ export default class HerdrChat extends View {
     if (floats) el = el.relative().child(div().absolute().top(8).right(14).child(this.viewBar(t)));
     const modal = this.pastePreviewModal(t);
     if (modal) el = el.relative().child(modal);
+    const swModal = swarmModal(this, this.store.state, t, this.ctx(t));
+    if (swModal) el = el.relative().child(swModal);
     return this.debug?.fps ? el.relative().child(fps_monitor()) : el;
   }
 

@@ -30,6 +30,14 @@ import type { AgyModelGroup } from "./models.ts";
 import { agyAtPrompt, agyMovesTo, agyPromptKey, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
 import { sendAgyBang } from "./bang.ts";
+import {
+  buildSwarmActionPrompt,
+  materializeSwarmFrames,
+  parseSwarmAction,
+  readSwarmMemberTranscript,
+  readSwarmSnapshot,
+} from "./swarm.ts";
+import type { SwarmActionRequest, SwarmMemberTranscript, SwarmSnapshot } from "./swarm.ts";
 import { ANTIGRAVITY_TOOLS } from "./tools.ts";
 import { imageLines, pruneImages, saveImages, withImageLines } from "../sent-images.ts";
 import { waitForPrompt } from "../prompt-wait.ts";
@@ -124,6 +132,7 @@ const VIEW_COMMANDS: [string, string][] = [
   ["grill-me", "Clarify requirements before starting"],
   ["learn", "Capture corrections as rules or skills"],
   ["boost", "Run multi-agent deep reasoning"],
+  ["swarm", "Launch or manage a parallel multi-agent swarm"],
   ["credits", "View remaining AI credits (in the terminal)"],
   ["help", "Antigravity's help (in the terminal)"],
   ["exit", "Quit Antigravity"],
@@ -157,6 +166,8 @@ export type AntigravityTerminalOptions = AdapterOptions & {
   io?: AgyBindIO;
   /** Where sent images are saved for `agy` to read via read_file (sent-images.ts). */
   sentDir?: string;
+  /** Where host-generated images and materialized swarm screenshots go (<stateDir>/images/<chat>). */
+  imageDir?: string;
   /** Optional model-list fetcher override for tests. */
   fetchModels?: () => Promise<AgyModelGroup[]>;
 };
@@ -213,6 +224,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private abortRequested = false;
   private sawWorkingScreen = false;
   private workTimer: NodeJS.Timeout | null = null;
+  private swarmEtag: string | null = null;
   private catalog: AgyModelGroup[] = [];
   private catalogAt = 0;
   private catalogLoading: Promise<AgyModelGroup[]> | null = null;
@@ -449,6 +461,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.stopWorkStatus();
     this.settle();
     this.clearQueued();
+    this.clearSwarm();
     this.emit({ type: "notice", level: "warning", source: "host", text: "Antigravity's terminal has ended." });
   }
 
@@ -553,6 +566,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
             this.quitSaid = true;
             this.stopWorkStatus();
             this.settle();
+            this.clearSwarm();
             this.emit({ type: "notice", level: "info", source: "host", text: "Antigravity quit in its terminal. Start it there again and this view follows it." });
           }
         } else {
@@ -577,8 +591,10 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.abortRequested = false;
       this.sawWorkingScreen = false;
       this.clearQueued();
+      this.swarmEtag = null;
       if (!first) this.awaitingHistory = true;
       this.emit({ type: "session", id: b.id, file: b.path, ...(first ? {} : { reload: true }) });
+      this.syncSwarm(true);
     } catch (e) {
       this.log(`binding: ${(e as Error).message}`);
     } finally {
@@ -1065,6 +1081,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.tailTimer.unref();
     this.sessionTimer = setInterval(() => {
       void this.checkSession();
+      this.syncSwarm();
       if (this.status !== "working" && this.status !== "blocked" && !this.answering) void this.syncFromScreen();
     }, SESSION_MS());
     this.sessionTimer.unref();
@@ -1130,13 +1147,14 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     return out;
   }
 
-  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }> {
+  async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean; noBang?: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
     if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
     if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
-    const bang = /^!\s*([^\s=!][\s\S]*)$/.exec(p.text.trim());
+    const trimmed = p.text.trim();
+    const bang = !p.noBang && !/[\r\n]/.test(trimmed) && trimmed.length <= 4000 ? /^!\s*([^\s=!].*)$/.exec(trimmed) : null;
     if (bang && this.status === "working") throw new Error(BUSY);
-    const command = Boolean(bang) || /^\/\S/.test(p.text.trim());
+    const command = Boolean(bang) || /^\/\S/.test(trimmed);
     if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
     if (bang) {
       // `hc send` bracketed-pastes `!cmd`, which `agy` treats as a literal LLM prompt instead of
@@ -1326,6 +1344,68 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   async setName(): Promise<void> {
     throw new Error(NOT_HERE);
+  }
+
+  // ---------------------------------------------------------------- native /swarm
+
+  private clearSwarm(): void {
+    if (this.swarmEtag === null) return;
+    this.swarmEtag = null;
+    this.emit({ type: "swarm", swarm: null });
+  }
+
+  private swarmModelList(): string[] {
+    const out: string[] = [];
+    for (const g of this.catalog) {
+      if (g.defaultId) out.push(g.defaultId);
+      else if (g.baseId) out.push(g.baseId);
+    }
+    return out;
+  }
+
+  private syncSwarm(force = false): SwarmSnapshot | null {
+    if (this.disposed || !this.live || !this.dataDir || !this.conversationId) {
+      if (!this.live) this.clearSwarm();
+      return null;
+    }
+    const snap = readSwarmSnapshot(this.dataDir, this.conversationId, Date.now(), this.swarmModelList());
+    if (!snap) {
+      this.clearSwarm();
+      return null;
+    }
+    if (this.opts.imageDir) {
+      materializeSwarmFrames(snap, this.dataDir, this.opts.imageDir);
+    }
+    if (force || snap.etag !== this.swarmEtag) {
+      this.swarmEtag = snap.etag;
+      this.emit({ type: "swarm", swarm: snap });
+    }
+    return snap;
+  }
+
+  swarmRefresh(): SwarmSnapshot | null {
+    return this.syncSwarm(true);
+  }
+
+  swarmMember(member: string, limit?: number): SwarmMemberTranscript | null {
+    if (!this.dataDir || !this.conversationId) return null;
+    return readSwarmMemberTranscript(this.dataDir, this.conversationId, member, { limit });
+  }
+
+  async swarmAction(raw: SwarmActionRequest): Promise<void> {
+    if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
+    if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
+    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    const req = parseSwarmAction(raw);
+    const prompt = buildSwarmActionPrompt(req);
+    this.log(`swarm action: ${req.action}`);
+    const r = await this.hc(["send", "--json", this.opts.terminal, prompt], 70_000);
+    if (r.code !== 0) {
+      throw new Error(`Couldn't send swarm action: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
+    }
+    setTimeout(() => {
+      if (!this.disposed) this.syncSwarm();
+    }, 400).unref();
   }
 
   private hc(args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {

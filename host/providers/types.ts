@@ -7,8 +7,9 @@
 // locks and the built-in slash commands.
 import type { ToolDetail, UserSource, StopReason, Usage, NoticeItem, PlanStep } from "../timeline.ts";
 import type { ToolMap } from "../tools.ts";
+import type { SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest } from "./antigravity/swarm.ts";
 
-export type { ToolDetail, UserSource, StopReason, Usage, PlanStep };
+export type { ToolDetail, UserSource, StopReason, Usage, PlanStep, SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest };
 
 /** Provider ids. The core treats this as an opaque string; these are the known ones. */
 export type ProviderId = "pi" | "claude" | "codex" | "antigravity" | (string & {});
@@ -234,6 +235,8 @@ export type NormalizedEvent = Common &
       }
     /** What the agent runs in the background now (Claude Code's agents panel: claude/background.ts); null: nothing. */
     | { type: "background"; background: Background | null }
+    /** Live Antigravity `/swarm` state; null when no swarm is active for this conversation. */
+    | { type: "swarm"; swarm: SwarmSnapshot | null }
     /** The agent's plan: it replaces the chat's plan. No steps: the plan is gone. */
     | { type: "plan"; parent?: undefined; explanation?: string; steps: PlanStep[] }
     /** A subagent's plan: a card in the group of its `parent`, replaced in place per `key`. */
@@ -367,7 +370,7 @@ export interface ProviderAdapter {
 
   // ---- turns
   /** `id`: the host's id for this message; the adapter puts it on the message's echo (`user_message.clientId`) and queue entries. */
-  prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean }): Promise<{ disposition: Disposition }>;
+  prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean; noBang?: boolean }): Promise<{ disposition: Disposition }>;
   /** Drops queued messages and returns their text (for the composer). Called before `abort`. */
   clearQueue(): Promise<string[]>;
   /**
@@ -394,6 +397,12 @@ export interface ProviderAdapter {
   backgroundDetail?(id: string): BackgroundDetail | null;
   /** Optional: stops a background task that `backgroundDetail` calls stoppable. Resolves false when it can't. */
   backgroundStop?(id: string): boolean;
+  /** Optional: reads a swarm member's bounded live transcript. */
+  swarmMember?(member: string, limit?: number): SwarmMemberTranscript | null;
+  /** Optional: forces a fresh swarm snapshot read. */
+  swarmRefresh?(): SwarmSnapshot | null;
+  /** Optional: runs a validated swarm steering/lifecycle action via the attached agent. */
+  swarmAction?(req: SwarmActionRequest): Promise<void>;
   answer(askId: string, answer: AskAnswer): void;
 
   // ---- queries

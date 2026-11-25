@@ -63,6 +63,8 @@ function sleep(ms: number): Promise<void> {
 export async function sendAgyBang(opts: SendAgyBangOptions): Promise<void> {
   const cmd = opts.command.replace(/\x1b\[20[01]~/g, "").trim();
   if (!cmd) throw new Error("Empty shell command.");
+  if (/[\r\n]/.test(cmd)) throw new Error("Multi-line commands cannot run in Antigravity bash mode.");
+  if (cmd.length > 4000) throw new Error("Command is too long for Antigravity bash mode.");
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const shellWaitMs = opts.shellWaitMs ?? 1_500;
   const pollMs = opts.pollMs ?? 50;

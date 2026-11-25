@@ -27,8 +27,9 @@ import { Renderer, diffLines } from "./render.ts";
 import { presentTool, prettyArgs } from "./tools.ts";
 import { AgentError } from "./providers/types.ts";
 import type {
-  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background, QuotaWarning,
+  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background, QuotaWarning, SwarmSnapshot,
 } from "./providers/types.ts";
+import { parseSwarmAction, writeSwarmGraphSvg } from "./providers/antigravity/swarm.ts";
 
 export type { ModelInfo, Capabilities };
 
@@ -161,6 +162,8 @@ export type ChatState = {
   activityText: string | null;
   /** Chronological history of live activity/status and tool lines for the current (or most recent) run. */
   activityLog: ActivityEntry[];
+  /** Live Antigravity `/swarm` snapshot for this conversation; null when no swarm is active. */
+  swarm: SwarmSnapshot | null;
 };
 
 export type ActivityEntry = { text: string; ts: number; kind?: "status" | "tool" };
@@ -312,7 +315,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [],
+      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [], swarm: null,
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -831,8 +834,11 @@ export class Chat {
       case "background":
         this.set({ background: ev.background });
         return;
+      case "swarm":
+        this.set({ swarm: ev.swarm });
+        return;
       case "exited":
-        if (this.state.background) this.set({ background: null });
+        if (this.state.background || this.state.swarm) this.set({ background: null, swarm: null });
         this.onExit(ev);
         return;
     }
@@ -1219,7 +1225,7 @@ export class Chat {
   /** `onRejected`: the agent refused the message after it was sent (the timeline item is gone again). */
   /** `echo: false`: no message of the person's on the timeline and no run of the chat's: what the agent writes
    *  for it shows instead (the terminal view's `!command`, a Bash card from Claude Code's own records). */
-  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string; echo?: boolean }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
+  async send(args: { text?: string; images?: string[]; mode?: string; source?: UserSource; from?: string; echo?: boolean; noBang?: boolean }, opts: { onRejected?: () => void } = {}): Promise<{ disposition: string }> {
     const text = String(args.text ?? "");
     const imagePaths = Array.isArray(args.images) ? args.images.map(String) : [];
     if (!text.trim() && !imagePaths.length) throw new Error("Nothing to send");
@@ -1289,7 +1295,7 @@ export class Chat {
         }
       }
     };
-    const reply = agent.prompt({ id, text: message, images, mode, busy: working }).then((d) => {
+    const reply = agent.prompt({ id, text: message, images, mode, busy: working, ...(args.noBang ? { noBang: true } : {}) }).then((d) => {
       if (isCommand) this.clearCommandHint();
       if (d.disposition === "handled") {
         undo();
@@ -1496,7 +1502,8 @@ export class Chat {
     t.load(this.historyWithSkills(events));
     // Extension statuses and widgets are UI state; they survive a session change like in the TUI.
     this.replaceTimeline(t);
-    this.set({ usage: null, editorText: null, phase: "idle", activityText: null, activityLog: [] });
+    this.set({ usage: null, editorText: null, phase: "idle", activityText: null, activityLog: [], swarm: null });
+    this.adapter.swarmRefresh?.();
     this.refreshCommands();
     this.refreshStats();
   }
@@ -1823,7 +1830,7 @@ export class Chat {
   async op(name: string, a: Rec): Promise<unknown> {
     switch (name) {
       case "send":
-        return this.send({ text: a.text, images: a.images, mode: a.mode, source: a.source === "external" ? "external" : "composer", from: typeof a.from === "string" ? a.from : undefined, echo: a.echo !== false });
+        return this.send({ text: a.text, images: a.images, mode: a.mode, source: a.source === "external" ? "external" : "composer", from: typeof a.from === "string" ? a.from : undefined, echo: a.echo !== false, noBang: a.noBang === true });
       case "abort":
         return this.abort();
       // `message`, not `id`: `id` is the request's own.
@@ -1911,6 +1918,34 @@ export class Chat {
         const id = String(a.task ?? "");
         if (!this.adapter.backgroundStop) throw new Error(`${this.agent} can't stop that from here`);
         return { stopped: this.adapter.backgroundStop(id) };
+      }
+      case "swarm_refresh": {
+        const swarm = this.adapter.swarmRefresh ? this.adapter.swarmRefresh() : this.state.swarm;
+        return { swarm: swarm ?? null };
+      }
+      case "swarm_member": {
+        const member = String(a.member ?? "");
+        const limit = typeof a.limit === "number" && a.limit > 0 ? a.limit : undefined;
+        return { detail: this.adapter.swarmMember?.(member, limit) ?? null };
+      }
+      case "swarm_action": {
+        const agent = this.requireAgent();
+        if (!agent.swarmAction) throw new Error(`${this.agent} doesn't support swarm actions from here`);
+        const req = parseSwarmAction(a);
+        await agent.swarmAction(req);
+        return { ok: true, action: req.action };
+      }
+      case "swarm_graph": {
+        const swarm = this.state.swarm ?? this.adapter.swarmRefresh?.() ?? null;
+        if (!swarm) return { graph: null };
+        const replaySeq = typeof a.replaySeq === "number" && Number.isSafeInteger(a.replaySeq) ? a.replaySeq : null;
+        const graph = writeSwarmGraphSvg(
+          swarm,
+          { replaySeq, expandAll: a.expandAll === true, hideInactive: a.hideInactive === true },
+          this.render.theme,
+          this.opts.imageDir ?? null,
+        );
+        return { graph };
       }
       case "handoff":
         return this.handoff();
