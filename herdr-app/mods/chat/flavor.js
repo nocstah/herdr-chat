@@ -480,3 +480,12 @@ export function toolVerb(title, d) {
   if (!sp) return null;
   return { ...sp, kind: sp.verb === "Waiting" ? "wait" : d?.type ?? VERB_KIND[sp.verb] ?? "generic" };
 }
+
+// A picture left in prose (inside a sentence, or one whose file the host didn't find: protocol
+// v3.11) as a link with its words: the markdown view draws no pictures and would drop it whole.
+// Code spans keep what they show.
+export function picturesAsLinks(text) {
+  if (!text.includes("![")) return text;
+  return text.split(/(`+[^`\n]*`+)/).map((part, i) => (i % 2 ? part
+    : part.replace(/!\[((?:[^\]\\\n]|\\.)*)\]\(/g, (_m, alt) => `[${alt || "picture"}](`))).join("");
+}

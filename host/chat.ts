@@ -393,7 +393,7 @@ export class Chat {
     this.opts = opts;
     this.adapter = opts.adapter;
     this.timeline = this.newTimeline();
-    this.render = new Renderer(opts.imageDir ?? null, (id) => this.timeline.rawOutput.get(id), opts.log);
+    this.render = new Renderer(opts.imageDir ?? null, (id) => this.timeline.rawOutput.get(id), opts.log, opts.cwd);
     this.files = new FileIndex(opts.cwd);
     this.catalog = new SessionCatalog(opts.adapter.sessions, opts.cwd, () => this.state.sessionFile);
     this.state = {

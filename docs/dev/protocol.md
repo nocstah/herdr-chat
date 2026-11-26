@@ -192,7 +192,10 @@ type Block =
   | { type: "mermaid"; source: string; open: boolean;
       svg?: string;                 // abs path of the rendered SVG (closed blocks only), themed by `set_theme`
       ascii?: Span[][];             // box-drawing fallback (when SVG fails)
-      error?: string };
+      error?: string }
+  | { type: "image"; alt: string; src: string;   // v3.11: a picture on a line of its own; alt and destination as written
+      path: string;                 // abs path of the host's copy (under <stateDir>/images/<chat>)
+      size: { w: number; h: number } | null };   // a raster's pixel size; null for an SVG (the mod reads its viewBox)
 
 type ToolDetail =
   | { type: "bash"; command: string; exitCode?: number | null }
@@ -782,3 +785,12 @@ A pane is named `pane`, never `id` (the request's own). `handled:false` redraws.
 - The room each site has, in cells, goes back with `viewport` on every resize, for the mods' `e.viewport`.
 
 Not drawn: a Client (a desktop surface module, which needs a web runtime) and Shader programs (their Svg stands in); placed rows in the timeline (`ui_placed`) and the message, tool and spinner rewrites; a mod's theme, sounds and backdrop (Claude Code applies those to the desktop and mobile surfaces only).
+
+## v3.11: pictures in answers (additive)
+
+A line of an answer that holds nothing but pictures, `![words](destination)` one or more (what `agentctl show --inline` prints, one a line), is an `image` block per picture, in place, when the host finds every file the line names (`host/blocks.ts` `pictureLine`, `host/render.ts` `picture`):
+- The destination: an absolute path, `~/…`, `file://…`, or a path relative to the chat's folder; `<…>` holds one with spaces; %-escapes are decoded (and the path as written is tried after). No URL of another scheme: the host fetches nothing.
+- The file: PNG, JPEG, GIF or WebP (by its extension and its header, which gives `size`) or SVG (an `<svg` in it), at most 32 MiB. The host copies it to `<stateDir>/images/<chat>/picture-<sha1 of path, size, mtime>/<its name>` (the viewer's title is the name), since `image()` draws only files under the app's home and a host on another machine's are mirrored from there (as other images, at most 6 MB). The folder is emptied when the host starts, as for every image of the chat, and the copies are made again from history.
+- Anything else stays prose, as the answer wrote it: a picture inside a sentence, an indented code line, one whose file is missing or isn't a picture, the last line of an answer still streaming (it can grow), lines inside fences.
+
+The mod (`rich.js` `picture`) draws the copy at its own size, at most the column's width and 560 px tall, in a rounded border; a click opens the viewer and the words are its tooltip. Another machine's copy on its way here holds its box; one that can't be drawn shows as a link, the destination as written.
