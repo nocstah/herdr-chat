@@ -120,6 +120,13 @@ export const skillToken = (s) => ({ id: `skill:${s.command}`, text: `/${s.comman
 // An image chip's thumbnail: a fixed box, so the composer keeps its height while the image loads.
 const THUMB = { w: 64, h: 48 };
 
+// The text's line height: a whole number of screen pixels at the common display scales (24 px is 30 at
+// 1.25x, 36 at 1.5x, 40 at 1.67x, 48 at 2x). Herdr's growing text box is as tall as its lines, and the app
+// snaps each box's edges to screen pixels; with 14 px text's own line height (~22.65 px) the box could land
+// a sliver short of its lines, and every cursor move then scrolled that sliver and back: the text bobbed a
+// pixel on each arrow key (a fix for the text box itself went to Herdr).
+const LINE_H = "24px";
+
 export class Composer {
   // `skills()`: the chat's skill commands, [{command, name}] (main.js).
   // `onRemoveChip(chip, cx)`: a chip's ✕.
@@ -458,8 +465,8 @@ export class Composer {
     for (const a of ACTIONS) wrap = wrap.on_action(a, (_e, cx) => c.action(a, cx));
     if (COPY_KEYS.length) wrap = wrap.on_action("herdrchat_copy", (_e, cx) => this.copyKey(cx));
     wrap = wrap.on_action("herdrchat_paste", (_e, cx) => this.pasteKey(cx));
-    const field = Textarea.new(this.ta).w_full().text_size(14).text_color(t.foreground).bg(alpha(t.background, 0));
-    wrap = wrap.child((compact ? field.pl(16).pr(4).py(11) : field.px(16).pt(14).pb(8))
+    const field = Textarea.new(this.ta).w_full().text_size(14).line_height(LINE_H).text_color(t.foreground).bg(alpha(t.background, 0));
+    wrap = wrap.child((compact ? field.pl(16).pr(4).py(10) : field.px(16).pt(13).pb(8))
       .token((tok, _cx) => skillPillEl(tok, t)));
     const working = c.working;
     const typed = Boolean(this.value.trim() || this.chips.length);
