@@ -43,7 +43,8 @@ export type DiffLine = { kind: "hunk" | "add" | "del" | "ctx" | "meta"; old?: nu
 export type Block =
   | { type: "markdown"; text: string }
   | { type: "code"; lang: string | null; code: string; open: boolean; lines?: Span[][] }
-  | { type: "mermaid"; source: string; open: boolean; svg?: string; ascii?: Span[][]; error?: string };
+  | { type: "mermaid"; source: string; open: boolean; svg?: string; ascii?: Span[][]; error?: string }
+  | { type: "image"; alt: string; src: string; path: string; size: ImageSize | null };
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number | null };
 export type AssistantItem = Nested & {
   id: string; kind: "assistant"; ts: number; text: string; streaming: boolean; stopReason?: StopReason; error?: string; autonomous?: true;

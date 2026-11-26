@@ -1,12 +1,16 @@
 // Rich rendering of items for the wire (protocol.md v2): assistant blocks with
-// highlighted code and mermaid SVGs, tool `outputLines`, edit `diffLines`.
+// highlighted code, mermaid SVGs and pictures (v3.11), tool `outputLines`, edit `diffLines`.
 // `prepare` runs right before items are sent (flush, snapshot, history), so
 // streaming text is re-split at most once per 50 ms flush. Closed code blocks
 // and mermaid renders are cached by content hash.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { splitBlocks } from "./blocks.ts";
+import { imageSize } from "./imagesize.ts";
+import type { ImageSize } from "./imagesize.ts";
 import { highlight, langForPath, plainLines, MAX_LINES } from "./highlight.ts";
 import { renderMermaid, DEFAULT_THEME, DIAGRAM_STYLE } from "./mermaid.ts";
 import type { Theme } from "./mermaid.ts";
@@ -19,6 +23,38 @@ const CACHE_MAX = 400;
 const MAX_SPANS = 60_000;
 /** Text in an edit's diffLines. */
 const MAX_DIFF_TEXT = 256 * 1024;
+/** A picture an answer shows, past which its line stays a link. */
+export const MAX_PICTURE = 32 * 1024 * 1024;
+/** The pictures image() draws: PNG, JPEG, GIF and WebP (checked by their header) and SVG. */
+const PICTURE_EXT = /\.(?:png|jpe?g|gif|webp|svg)$/i;
+
+/**
+ * The files a picture's destination may name on this machine, the likeliest first: an absolute
+ * path, `~/…`, `file://…` or one relative to the chat's folder, its %-escapes decoded
+ * (`agentctl show --inline` escapes spaces and parentheses) and, if that changed it, as written.
+ * None for a URL of another scheme (http, data…): the host fetches nothing.
+ */
+export function pictureFiles(src: string, cwd: string | null): string[] {
+  const s = src.trim();
+  if (/^file:\/\//i.test(s)) {
+    try {
+      return [fileURLToPath(s)];
+    } catch {
+      return [];
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return [];
+  let decoded = s;
+  try {
+    decoded = decodeURIComponent(s);
+  } catch {}
+  const out: string[] = [];
+  for (const p of decoded === s ? [s] : [decoded, s]) {
+    const abs = p.startsWith("~/") ? join(homedir(), p.slice(2)) : isAbsolute(p) ? p : cwd ? resolve(cwd, p) : null;
+    if (abs) out.push(abs);
+  }
+  return out;
+}
 
 function hash(...parts: string[]): string {
   const h = createHash("sha1");
@@ -193,17 +229,21 @@ export class Renderer {
   private themeKey = hash(JSON.stringify(DEFAULT_THEME));
   private code = new Lru<Span[][]>(CACHE_MAX);
   private mermaid = new Lru<{ svg?: string; ascii?: Span[][]; error?: string }>(CACHE_MAX);
+  private pictures = new Lru<{ path: string; size: ImageSize | null } | null>(CACHE_MAX);
   private seen = new WeakMap<Item, Seen>();
   private dir: string | null;
+  private cwd: string | null;
   private raw: (itemId: string) => string | undefined;
   private log: (msg: string) => void;
 
   /**
    * @param dir where mermaid SVGs go (<stateDir>/images/<chat>); null: no SVGs, only ASCII art
    * @param raw a tool item's output with its ANSI escapes (the tail is enough)
+   * @param cwd the chat's folder, for a picture named by a relative path
    */
-  constructor(dir: string | null, raw: (itemId: string) => string | undefined = () => undefined, log: (msg: string) => void = () => {}) {
+  constructor(dir: string | null, raw: (itemId: string) => string | undefined = () => undefined, log: (msg: string) => void = () => {}, cwd: string | null = null) {
     this.dir = dir;
+    this.cwd = cwd;
     this.raw = raw;
     this.log = log;
   }
@@ -240,8 +280,8 @@ export class Renderer {
     const s = this.seen.get(item);
     if (s && s.text === item.text && s.streaming === item.streaming && s.theme === this.themeKey) return;
     this.seen.set(item, { text: item.text, streaming: item.streaming, theme: this.themeKey });
-    item.blocks = splitBlocks(item.text, item.streaming).map((b): Block => {
-      if (b.type === "markdown") return b;
+    item.blocks = splitBlocks(item.text, item.streaming, (src) => this.picture(src)).map((b): Block => {
+      if (b.type === "markdown" || b.type === "image") return b;
       if (b.type === "code") {
         if (b.open) return { ...b, lines: highlight(b.code, b.lang, false).lines };
         const key = hash(b.lang ?? "", b.code);
@@ -283,6 +323,52 @@ export class Renderer {
     } else out = { ascii: r.ascii, error: r.error };
     this.mermaid.set(key, out);
     return out;
+  }
+
+  /**
+   * A picture an answer names on a line of its own (blocks.ts), as a copy in `dir`: image() draws
+   * only files under the app's home, and a host on another machine's are mirrored from there. Null
+   * (the line stays as written) when no file is found, it isn't a picture image() draws, it is over
+   * MAX_PICTURE, or there is no `dir`. A copy is made once per file content (path, size, mtime).
+   */
+  private picture(src: string): { path: string; size: ImageSize | null } | null {
+    if (!this.dir) return null;
+    for (const file of pictureFiles(src, this.cwd)) {
+      if (!PICTURE_EXT.test(file)) continue;
+      let st;
+      try {
+        st = statSync(file);
+      } catch {
+        continue;
+      }
+      if (!st.isFile() || st.size > MAX_PICTURE) return null;
+      const key = hash(file, String(st.size), String(st.mtimeMs));
+      const hit = this.pictures.get(key);
+      if (hit !== undefined && (!hit || existsSync(hit.path))) return hit;
+      const out = this.copyPicture(file, key);
+      this.pictures.set(key, out);
+      return out;
+    }
+    return null;
+  }
+
+  private copyPicture(file: string, key: string): { path: string; size: ImageSize | null } | null {
+    try {
+      const bytes = readFileSync(file);
+      const svg = /\.svg$/i.test(file);
+      // An SVG is sized by the mod (its viewBox); a raster's size comes from its header, which also says it is one.
+      const size = svg ? null : imageSize(bytes);
+      if (svg ? !bytes.includes("<svg") : !size) return null;
+      // Its own name (the viewer's title says it) in a folder of its own per file content.
+      const folder = join(this.dir!, `picture-${key}`);
+      const path = join(folder, basename(file));
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      if (!existsSync(path)) writeFileSync(path, bytes, { mode: 0o600 });
+      return { path, size };
+    } catch (e) {
+      this.log(`picture: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
   }
 
   private prepareTool(item: ToolItem): void {

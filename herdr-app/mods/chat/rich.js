@@ -1,5 +1,5 @@
 // Rich content (visual-v2.md §3): an assistant message's blocks (markdown,
-// highlighted code cards, mermaid diagrams), diffs with a line-number
+// highlighted code cards, mermaid diagrams, pictures), diffs with a line-number
 // gutter, highlighted file excerpts and ANSI-colored command output.
 // The host splits and highlights (protocol.md v2 `Block`, `syn:` spans);
 // without blocks a message is one markdown block, as in v1.
@@ -11,7 +11,7 @@ import { alpha, codeLine, homeRel, icon, monoFont, plural, spinner } from "./uti
 import { SPACE } from "./space.js";
 import { linkPaths } from "./paths.js";
 import { oneLine, runsInCode } from "./bang.js";
-import { decorateInlineCode, flavorPalette, mdChunks, parseInlineSpans, stripHeading } from "./flavor.js";
+import { decorateInlineCode, flavorPalette, mdChunks, parseInlineSpans, picturesAsLinks, stripHeading } from "./flavor.js";
 
 export { mdChunks };
 
@@ -189,7 +189,7 @@ function renderChunk(id, p, onLink, t, f) {
  * @param {any} [t]
  */
 export function markdown(id, text, onLink, t) {
-  const parts = mdChunks(text || " ");
+  const parts = mdChunks(picturesAsLinks(text || " "));
   const f = t ? flavorPalette(t) : null;
   if (parts.length === 1) return renderChunk(id, parts[0], onLink, t, f);
   return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(renderChunk(`${id}-${j}`, p, onLink, t, f))));
@@ -219,6 +219,7 @@ export function blocks(it, c) {
       if (runs.length) el = v_flex().min_w(0).gap(6).child(el).children(runs.map((r, j) => runBar(`${key}:${j}`, r, runs.length > 1, c)));
     }
     else if (b.type === "mermaid") el = mermaid(key, b, c);
+    else if (b.type === "image") el = picture(key, b, c);
     else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink, c.t);
     return div().pt(gap).child(el);
   }));
@@ -339,6 +340,29 @@ function mermaid(key, b, c) {
   return v_flex().w_full().rounded(10).overflow_hidden().border_1().border_color(t.border).bg(c.codeBg)
     .child(head).child(body)
     .when(src, (e) => e.child(div().border_t_1().border_color(c.line).child(codeCard(`${key}:src`, "mermaid", b.source ?? "", null, false, c))));
+}
+
+// A picture the answer shows on a line of its own (protocol v3.11): the host's copy of the file at
+// its own size, at most the column's width and PICTURE_MAX_H tall, enlarged on a click; its words
+// (the alt text) in a tooltip. Another machine's, still on its way here: its box, so the row keeps its
+// height. One that can't be drawn: the line as a link, as the answer wrote it.
+const PICTURE_MAX_H = 560;
+function picture(key, b, c) {
+  const t = c.t;
+  const rel = c.imageRel ? c.imageRel(b.path) : homeRel(b.path, appHome());
+  const size = b.size ?? (rel && /\.svg$/i.test(b.path ?? "") ? c.svgSize(b.path) : null);
+  const room = Math.max(40, (c.colW ?? 640) - 2);
+  let w = Math.min(room, size?.w ?? room);
+  let h = size?.w ? Math.round((w * size.h) / size.w) : Math.round((w * 10) / 16);
+  if (h > PICTURE_MAX_H) { w = Math.max(1, Math.round((w * PICTURE_MAX_H) / h)); h = PICTURE_MAX_H; }
+  w = Math.max(1, w); h = Math.max(1, h);
+  if (!rel && c.imagePending?.(b.path)) return div().id(`pic-${key}`).w(w + 2).h(h + 2).rounded(10).border_1().border_color(t.border).bg(t.hover);
+  if (!rel) return markdown(`md-pic-${key}`, `[${(b.alt || "picture").replace(/[[\]]/g, "\\$&")}](<${b.src}>)`, c.onLink, t);
+  let el = h_flex().id(`pic-${key}`).flex_none().cursor_pointer().rounded(10).overflow_hidden().border_1().border_color(t.border)
+    .on_click((_e, cx) => c.enlarge(b.path, size, cx))
+    .child(image(rel).w(w).h(h));
+  if (b.alt) el = el.tooltip(b.alt);
+  return h_flex().child(el);
 }
 
 // Styled lines (tool output, file excerpts) in a mono box, with an optional

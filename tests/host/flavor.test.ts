@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, mdChunks, parseTableRow, splitToolVerb, toolVerb, stripHeading, parseInlineSpans } from "../../herdr-app/mods/chat/flavor.js";
+import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, mdChunks, parseTableRow, splitToolVerb, toolVerb, stripHeading, parseInlineSpans, picturesAsLinks } from "../../herdr-app/mods/chat/flavor.js";
 import { CODEX_PERMISSION_MODES } from "../../host/providers/codex/adapter.ts";
 
 const DARK = {
@@ -252,4 +252,11 @@ test("stripHeading and parseInlineSpans keep inline code, emphasis and clickable
     { text: " and " },
     { strike: true, text: "old" },
   ]);
+});
+
+test("picturesAsLinks: a picture left in prose shows as a link with its words; code spans keep theirs", () => {
+  assert.equal(picturesAsLinks("see ![shot](/tmp/a.png) here"), "see [shot](/tmp/a.png) here");
+  assert.equal(picturesAsLinks("![](/tmp/b.png)"), "[picture](/tmp/b.png)");
+  assert.equal(picturesAsLinks("`![kept](/c.png)` but ![y](/y.png)"), "`![kept](/c.png)` but [y](/y.png)");
+  assert.equal(picturesAsLinks("[a link](u) and !important"), "[a link](u) and !important");
 });
