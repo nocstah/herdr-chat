@@ -28,10 +28,14 @@ function barGlassBg(t) {
   const under = /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? parseInt(bg.slice(7, 9), 16) / 255 : null;
   if (under === null) return t.chrome;
   const cfg = shared(GLASS);
-  if (!cfg || cfg.enabled === false || cfg.areas?.bars?.enabled !== true) return t.chrome;
-  const raw = typeof cfg.areas.bars.opacity === "number" ? cfg.areas.bars.opacity / 100 : 0.78;
-  const target = Math.max(0, Math.min(1, raw));
   const rgb = String(t.chrome ?? "#000000").slice(0, 7);
+  if (!cfg || cfg.enabled === false) return rgb;
+  const isLight = (0.2126 * parseInt(bg.slice(1, 3), 16) + 0.7152 * parseInt(bg.slice(3, 5), 16) + 0.0722 * parseInt(bg.slice(5, 7), 16)) / 255 > 0.5;
+  if (isLight && cfg.light === false) return rgb;
+  const src = isLight && cfg.lightTheme ? cfg.lightTheme : cfg;
+  if (src.areas?.bars?.enabled !== true) return rgb;
+  const raw = typeof src.areas.bars.opacity === "number" ? src.areas.bars.opacity / 100 : (isLight ? 0.88 : 0.78);
+  const target = Math.max(0, Math.min(1, raw));
   if (target >= 0.995) return rgb;
   if (target <= under + 0.002) return "#00000000";
   const add = Math.max(0, Math.min(1, (target - under) / (1 - under)));
