@@ -17,10 +17,26 @@ import { h_flex } from "gpui-base";
 import { focused, keys, run, shared, terminals, theme, window as appWindow } from "herdr";
 
 const VIEWS = "herdr-chat.views";
+const GLASS = "herdr.glass";
 // Herdr's names for the agents with a chat view → how the switch names them.
 const AGENTS = { claude: "Claude Code", "claude-code": "Claude Code", codex: "Codex", antigravity: "Antigravity", agy: "Antigravity" };
 const agentName = (t) => [t?.program?.key, t?.app, t?.status?.app, t?.report?.app, t?.agent].map((a) => AGENTS[a]).find(Boolean) ?? null;
 const stop = (_e, cx) => cx.stop_propagation();
+
+function barGlassBg(t) {
+  const bg = String(t.background ?? "");
+  const under = /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? parseInt(bg.slice(7, 9), 16) / 255 : null;
+  if (under === null) return t.chrome;
+  const cfg = shared(GLASS);
+  if (!cfg || cfg.enabled === false || cfg.areas?.bars?.enabled !== true) return t.chrome;
+  const raw = typeof cfg.areas.bars.opacity === "number" ? cfg.areas.bars.opacity / 100 : 0.78;
+  const target = Math.max(0, Math.min(1, raw));
+  const rgb = String(t.chrome ?? "#000000").slice(0, 7);
+  if (target >= 0.995) return rgb;
+  if (target <= under + 0.002) return "#00000000";
+  const add = Math.max(0, Math.min(1, (target - under) / (1 - under)));
+  return rgb + Math.round(add * 255).toString(16).padStart(2, "0");
+}
 
 // Herdr's binding for the flip ("ctrl-shift-j"), as Herdr writes keys for people.
 function flipKey() {
@@ -55,7 +71,7 @@ export default class ChatSwitch extends View {
 
   render() {
     const t = theme();
-    const bar = h_flex().id("chat-switch").size_full().pl(2).pr(10).items_center().justify_start().bg(t.chrome).border_b(1).border_color(t.border);
+    const bar = h_flex().id("chat-switch").size_full().pl(2).pr(10).items_center().justify_start().bg(barGlassBg(t)).border_b(1).border_color(t.border);
     const it = this.target();
     if (!it) return bar;
     const live = it.term.state === "live";
@@ -72,7 +88,7 @@ export default class ChatSwitch extends View {
     const seg = (id, icon, name, on) => {
       const tip = on ? `${name} · showing` : `Switch to ${name.toLowerCase()}${key ? ` · ${key}` : ""}`;
       return h_flex().id(id).flex_none().h(26).px(8).items_center().justify_center().rounded(6).tooltip(tip).accessibility_label(tip)
-        .bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+        .bg(on ? t.selected : "#00000000").text_color(on ? t.foreground : t.muted)
         .when(!on, (e) => e.cursor_pointer().hover((x) => x.bg(t.hover).text_color(t.foreground)).on_click(flip))
         .child(svg(`mods/chat/icons/${icon}.svg`).size(14));
     };
