@@ -77,6 +77,11 @@ import { assembleMessageWithPastes, canUnpackInline, createPastedChip, formatCou
 import { failedSendSummary, mergeDraftIntoComposer, removeFailedSend, retainFailedSend } from "./unsent.js";
 
 const COL_MAX = 800;
+// Glass (a see-through theme): behind the text, a column of the theme's background, so much of it in all
+// (the window's own tint included) that the conversation reads over a busy wallpaper; it fades out over
+// GLASS_FADE px either side into the sides, which keep only the window's tint.
+const GLASS_TEXT = 0.8;
+const GLASS_FADE = 120;
 const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before the app's next read (beforeAppRead)
 let VIEWS = 0;
 
@@ -777,8 +782,39 @@ export default class HerdrChat extends View {
    * their solid colors either way.
    */
   chatBg(t) {
+    return this.glassTint(t) === null ? t.background : "#00000000";
+  }
+
+  /** How much of a see-through theme's background Herdr's window already lays down, or null when it is solid. */
+  glassTint(t) {
     const bg = String(t.background ?? "");
-    return /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? "#00000000" : bg;
+    return /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? parseInt(bg.slice(7, 9), 16) / 255 : null;
+  }
+
+  /**
+   * Glass: the column behind the text (GLASS_TEXT in all over the window's tint), fading out at its sides
+   * so the wallpaper stays clear beside it. A layer behind the whole chat, still while the timeline scrolls.
+   */
+  glassColumn(t) {
+    const under = this.glassTint(t);
+    if (under === null) return null;
+    const rgb = String(t.background).slice(0, 7);
+    const add = Math.max(0, Math.min(1, 1 - (1 - GLASS_TEXT) / (1 - under)));
+    /** @param {number} a @returns {`#${string}`} */
+    const hex = (a) => /** @type {`#${string}`} */ (rgb + Math.round(a * 255).toString(16).padStart(2, "0"));
+    // The fade: 2 px strips easing out (smoothstep). Not a gradient: a path's alpha adds to the window's
+    // instead of blending (a fade to the column came out opaque at its inner edge).
+    const n = GLASS_FADE / 2;
+    const strip = (i) => {
+      const x = (i + 0.5) / n;
+      return div().flex_none().w(2).h_full().bg(hex(add * x * x * (3 - 2 * x)));
+    };
+    const fade = (out) => Array.from({ length: n }, (_, i) => strip(out ? n - 1 - i : i));
+    return div().absolute().top(0).bottom(0).left(0).right(0).overflow_hidden().flex().justify_center()
+      .child(h_flex().flex_none().h_full()
+        .children(fade(false))
+        .child(div().flex_none().h_full().w(Math.min(COL_MAX, this.width || COL_MAX)).bg(hex(add)))
+        .children(fade(true)));
   }
 
   // The layout's top bar has the switch (the installer's, mods/chat-switch): the view leaves out its own.
@@ -3730,7 +3766,9 @@ export default class HerdrChat extends View {
     // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();
+    const glass = this.glassColumn(t);
     let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(this.chatBg(t)).text_color(t.foreground).text_size(13)
+      .relative().children(glass ? [glass] : [])
       .on_size_change((sz, cx) => {
         if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); this.reportModRoom(cx); cx.notify(); }
         // A hidden pane gets no room: shown or hidden, by this app's flip or another's, the face is read again now.
@@ -3771,7 +3809,9 @@ export default class HerdrChat extends View {
       .child(div().relative().flex_1().min_h(0).flex().flex_col()
         .child(timeline)
         // Scrolled up: a band of background at the bottom edge, so ↓ Latest sits on it, never on text.
-        .when(!this.timeline.sticky, (e) => e.child(div().absolute().bottom(0).left(0).right(0).h(16).bg(alpha(t.background, 0.92)))))
+        // Over glass, only across the column: the sides stay clear.
+        .when(!this.timeline.sticky, (e) => e.child(div().absolute().bottom(0).left(0).right(0).flex().justify_center()
+          .child(div().h(16).w_full().when(Boolean(glass), (b) => b.max_w(COL_MAX)).bg(alpha(t.background, 0.92))))))
       // ↓ Latest sits on the timeline's bottom edge, over the gap above the composer, not the text.
       // pt: room between the last output and the composer (feedback row 5)
       .child(div().relative().flex_none().pt(20).pb(6).child(this.column(bottom))
