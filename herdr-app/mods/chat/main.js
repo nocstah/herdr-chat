@@ -75,13 +75,9 @@ import { MAC } from "./platform.js";
 import { pickFiles } from "./file-picker.js";
 import { assembleMessageWithPastes, canUnpackInline, createPastedChip, formatCount, pasteChipTitle, rebalancePasteModes } from "./paste.js";
 import { failedSendSummary, mergeDraftIntoComposer, removeFailedSend, retainFailedSend } from "./unsent.js";
+import { GLASS_SHARED, glassTint, resolveChatGlass } from "./glass.js";
 
 const COL_MAX = 800;
-// Glass (a see-through theme): behind the text, a column of the theme's background, so much of it in all
-// (the window's own tint included) that the conversation reads over a busy wallpaper; it fades out over
-// GLASS_FADE px either side into the sides, which keep only the window's tint.
-const GLASS_TEXT = 0.8;
-const GLASS_FADE = 120;
 const APP_READ_AFTER_ECHO = 380; // ms from seeing a label echo to just before the app's next read (beforeAppRead)
 let VIEWS = 0;
 
@@ -164,6 +160,16 @@ export default class HerdrChat extends View {
     this.width = 0;
     this.homeDir = home();
     this.prefs = loadPrefs();
+    this.glassFile = null;
+    if (shared(GLASS_SHARED) === undefined) {
+      cx.spawn(async (cx) => {
+        try {
+          const text = await fs.readFile(`${appHome()}/glass.json`, "utf8");
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === "object") { this.glassFile = parsed; cx.notify(); }
+        } catch {}
+      });
+    }
     this.place = null; // {pane, tab, space}: this chat's own pane, from the layout document (place.js)
     this.placeFrom = null; // "doc" | "guess" (no document to read)
     this.hide = null; // the host's pane in the layout document: {terminal, pane, hidden, …} (keepHostHidden)
@@ -774,42 +780,46 @@ export default class HerdrChat extends View {
     setShared(VIEW_PANES, next);
   }
 
+  /** Live glass settings: shared("herdr.glass") while present, else <appHome>/glass.json read at start. */
+  glassCfg() {
+    const live = shared(GLASS_SHARED);
+    return live && typeof live === "object" ? live : this.glassFile;
+  }
+
   /**
-   * The chat's background: the theme's, unless the theme is see-through. A glass setup (a layout
-   * with root `window_blur`, a theme whose `colors.background` has alpha) has Herdr tint the whole
-   * window once, so a live wallpaper (Kaze) moves behind the conversation: the chat then paints
-   * nothing of its own (a second tint would darken it twice). Cards, bubbles and the composer keep
-   * their solid colors either way.
+   * The chat's glass plan: background color and column scrim parameters from the theme and live glass config.
+   * When the theme is solid, returns the theme's background and no column.
    */
+  glassPlan(t) {
+    return resolveChatGlass(t.background, this.glassCfg());
+  }
+
   chatBg(t) {
-    return this.glassTint(t) === null ? t.background : "#00000000";
+    return this.glassPlan(t).chatBg;
   }
 
   /** How much of a see-through theme's background Herdr's window already lays down, or null when it is solid. */
   glassTint(t) {
-    const bg = String(t.background ?? "");
-    return /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? parseInt(bg.slice(7, 9), 16) / 255 : null;
+    return glassTint(t.background);
   }
 
   /**
-   * Glass: the column behind the text (GLASS_TEXT in all over the window's tint), fading out at its sides
-   * so the wallpaper stays clear beside it. A layer behind the whole chat, still while the timeline scrolls.
+   * Glass: the column behind the text (fading out at its sides so the wallpaper stays clear beside it).
+   * A layer behind the whole chat, still while the timeline scrolls.
    */
-  glassColumn(t) {
-    const under = this.glassTint(t);
-    if (under === null) return null;
-    const rgb = String(t.background).slice(0, 7);
-    const add = Math.max(0, Math.min(1, 1 - (1 - GLASS_TEXT) / (1 - under)));
+  glassColumn(t, plan = this.glassPlan(t)) {
+    if (!plan.active || plan.columnAdd <= 0) return null;
+    const { rgb, columnAdd: add, fadePx } = plan;
     /** @param {number} a @returns {`#${string}`} */
     const hex = (a) => /** @type {`#${string}`} */ (rgb + Math.round(a * 255).toString(16).padStart(2, "0"));
     // The fade: 2 px strips easing out (smoothstep). Not a gradient: a path's alpha adds to the window's
     // instead of blending (a fade to the column came out opaque at its inner edge).
-    const n = GLASS_FADE / 2;
+    const n = Math.floor(fadePx / 2);
     const strip = (i) => {
       const x = (i + 0.5) / n;
       return div().flex_none().w(2).h_full().bg(hex(add * x * x * (3 - 2 * x)));
     };
-    const fade = (out) => Array.from({ length: n }, (_, i) => strip(out ? n - 1 - i : i));
+    const fade = (out) => (n > 0 ? Array.from({ length: n }, (_, i) => strip(out ? n - 1 - i : i)) : []);
     return div().absolute().top(0).bottom(0).left(0).right(0).overflow_hidden().flex().justify_center()
       .child(h_flex().flex_none().h_full()
         .children(fade(false))
@@ -3766,8 +3776,9 @@ export default class HerdrChat extends View {
     // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();
-    const glass = this.glassColumn(t);
-    let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(this.chatBg(t)).text_color(t.foreground).text_size(13)
+    const gPlan = this.glassPlan(t);
+    const glass = this.glassColumn(t, gPlan);
+    let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(gPlan.chatBg).text_color(t.foreground).text_size(13)
       .relative().children(glass ? [glass] : [])
       .on_size_change((sz, cx) => {
         if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); this.reportModRoom(cx); cx.notify(); }
@@ -3811,7 +3822,7 @@ export default class HerdrChat extends View {
         // Scrolled up: a band of background at the bottom edge, so ↓ Latest sits on it, never on text.
         // Over glass, only across the column: the sides stay clear.
         .when(!this.timeline.sticky, (e) => e.child(div().absolute().bottom(0).left(0).right(0).flex().justify_center()
-          .child(div().h(16).w_full().when(Boolean(glass), (b) => b.max_w(COL_MAX)).bg(alpha(t.background, 0.92))))))
+          .child(div().h(16).w_full().when(gPlan.active, (b) => b.max_w(COL_MAX)).bg(alpha(t.background, 0.92))))))
       // ↓ Latest sits on the timeline's bottom edge, over the gap above the composer, not the text.
       // pt: room between the last output and the composer (feedback row 5)
       .child(div().relative().flex_none().pt(20).pb(6).child(this.column(bottom))
