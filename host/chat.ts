@@ -266,11 +266,15 @@ const URGENT = new Set<keyof ChatState>(["phase", "dialog", "dialogsPending", "q
  * now, `…From` who sent it (an `hc send` report's `from`, null = the user;
  * present only when some entry has a sender).
  */
+export type QueueKind = "message" | "bang" | "tab";
+
 export type Queue = {
   steering: string[]; followUp: string[];
   steeringIds?: (string | null)[]; followUpIds?: (string | null)[];
   steeringRemovable?: boolean[]; followUpRemovable?: boolean[];
   steeringFrom?: (string | null)[]; followUpFrom?: (string | null)[];
+  /** Per-row kind for followUp items ("message" | "bang" | "tab"); omitted when all are plain messages. */
+  followUpKinds?: QueueKind[];
   /** True when the agent can deliver queued steering message(s) immediately. */
   steeringSendNow?: boolean;
 };
@@ -281,6 +285,7 @@ export type Sink = {
   snapshot(): void;
   toast(level: "info" | "warning" | "error", text: string): void;
   sendRejected?(info: { clientSendId?: string; text: string; images: string[]; reason: string }): void;
+  runTab?(info: { id: string; commands: string[]; space: string | null; folder: string | null; ownerCid?: string }): void;
   bye(reason: string): void;
 };
 
@@ -326,9 +331,19 @@ export type ChatOptions = {
  * item, shown at send time (a queued one shows in the queue until delivered).
  * `text` and `images` (paths) are what was sent, for taking a queued one back.
  */
-type Sent = { source: UserSource; from?: string; item?: string; text: string; images: string[] };
-/** A follow-up the host holds until the run settles. */
-type Held = { id: string; text: string; images: string[]; from?: string };
+type Sent = { source: UserSource; from?: string; item?: string; text: string; images: string[]; echo?: boolean; noBang?: boolean };
+/** A follow-up (message, `!command`, or new-tab run) the host holds until the run settles. */
+type Held = {
+  id: string;
+  text: string;
+  images: string[];
+  from?: string;
+  echo?: boolean;
+  noBang?: boolean;
+  kind?: QueueKind;
+  tab?: { commands: string[]; space?: string | null; folder?: string | null };
+  ownerCid?: string;
+};
 const NO_QUEUE: EventOf<"queue_changed"> = { type: "queue_changed", steering: [], followUp: [] };
 /** Unconfirmed messages kept: one whose echo never comes (aborted before its turn started) is dropped after this many newer ones. */
 const MAX_UNCONFIRMED = 100;
@@ -835,6 +850,7 @@ export class Chat {
       case "queue_changed":
         this.agentQueue = ev;
         this.publishQueue();
+        if (!this.busy && !this.agentQueue.steering.length && this.held.length) this.drainHeld();
         return;
       case "user_message":
         if (ev.source || ev.parent) {
@@ -946,6 +962,9 @@ export class Chat {
         }
       }
       this.schedule();
+      if (ev.type === "tool_ended" && !this.busy && this.held.length && !this.adapter.bangActive?.()) {
+        queueMicrotask(() => this.drainHeld());
+      }
     }
   }
 
@@ -978,6 +997,8 @@ export class Chat {
     const steeringFrom = steeringIds.map(fromOf);
     const followUpFrom = followUpIds.map(fromOf);
     if ([...steeringFrom, ...followUpFrom].some(Boolean)) Object.assign(q, { steeringFrom, followUpFrom });
+    const followUpKinds: QueueKind[] = [...ev.followUp.map(() => "message" as const), ...this.held.map((h) => h.kind ?? "message")];
+    if (followUpKinds.some((k) => k !== "message")) q.followUpKinds = followUpKinds;
     this.set({ queue: q });
   }
 
@@ -998,33 +1019,66 @@ export class Chat {
   /** The held follow-ups go back to the composer, unsent: the run was stopped or failed, or the agent went away. */
   private returnHeld(): void {
     if (!this.held.length) return;
-    const texts = this.held.map((h) => h.text);
+    const texts = this.held.filter((h) => h.kind !== "tab").map((h) => h.text);
     this.held = [];
-    this.set({ editorText: [this.state.editorText, ...texts].filter(Boolean).join("\n\n") });
+    if (texts.length) this.set({ editorText: [this.state.editorText, ...texts].filter(Boolean).join("\n\n") });
     this.publishQueue();
   }
 
-  /** Idle with follow-ups held: send the next one as a prompt. One per run; the next waits for this one's run to settle. */
+  /** Idle with follow-ups held: send the next one as a prompt, or open a queued new-tab run. One per run; the next waits for this one's run to settle. */
   private drainHeld(): void {
-    if (this.busy || this.heldSending || !this.held.length || !this.adapter.alive) return;
+    if (
+      this.busy
+      || this.heldSending
+      || !this.held.length
+      || !this.adapter.alive
+      || this.dialogs.length > 0
+      || this.agentQueue.steering.length > 0
+      || this.adapter.bangActive?.()
+    ) return;
     // Until `send` answers (it may wait for images before the phase says working), no second one goes.
     this.heldSending = true;
     const h = this.held.shift()!;
     this.publishQueue();
+    if (h.kind === "tab" && h.tab) {
+      for (const s of this.sinks) {
+        s.runTab?.({
+          id: h.id,
+          commands: h.tab.commands,
+          space: h.tab.space ?? null,
+          folder: h.tab.folder ?? null,
+          ...(h.ownerCid ? { ownerCid: h.ownerCid } : {}),
+        });
+      }
+      this.heldSending = false;
+      this.drainHeld();
+      return;
+    }
     let returned = false;
     const giveBack = () => {
       if (returned) return;
       returned = true;
       this.set({ editorText: [this.state.editorText, h.text].filter(Boolean).join("\n\n") });
     };
-    this.send({ text: h.text, images: h.images, mode: "auto", source: "queued", from: h.from }, { onRejected: giveBack })
+    this.send(
+      {
+        text: h.text,
+        images: h.images,
+        mode: "auto",
+        source: "queued",
+        from: h.from,
+        ...(h.echo === false ? { echo: false } : {}),
+        ...(h.noBang ? { noBang: true } : {}),
+      },
+      { onRejected: giveBack },
+    )
       .catch((e) => {
         if (!returned) this.notice("error", `Could not send the follow-up: ${errText(e)}`);
         giveBack();
       })
       .finally(() => {
         this.heldSending = false;
-        this.drainHeld(); // its run may have settled already
+        this.drainHeld(); // its run may have settled already (unless a bang run is still active)
       });
   }
 
@@ -1135,8 +1189,11 @@ export class Chat {
     this.schedule();
     // Stopped (from elsewhere: our own abort took them already) or failed: the follow-ups wait in the composer.
     if (stopped || this.lastRunError) this.returnHeld();
-    // The next follow-up continues the work: no "done" in between.
-    if (this.held.length && this.adapter.alive) return this.drainHeld();
+    // The next follow-up continues the work: no "done" in between (unless only tab runs drained and no new turn started).
+    if (this.held.length && this.adapter.alive) {
+      this.drainHeld();
+      if (this.busy || this.heldSending || this.held.length || this.adapter.bangActive?.()) return;
+    }
     if (wasRun) this.terminalState(stopped ? "idle" : this.lastRunError ? "error" : "done", this.lastRunError ?? undefined);
   }
 
@@ -1306,9 +1363,21 @@ export class Chat {
     const text = String(args.text ?? "");
     const imagePaths = Array.isArray(args.images) ? args.images.map(String) : [];
     if (!text.trim() && !imagePaths.length) throw new Error("Nothing to send");
-    // A follow-up while working: the host holds it (a command too: it runs after the run) and sends it when the run settles.
-    if (args.mode === "followUp" && this.busy && this.adapter.alive) {
-      this.held.push({ id: randomUUID(), text, images: imagePaths, ...(args.from ? { from: args.from } : {}) });
+    const trimmed = text.trim();
+    const isBang = !args.noBang && !/[\r\n]/.test(trimmed) && trimmed.length <= 4000 && /^!\s*([^\s=!].*)$/.test(trimmed);
+    // A follow-up while working (or a `!command` in a terminal view while working): the host holds it and sends it when the run settles.
+    if ((args.mode === "followUp" || (isBang && Boolean(this.opts.view))) && this.busy && this.adapter.alive) {
+      const kind: QueueKind = isBang && (args.echo === false || Boolean(this.opts.view)) ? "bang" : "message";
+      const echo = kind === "bang" && args.echo === false ? false : args.echo;
+      this.held.push({
+        id: randomUUID(),
+        text,
+        images: imagePaths,
+        ...(args.from ? { from: args.from } : {}),
+        ...(echo === false ? { echo: false } : {}),
+        ...(args.noBang ? { noBang: true } : {}),
+        kind,
+      });
       this.publishQueue();
       return { disposition: "queued" };
     }
@@ -1377,7 +1446,7 @@ export class Chat {
       if (d.disposition === "handled") {
         undo();
         // An extension command answered without a run: no settle will send the next follow-up.
-        this.drainHeld();
+        if (!this.adapter.bangActive?.()) this.drainHeld();
       }
       return { disposition: String(d.disposition) };
     });
@@ -1437,7 +1506,7 @@ export class Chat {
   async abort(): Promise<{ restored: string[] }> {
     if (!this.adapter.alive) return { restored: [] };
     // The held follow-ups first: none of them may start a run when this one settles.
-    const held = this.held.map((h) => h.text);
+    const held = this.held.filter((h) => h.kind !== "tab").map((h) => h.text);
     this.held = [];
     const restored = [...(await this.adapter.clearQueue()), ...held];
     // The queue is gone (its texts go back to the composer): none of it will be echoed.
@@ -1454,14 +1523,60 @@ export class Chat {
 
   // ---------------------------------------------------------------- the queue's rows
 
+  /** Queues a new-tab command run to execute when the current turn settles (or runs it immediately if already idle). */
+  queueTab(args: { commands?: unknown; space?: unknown; folder?: unknown; ownerCid?: string }): { disposition: string; id: string } {
+    const commands = Array.isArray(args.commands) ? args.commands.map((c) => String(c ?? "").trim()).filter(Boolean) : [];
+    if (!commands.length) throw new Error("queue_tab needs a non-empty `commands` array");
+    const space = typeof args.space === "string" && args.space ? args.space : null;
+    const folder = typeof args.folder === "string" && args.folder ? args.folder : null;
+    const id = randomUUID();
+    if (!this.busy && !this.held.length && !this.agentQueue.steering.length && !this.dialogs.length && !this.adapter.bangActive?.()) {
+      for (const s of this.sinks) {
+        s.runTab?.({ id, commands, space, folder, ...(args.ownerCid ? { ownerCid: args.ownerCid } : {}) });
+      }
+      return { disposition: "started", id };
+    }
+    const display = commands.length > 1 ? `${commands[0]} (+${commands.length - 1})` : commands[0]!;
+    this.held.push({
+      id,
+      text: display,
+      images: [],
+      kind: "tab",
+      tab: { commands, space, folder },
+      ...(args.ownerCid ? { ownerCid: args.ownerCid } : {}),
+    });
+    this.publishQueue();
+    return { disposition: "queued", id };
+  }
+
+  /** Pops a queued new-tab command so the caller can open and run it immediately without double-firing on settle. */
+  queueRunNow(id: string): { id: string; commands: string[]; space: string | null; folder: string | null } {
+    if (!id) throw new Error("queue_run_now needs `message`: its id from state.queue");
+    const i = this.held.findIndex((h) => h.id === id);
+    if (i < 0) throw new Error("That queued action is no longer waiting");
+    const h = this.held[i]!;
+    if (h.kind !== "tab" || !h.tab) throw new Error("Only queued new-tab commands can be run now from here");
+    this.held.splice(i, 1);
+    this.publishQueue();
+    return { id: h.id, commands: h.tab.commands, space: h.tab.space ?? null, folder: h.tab.folder ?? null };
+  }
+
   /** Takes a queued message out of its lane: a held follow-up, or one the agent lets go of. Its text and images are returned. */
-  private async takeQueued(id: string): Promise<{ lane: "steer" | "followUp"; text: string; images: string[]; from?: string }> {
+  private async takeQueued(id: string): Promise<{ lane: "steer" | "followUp"; text: string; images: string[]; from?: string; echo?: boolean; noBang?: boolean; kind?: QueueKind }> {
     if (!id) throw new Error("Which message? Pass `message`: its id from state.queue");
     const i = this.held.findIndex((h) => h.id === id);
     if (i >= 0) {
       const [h] = this.held.splice(i, 1);
       this.publishQueue();
-      return { lane: "followUp", text: h!.text, images: h!.images, ...(h!.from ? { from: h!.from } : {}) };
+      return {
+        lane: "followUp",
+        text: h!.text,
+        images: h!.images,
+        ...(h!.from ? { from: h!.from } : {}),
+        ...(h!.echo === false ? { echo: false } : {}),
+        ...(h!.noBang ? { noBang: true } : {}),
+        ...(h!.kind ? { kind: h!.kind } : {}),
+      };
     }
     const q = this.agentQueue;
     const lane = q.steeringIds?.includes(id) ? "steer" : q.followUpIds?.includes(id) ? "followUp" : null;
@@ -1484,6 +1599,8 @@ export class Chat {
 
   /** queue_edit: a click on the row. It leaves the queue; its text and images go back to the composer, and sending again re-queues it. */
   async queueEdit(id: string): Promise<{ text: string; images: string[] }> {
+    const held = this.held.find((h) => h.id === id);
+    if (held?.kind === "tab") throw new Error("Queued new-tab commands can be run now or removed, not edited in the composer.");
     const m = await this.takeQueued(id);
     return { text: m.text, images: m.images };
   }
@@ -1491,10 +1608,14 @@ export class Chat {
   /** queue_move: the row's ⇄. A follow-up becomes a steer now; a steer the agent gives back waits for the run's end. */
   async queueMove(id: string, to: string): Promise<Record<string, never>> {
     if (to !== "steer" && to !== "followUp") throw new Error("queue_move needs `to`: \"steer\" or \"followUp\"");
+    const held = this.held.find((h) => h.id === id);
+    if (to === "steer" && (held?.kind === "tab" || held?.kind === "bang")) {
+      throw new Error("Commands can't steer mid-turn: they run after this turn finishes.");
+    }
     const inLane = to === "steer" ? this.agentQueue.steeringIds?.includes(id) : this.held.some((h) => h.id === id) || this.agentQueue.followUpIds?.includes(id);
     if (inLane) return {};
     const m = await this.takeQueued(id);
-    const args = { text: m.text, images: m.images, ...(m.from ? { from: m.from } : {}) };
+    const args = { text: m.text, images: m.images, ...(m.from ? { from: m.from } : {}), ...(m.echo === false ? { echo: false } : {}), ...(m.noBang ? { noBang: true } : {}) };
     if (to === "steer") await this.send({ ...args, mode: "steer" });
     else await this.send({ ...args, mode: "followUp" }); // held while working; sent now if the run just ended
     return {};
@@ -1938,6 +2059,15 @@ export class Chat {
         return this.queueMove(String(a.message ?? ""), String(a.to ?? ""));
       case "queue_send_now":
         return this.queueSendNow(typeof a.message === "string" && a.message ? a.message : undefined);
+      case "queue_tab":
+        return this.queueTab({
+          commands: a.commands,
+          space: a.space,
+          folder: a.folder,
+          ownerCid: typeof a.ownerCid === "string" && a.ownerCid ? a.ownerCid : undefined,
+        });
+      case "queue_run_now":
+        return this.queueRunNow(String(a.message ?? ""));
       case "dialog_answer":
         return this.dialogAnswer(a);
       case "ack_editor_text":

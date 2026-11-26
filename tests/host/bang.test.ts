@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { bangOf, oneLine, runHref, runLink, runsInCode, tabScript } from "../../herdr-app/mods/chat/bang.js";
+import { bangHash, bangKey, bangOf, findAutoRan, oneLine, runHref, runLink, runsInCode, tabScript } from "../../herdr-app/mods/chat/bang.js";
 // @ts-expect-error a plain JS module of the mod's
 import { linkPaths } from "../../herdr-app/mods/chat/paths.js";
 import { TranscriptFollower } from "../../host/providers/claude/follow.ts";
@@ -108,4 +108,29 @@ test("images the terminal view sent as @ mentions show as the message's images, 
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("bangHash and findAutoRan track executed `!` commands without storing raw command text", () => {
+  const key = bangKey(["  sudo   inapse-spaces   repair ", "echo ok"]);
+  assert.equal(key, "sudo inapse-spaces repair\necho ok");
+  const h = bangHash(key);
+  assert.match(h, /^b-[0-9a-f]{8}$/);
+  assert.equal(h, bangHash(key));
+  assert.ok(!h.includes("repair"));
+
+  const items = [
+    { id: "m0", kind: "tool", toolCallId: "you-bash-0", name: "Bash", status: "done", detail: { type: "bash", command: "inapse-spaces repair" } },
+    { id: "m1", kind: "assistant", text: "Please run:\n```\n! inapse-spaces repair\n```" },
+    { id: "m2", kind: "tool", toolCallId: "you-bash-live-1", name: "Bash", status: "pending", detail: { type: "bash", command: "inapse-spaces repair" } },
+  ];
+  // Prior run before m1 and pending run after m1 do not count
+  assert.equal(findAutoRan(items, "m1", ["inapse-spaces repair"]), null);
+
+  // Completed you-bash card after m1 counts as automatically executed in agent
+  items.push({ id: "m3", kind: "tool", toolCallId: "you-bash-live-2", name: "Bash", status: "done", detail: { type: "bash", command: "inapse-spaces   repair" } });
+  assert.deepEqual(findAutoRan(items, "m1", ["inapse-spaces repair"]), { ran: true, where: "agent" });
+
+  // Multi-command group matches either joined && or individual runs after m1
+  items.push({ id: "m4", kind: "tool", toolCallId: "you-bash-3", name: "Bash", status: "done", detail: { type: "bash", command: "cd app && pnpm build" } });
+  assert.deepEqual(findAutoRan(items, "m1", ["cd app", "pnpm build"]), { ran: true, where: "agent" });
 });

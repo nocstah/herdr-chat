@@ -84,3 +84,57 @@ export function runLink(url) {
   if (!url?.startsWith(RUN_LINK)) return null;
   try { return decodeURIComponent(url.slice(RUN_LINK.length)) || null; } catch { return null; }
 }
+
+const normCmd = (/** @type {string} */ c) => String(c ?? "").replace(/\s+/g, " ").trim();
+
+/** Normalized canonical key for a `!` command run. @param {string | string[]} commands */
+export function bangKey(commands) {
+  const list = Array.isArray(commands) ? commands : [commands];
+  return list.map(normCmd).filter(Boolean).join("\n");
+}
+
+/** Compact non-reversible FNV-1a hash so persisted run markers never write raw command text to localStorage. @param {string} text */
+export function bangHash(text) {
+  let h = 0x811c9dc5;
+  const s = String(text ?? "");
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `b-${h.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Checks whether `commands` has already been executed in the conversation timeline after `afterMessageId`
+ * (e.g. via a clicked Run button, an automatically drained Follow-up queue item, Ctrl+!, Wrap up, or manual `!cmd`).
+ * @param {any[]} items
+ * @param {string | null | undefined} afterMessageId
+ * @param {string[]} commands
+ * @returns {{ ran: true, where: "agent" } | null}
+ */
+export function findAutoRan(items, afterMessageId, commands) {
+  if (!Array.isArray(items) || !items.length || !Array.isArray(commands) || !commands.length) return null;
+  let start = 0;
+  if (afterMessageId) {
+    const idx = items.findIndex((it) => it?.id === afterMessageId);
+    if (idx >= 0) start = idx + 1;
+  }
+  const joined = oneLine(commands);
+  const joinedNorm = joined ? normCmd(joined) : null;
+  const parts = commands.map(normCmd).filter(Boolean);
+  if (!parts.length) return null;
+  const seenParts = new Set();
+  for (let i = start; i < items.length; i++) {
+    const it = items[i];
+    if (!it || it.kind !== "tool") continue;
+    if (it.status === "pending") continue;
+    const isBash = it.detail?.type === "bash" || /^bash$/i.test(String(it.name ?? "")) || String(it.toolCallId ?? "").startsWith("you-bash");
+    if (!isBash) continue;
+    const cmd = normCmd(it.detail?.command ?? it.args?.command ?? "");
+    if (!cmd) continue;
+    if (joinedNorm && cmd === joinedNorm) return { ran: true, where: "agent" };
+    if (parts.length === 1 && cmd === parts[0]) return { ran: true, where: "agent" };
+    for (const p of parts) if (cmd === p) seenParts.add(p);
+  }
+  return seenParts.size === parts.length ? { ran: true, where: "agent" } : null;
+}

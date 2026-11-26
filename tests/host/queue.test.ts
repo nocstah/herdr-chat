@@ -286,3 +286,34 @@ test("reconnect (pi): a client that connects mid-run sees the held follow-ups in
     await h.stop();
   }
 });
+
+test("queue_tab (pi): held while working, run_tab delivered on settle, abort drops tab without polluting composer", async () => {
+  const h = await pi("q-tab");
+  try {
+    const c = h.client;
+    await c.req("send", { text: "work first" });
+    await c.waitFor(running, 5000, "tool running");
+    const queued = await c.req("queue_tab", { commands: ["echo ok", "true"], space: "sp1", folder: "/tmp/demo" });
+    assert.equal(queued.disposition, "queued");
+    await c.waitFor((x) => x.state.queue.followUp.length === 1, 2000, "tab held");
+    assert.deepEqual(c.state.queue.followUp, ["echo ok (+1)"]);
+    assert.deepEqual(c.state.queue.followUpKinds, ["tab"]);
+    await c.waitFor((x) => x.records.some((r: any) => r.t === "run_tab" && r.id === queued.id), 10_000, "run_tab emitted on settle");
+    const rec = c.records.find((r: any) => r.t === "run_tab" && r.id === queued.id);
+    assert.deepEqual(rec, { t: "run_tab", id: queued.id, commands: ["echo ok", "true"], space: "sp1", folder: "/tmp/demo" });
+    await c.waitFor(idle, 5000, "idle after settle");
+    assert.deepEqual(c.state.queue, { steering: [], followUp: [] });
+
+    // Abort drops queued tab runs without pushing them into restored composer text.
+    await c.req("send", { text: "long build" });
+    await c.waitFor((x) => x.items.some((i: any) => i.kind === "tool" && /unit 2/.test(i.output)), 5000, "ticking");
+    await c.req("queue_tab", { commands: ["echo dropped"], space: "sp1" });
+    await c.req("send", { text: "keep in composer", mode: "followUp" });
+    await c.waitFor((x) => x.state.queue.followUp.length === 2, 2000, "both held");
+    const { restored } = await c.req("abort");
+    assert.deepEqual(restored, ["keep in composer"]);
+    assert.equal(c.records.some((r: any) => r.t === "run_tab" && r.commands?.[0] === "echo dropped"), false);
+  } finally {
+    await h.stop();
+  }
+});

@@ -38,6 +38,8 @@ import { HOVER_CLAIM_MS, mayClaim, typedChar } from "./claim.js";
 const SHOWS = "herdr-chat.panes";
 // A terminal view's pane → its terminal, for the top bar's switch (mods/chat-switch).
 const VIEW_PANES = "herdr-chat.views";
+// Agent terminal address → live chat id (ids only, never message text), so sibling mods (inapse-spaces) can enqueue follow-ups directly into this chat's host.
+const CHATS = "herdr-chat.chats";
 import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import { Buffer } from "buffer";
@@ -52,7 +54,7 @@ import { Store } from "./store.js";
 import { Timeline } from "./timeline.js";
 import { findMark, lineOf, planProgress, row, samePlan } from "./cards.js";
 import { fileLink, resolveFilePath } from "./paths.js";
-import { oneLine as bangLine, runLink, tabScript } from "./bang.js";
+import { bangHash, bangKey, findAutoRan, oneLine as bangLine, runLink, tabScript } from "./bang.js";
 import { Find, searchLoaded } from "./find.js";
 import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
@@ -204,6 +206,11 @@ export default class HerdrChat extends View {
     this.failedSends = [];
     this.inflightSends = new Map();
     this.retryingSendId = null;
+    this.ranTabIds = new Set();
+    /** In-memory executed/queued `!` command state for this chat (hashes only). @type {Map<string, { where: "agent" | "tab", queued: boolean }>} */
+    this.ranBangs = new Map();
+    this.ranBangsLoadedKey = null;
+    this.persistedRanBangs = {};
     this.composer = new Composer(cx, {
       placeholder: `Message ${PROVIDER_NAMES[this.provider ?? DEFAULT_PROVIDER] ?? "the agent"}…`,
       onChange: (cx) => { this.updateMenu(cx); this.rebalancePastes(cx); this.debug.mark(); cx.notify(); },
@@ -760,12 +767,22 @@ export default class HerdrChat extends View {
   /** @param {any} me */
   publishShows(me) {
     const addr = this.view ?? hostTerminal(this.chat)?.address ?? null;
+    if (!addr) return;
     const map = /** @type {Record<string, string>} */ (shared(SHOWS) ?? {});
-    if (!addr || map[me.pane] === addr) return;
     const live = new Set(panes().map((p) => p.pane));
-    const next = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
-    next[me.pane] = addr;
-    setShared(SHOWS, next);
+    let nextShows = map;
+    if (map[me.pane] !== addr) {
+      nextShows = Object.fromEntries(Object.entries(map).filter(([p]) => live.has(p)));
+      nextShows[me.pane] = addr;
+      setShared(SHOWS, nextShows);
+    }
+    const chats = /** @type {Record<string, string>} */ (shared(CHATS) ?? {});
+    if (chats[addr] !== this.chat) {
+      const liveAddrs = new Set([...Object.entries(nextShows).filter(([p]) => live.has(p)).map(([, a]) => a), addr]);
+      const nextChats = Object.fromEntries(Object.entries(chats).filter(([a]) => liveAddrs.has(a)));
+      nextChats[addr] = this.chat;
+      setShared(CHATS, nextChats);
+    }
   }
 
   // The top bar's switch (mods/chat-switch) shows the face of the agent whose
@@ -1006,6 +1023,14 @@ export default class HerdrChat extends View {
         this.flash("Message not sent — saved above the composer to retry", cx);
         this.debug.mark();
         cx.notify();
+      }
+    } else if (rec.t === "run_tab") {
+      if (!this.peekMode && Array.isArray(rec.commands) && rec.commands.length && (!rec.id || !this.ranTabIds.has(rec.id))) {
+        if (rec.id) {
+          this.ranTabIds.add(rec.id);
+          if (this.ranTabIds.size > 100) this.ranTabIds.delete(this.ranTabIds.values().next().value);
+        }
+        this.openRunTab(rec.commands, rec.space ?? null, rec.folder ?? null, cx);
       }
     } else if (rec.t === "bye") {
       this.log(`bye: ${rec.reason}`);
@@ -1969,6 +1994,15 @@ export default class HerdrChat extends View {
     const q = /** @type {{steeringIds?: (string | null)[]}} */ (this.store.state.queue);
     const lane = q?.steeringIds?.includes(id) ? "steer" : "followUp";
     if (op === "remove") return this.fire("queue_remove", { message: id }, cx);
+    if (op === "run-now") {
+      return this.fire("queue_run_now", { message: id }, cx, (d, cx) => {
+        if (Array.isArray(d?.commands) && d.commands.length) {
+          if (d.id) this.ranTabIds.add(d.id);
+          this.openRunTab(d.commands, d.space ?? null, d.folder ?? null, cx);
+          this.flash("Opened in a new tab", cx);
+        }
+      });
+    }
     if (op === "move") {
       const to = lane === "steer" ? "followUp" : "steer";
       this.flash(to === "steer" ? "Steering with it now" : "Moved to the follow-ups: it goes after this run", cx);
@@ -2663,11 +2697,73 @@ export default class HerdrChat extends View {
 
   // ---- `!` commands in answers (bang.js) -------------------------------------------
 
+  /** Whether the agent is actively mid-turn (either host state or attached terminal status). */
+  isWorking() {
+    return this.store.working() || this.viewStatus === "working";
+  }
+
   // What the answers' run bars and links do: where a `!` command can run.
   // `here`: the agent's name when it can run there (the terminal view: the
   // TUI's shell command, Claude Code's bash mode), else null (a chat's own agent has no bash mode: a new tab only).
   bangTarget() {
-    return { here: this.view ? this.providerName() : null, run: (/** @type {string[]} */ cmds, /** @type {string} */ where, /** @type {any} */ cx) => this.runBang(cmds, where, cx) };
+    return {
+      here: this.view ? this.providerName() : null,
+      working: this.isWorking(),
+      stateOf: (/** @type {string[]} */ cmds, /** @type {string | null} */ barKey, /** @type {string | null} */ messageId) =>
+        this.bangState(cmds, barKey, messageId),
+      run: (/** @type {string[]} */ cmds, /** @type {string} */ where, /** @type {any} */ cx, /** @type {{ queue?: boolean, barKey?: string } | undefined} */ opts) =>
+        this.runBang(cmds, where, cx, opts),
+    };
+  }
+
+  /** Storage key for persisted executed-command hashes (prefers terminal address so reopening the same session preserves checkmarks). */
+  ranBangsKey() {
+    return this.view || this.viewAttach || this.chat;
+  }
+
+  /** Lazily loads persisted executed-command hashes once `this.view` / `this.viewAttach` is known. */
+  ensurePersistedRanBangs() {
+    const k = this.ranBangsKey();
+    if (this.ranBangsLoadedKey !== k) {
+      this.ranBangsLoadedKey = k;
+      this.persistedRanBangs = { ...readRanBangs(k), ...this.persistedRanBangs };
+    }
+    return k;
+  }
+
+  /** Records a `!` command run (hashes only; never stores raw command text in localStorage). */
+  markBangRan(commands, where, { barKey = null, queued = false } = {}) {
+    const k = this.ensurePersistedRanBangs();
+    const hash = bangHash(bangKey(commands));
+    const barHash = barKey ? bangHash(`k:${barKey}`) : null;
+    const entry = { where, queued: Boolean(queued) };
+    this.ranBangs.set(hash, entry);
+    if (barHash) this.ranBangs.set(barHash, entry);
+    if (!queued) {
+      this.persistedRanBangs[hash] = where;
+      if (barHash) this.persistedRanBangs[barHash] = where;
+      writeRanBangs(k, this.persistedRanBangs);
+    }
+  }
+
+  /** Execution state for a `!` command bar or inline link: `{ ran, queued?, where }` or null. */
+  bangState(commands, barKey = null, messageId = null) {
+    this.ensurePersistedRanBangs();
+    const hash = bangHash(bangKey(commands));
+    const barHash = barKey ? bangHash(`k:${barKey}`) : null;
+    const mem = (barHash && this.ranBangs.get(barHash)) || this.ranBangs.get(hash) || null;
+    if (mem && !mem.queued) return { ran: true, where: mem.where };
+    const auto = findAutoRan(this.store.state.items, messageId, commands);
+    if (auto) {
+      if (mem?.queued || !this.persistedRanBangs[hash]) {
+        this.markBangRan(commands, auto.where, { barKey, queued: false });
+      }
+      return auto;
+    }
+    const saved = (barHash && this.persistedRanBangs[barHash]) || this.persistedRanBangs[hash] || null;
+    if (saved) return { ran: true, where: saved };
+    if (mem?.queued) return { ran: false, queued: true, where: mem.where };
+    return null;
   }
 
   // An inline `! command` was clicked: the card above the composer asks where to run it.
@@ -2678,53 +2774,100 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
-  // Runs `commands` (one run: in order, stopping at the first that fails) in the agent or a new tab.
-  /** @param {string[]} commands @param {string} where "agent" | "tab" @param {any} cx */
-  runBang(commands, where, cx) {
+  /** Opens a new terminal tab in `space`/`folder` (defaulting to this chat's) to run `commands`. */
+  openRunTab(commands, space, folder, cx, opts = {}) {
+    const me = this.myPane();
+    const sp = space ?? (me ? spaces().find((x) => x.tabs.some((tb) => tb.id === me.tab))?.id ?? null : null);
+    const dir = folder ?? this.cwd ?? this.store.state.cwd ?? null;
+    this.lastRun = { where: "tab", commands, at: Date.now() };
+    this.markBangRan(commands, "tab", { barKey: opts?.barKey ?? null, queued: false });
+    run("tab.new", { name: "run", ...(sp ? { space: sp } : {}), ...(dir ? { folder: dir } : {}), argv: ["bash", "-c", tabScript(commands)] });
+    cx?.notify?.();
+  }
+
+  // Runs `commands` (one run: in order, stopping at the first that fails) in the agent or a new tab,
+  // queueing into the follow-up lane while the agent is working (unless `opts.queue === false` for a tab).
+  /** @param {string[]} commands @param {string} where "agent" | "tab" @param {any} cx @param {{ queue?: boolean | null, barKey?: string }} [opts] */
+  runBang(commands, where, cx, opts = {}) {
     this.runAsk = null;
     const name = this.providerName();
+    const working = this.isWorking();
     if (where === "agent") {
       const line = bangLine(commands);
       if (!this.view || line === null) return;
-      if (this.viewStatus === "working") return this.flash(`${name} is working: run it when it's done, or in a new tab`, cx);
       if (this.viewStatus === "blocked") return this.flash(`${name} is asking something: answer it first`, cx);
-      this.lastRun = { where, commands, at: Date.now() };
+      const shouldQueue = opts.queue === true || (opts.queue !== false && working);
+      this.lastRun = { where, commands, queued: shouldQueue, at: Date.now() };
+      this.markBangRan(commands, "agent", { barKey: opts.barKey ?? null, queued: shouldQueue });
       this.timeline.toBottom();
-      // No bubble: the agent's own records show the run (a command card), once it's typed.
-      this.fire("send", { text: `!${line}`, mode: "auto", echo: false }, cx);
+      if (shouldQueue) {
+        this.fire("send", { text: `!${line}`, mode: "followUp", echo: false }, cx, (d, cx) => {
+          if (d?.disposition === "queued") this.flash(`Queued in ${name} (after this turn)`, cx);
+        });
+      } else {
+        // No bubble: the agent's own records show the run (a command card), once it's typed.
+        this.fire("send", { text: `!${line}`, mode: "auto", echo: false }, cx);
+      }
       return;
     }
     const me = this.myPane();
     const space = me ? spaces().find((sp) => sp.tabs.some((tb) => tb.id === me.tab))?.id ?? null : null;
     const folder = this.cwd ?? this.store.state.cwd ?? null;
-    this.lastRun = { where, commands, at: Date.now() };
-    run("tab.new", { name: "run", ...(space ? { space } : {}), ...(folder ? { folder } : {}), argv: ["bash", "-c", tabScript(commands)] });
-    cx.notify();
+    const shouldQueue = opts.queue === true || (opts.queue !== false && working);
+    if (shouldQueue) {
+      this.lastRun = { where, commands, queued: true, at: Date.now() };
+      this.markBangRan(commands, "tab", { barKey: opts.barKey ?? null, queued: true });
+      this.fire("queue_tab", { commands, space, folder }, cx, (d, cx) => {
+        if (d?.disposition === "queued") this.flash("Queued in a new tab (after this turn)", cx);
+      });
+      return;
+    }
+    this.openRunTab(commands, space, folder, cx, { barKey: opts.barKey ?? null });
   }
 
-  // The card for an inline `! command`: run it here or in a new tab (Esc or × closes it).
+  // The card for an inline `! command`: run or queue it here or in a new tab (Esc or × closes it).
   /** @param {any} t */
   runCard(t) {
     const ask = this.runAsk;
     if (!ask) return null;
     const here = this.view ? this.providerName() : null;
+    const working = this.isWorking();
     const line = bangLine(ask.commands);
-    const btn = (/** @type {string} */ id, /** @type {string} */ label, /** @type {boolean} */ primary, /** @type {(cx: any) => void} */ fn) =>
-      h_flex().id(id).h(28).px(12).items_center().rounded(7).cursor_pointer()
-        .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
-        .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium()
-        .hover((s) => s.opacity(0.88)).on_click((_e, cx) => fn(cx)).child(label);
+    const st = this.bangState(ask.commands);
+    const ranHere = Boolean(st?.ran && st.where === "agent");
+    const ranTab = Boolean(st?.ran && st.where === "tab");
+    const btn = (/** @type {string} */ id, /** @type {string} */ label, /** @type {boolean} */ primary, /** @type {(cx: any) => void} */ fn, /** @type {boolean} */ done = false) =>
+      h_flex().id(id).h(28).px(12).gap(6).items_center().rounded(7).cursor_pointer()
+        .border_1().border_color(done ? alpha(t.ansi2, 0.55) : primary ? t.solid : t.input)
+        .bg(done ? alpha(t.ansi2, 0.14) : primary ? t.solid : t.raised)
+        .text_color(done ? t.ansi2 : primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium()
+        .hover((s) => s.opacity(0.88)).on_click((_e, cx) => fn(cx))
+        .when(done, (e) => e.child(icon("check", 12).text_color(t.ansi2)))
+        .child(label);
     return v_flex().gap(8).p(12).rounded(10).border_1().border_color(t.border).bg(t.popover)
       .child(h_flex().gap(8).items_center()
-        .child(icon("terminal", 13).text_color(t.muted))
-        .child(div().flex_1().min_w(0).text_size(13).font_semibold().child("Run this command?"))
+        .child(icon(working ? "clock" : "terminal", 13).text_color(t.muted))
+        .child(div().flex_1().min_w(0).text_size(13).font_semibold().child(working ? "Queue or run this command?" : "Run this command?"))
         .child(div().id("run-cancel").cursor_pointer().text_size(11).text_color(t.dim).hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => { this.runAsk = null; cx.notify(); }).child("Esc")))
       .child(div().px(10).py(6).rounded(7).bg(t.background).border_1().border_color(t.border).font_family(monoFont()).text_size(12.5)
         .child(`! ${line ?? ask.commands.join(" && ")}`))
       .child(h_flex().gap(8).flex_wrap()
-        .when(Boolean(here) && line !== null, (e) => e.child(btn("run-ask-here", `Run in ${here}`, true, (cx) => this.runBang(ask.commands, "agent", cx))))
-        .child(btn("run-ask-tab", "Run in a new tab", !here, (cx) => this.runBang(ask.commands, "tab", cx)))
+        .when(Boolean(here) && line !== null, (e) => e.child(btn(
+          "run-ask-here",
+          working ? `Queue in ${here}` : `Run in ${here}`,
+          true,
+          (cx) => this.runBang(ask.commands, "agent", cx, { queue: working }),
+          ranHere,
+        )))
+        // a new tab opens at once, so it never waits for the turn: only the run in the agent queues
+        .child(btn(
+          "run-ask-tab",
+          "Run in a new tab",
+          !here,
+          (cx) => this.runBang(ask.commands, "tab", cx, { queue: false }),
+          ranTab,
+        ))
         .child(btn("run-ask-copy", "Copy", false, (cx) => { this.copy("run-ask", line ?? ask.commands.join("\n"), cx); this.runAsk = null; })));
   }
 
@@ -3926,5 +4069,32 @@ function loadPrefs() {
 function savePrefs(p) {
   try {
     localStorage.setItem("herdr-chat.prefs", JSON.stringify(p));
+  } catch {}
+}
+
+// Executed `!` command hashes per chat/terminal (localStorage, capped to last 40 chats × 80 hashes;
+// stores only FNV-1a hashes and "agent"|"tab", never raw command strings).
+const RAN_BANGS_KEY = "herdr-chat.ran-bangs";
+
+function readRanBangs(chatKey) {
+  if (!chatKey) return {};
+  try {
+    const all = JSON.parse(localStorage.getItem(RAN_BANGS_KEY) ?? "{}");
+    const rec = all && typeof all === "object" ? all[chatKey] : null;
+    return rec && typeof rec.map === "object" && rec.map ? { ...rec.map } : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeRanBangs(chatKey, map) {
+  if (!chatKey) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem(RAN_BANGS_KEY) ?? "{}");
+    const all = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const entries = Object.entries(map).slice(-80);
+    all[chatKey] = { at: Date.now(), map: Object.fromEntries(entries) };
+    const sorted = Object.entries(all).sort((a, b) => (Number(b[1]?.at) || 0) - (Number(a[1]?.at) || 0)).slice(0, 40);
+    localStorage.setItem(RAN_BANGS_KEY, JSON.stringify(Object.fromEntries(sorted)));
   } catch {}
 }

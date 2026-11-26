@@ -266,6 +266,10 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     return this.live && !this.disposed;
   }
 
+  bangActive(): boolean {
+    return this.bangWatchers.size > 0;
+  }
+
   private emit(ev: NormalizedEvent): void {
     if (this.disposed) return;
     this.host?.emit(ev);

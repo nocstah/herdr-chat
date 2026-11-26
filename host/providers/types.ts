@@ -401,6 +401,8 @@ export interface ProviderAdapter {
   sendQueuedNow?(id?: string): Promise<boolean>;
   /** Stops the run. Fire and forget: `run_settled` follows. */
   abort(): void;
+  /** Optional: true while a user-initiated `!` shell command is still running in the attached terminal. */
+  bangActive?(): boolean;
   /** Optional: one background task's detail (`background` events' tasks), or null when it isn't known (any more). */
   backgroundDetail?(id: string): BackgroundDetail | null;
   /** Optional: stops a background task that `backgroundDetail` calls stoppable. Resolves false when it can't. */

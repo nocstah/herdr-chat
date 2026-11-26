@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { LineFramer, MAX_RECORD_BYTES } from "./framing.ts";
 import type { Chat, Patch, Sink } from "./chat.ts";
@@ -94,6 +94,7 @@ function wsPeer(ws: WebSocket): Peer & { acked(): void } {
 }
 
 class Client {
+  cid = randomUUID();
   peer: Peer;
   seq = 0;
   ready = false;
@@ -241,7 +242,8 @@ export class ChatServer implements Sink {
     const id = rec.id;
     const op = String(rec.op ?? "");
     try {
-      const data = await this.chat.op(op, rec);
+      const payload = op === "queue_tab" && client.kind === "mod" ? { ...rec, ownerCid: client.cid } : rec;
+      const data = await this.chat.op(op, payload);
       // An op's effects reach every client before its result.
       this.chat.flush();
       client.send({ t: "res", id, ok: true, data: data ?? {} });
@@ -269,6 +271,14 @@ export class ChatServer implements Sink {
   }
   sendRejected(info: { clientSendId?: string; text: string; images: string[]; reason: string }): void {
     for (const c of this.clients) c.send({ t: "send_rejected", ...info });
+  }
+  runTab(info: { id: string; commands: string[]; space: string | null; folder: string | null; ownerCid?: string }): void {
+    // Deliver to the client that queued it if still connected, else the first connected mod client (so external callers like inapse-spaces hand off to the open chat view).
+    const list = [...this.clients];
+    const target = (info.ownerCid ? list.find((c) => c.cid === info.ownerCid) : undefined)
+      ?? list.find((c) => c.kind === "mod")
+      ?? list[0];
+    target?.send({ t: "run_tab", id: info.id, commands: info.commands, space: info.space, folder: info.folder });
   }
   bye(reason: string): void {
     for (const c of this.clients) {

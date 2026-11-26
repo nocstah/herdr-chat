@@ -979,3 +979,114 @@ test("Antigravity `!` bang runs mirror live TUI output into a standalone you-bas
     r.done();
   }
 });
+
+test("Antigravity queues `!` bang runs and new-tab runs while working, drains them on settle, and waits for bang before follow-ups", async () => {
+  const prevPoll = process.env.HERDR_CHAT_BANG_POLL_MS;
+  process.env.HERDR_CHAT_BANG_POLL_MS = "30";
+  const r = rig();
+  try {
+    r.write(A, [
+      { step_index: 0, type: "USER_INPUT", status: "DONE", content: "<USER_REQUEST>\nStart build\n</USER_REQUEST>" },
+    ]);
+    r.screen([
+      "Working on build...",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    r.event({ terminals: [{ address: "t5", state: "live", foreground: { pid: 4000, name: "fish", argv: ["fish", "-ic", "agy"] }, status: { app: "antigravity", state: "working" } }] });
+
+    const tabEvents: any[] = [];
+    const chat = new Chat({
+      chat: "c-bang-queue",
+      cwd: r.d,
+      session: null,
+      adapter: r.adapter,
+      terminal: null,
+      attachments: new Attachments(join(r.d, "att")),
+      view: "t5",
+      log: () => {},
+    });
+    chat.sinks.push({
+      patch: () => {},
+      snapshot: () => {},
+      toast: () => {},
+      runTab: (info) => tabEvents.push(info),
+      bye: () => {},
+    });
+    chat.start(null);
+    await chat.whenReady(5000);
+    await until("chat phase is working", () => chat.state.phase === "working");
+
+    // 1. Queue `!` bang command while working (`echo: false`).
+    const qBang = (await chat.op("send", { text: "! sample-build --fast", mode: "followUp", echo: false })) as { disposition: string };
+    assert.equal(qBang.disposition, "queued");
+
+    // 2. Queue two new-tab runs while working, and trigger `queue_run_now` on the second immediately.
+    const qTab1 = (await chat.op("queue_tab", { commands: ["inapse-spaces repair"], space: "sp1", folder: "/tmp/demo" })) as { disposition: string; id: string };
+    assert.equal(qTab1.disposition, "queued");
+    const qTab2 = (await chat.op("queue_tab", { commands: ["echo now"], space: "sp1", folder: "/tmp/demo" })) as { disposition: string; id: string };
+    assert.equal(qTab2.disposition, "queued");
+
+    // 3. Queue a follow-up message after the bang + tab runs.
+    const qMsg = (await chat.op("send", { text: "Check the build result", mode: "followUp" })) as { disposition: string };
+    assert.equal(qMsg.disposition, "queued");
+
+    assert.deepEqual(chat.state.queue.followUp, ["! sample-build --fast", "inapse-spaces repair", "echo now", "Check the build result"]);
+    assert.deepEqual(chat.state.queue.followUpKinds, ["bang", "tab", "tab", "message"]);
+
+    // Tab rows cannot be edited in composer; bang & tab rows cannot move to steer mid-turn.
+    await assert.rejects(() => chat.op("queue_edit", { message: qTab1.id }), /cannot|not edited/i);
+    await assert.rejects(() => chat.op("queue_move", { message: chat.state.queue.followUpIds![0], to: "steer" }), /can't steer/i);
+    await assert.rejects(() => chat.op("queue_move", { message: qTab1.id, to: "steer" }), /can't steer/i);
+
+    // Pop second tab run early via `queue_run_now`.
+    const popped = (await chat.op("queue_run_now", { message: qTab2.id })) as { id: string; commands: string[]; space: string | null; folder: string | null };
+    assert.deepEqual(popped, { id: qTab2.id, commands: ["echo now"], space: "sp1", folder: "/tmp/demo" });
+    assert.deepEqual(chat.state.queue.followUp, ["! sample-build --fast", "inapse-spaces repair", "Check the build result"]);
+
+    // Turn settles -> bang command runs first as live you-bash card; tab & follow-up message wait until bang settles!
+    r.screen(IDLE_SCREEN);
+    r.status("done");
+    await until("queued bang started live card", () =>
+      chat.timeline.items.some((it) => it.kind === "tool" && it.toolCallId.startsWith("you-bash-live-") && it.detail.type === "bash" && it.detail.command === "sample-build --fast"),
+    );
+    // Keep bang visibly running on screen and verify follow-up message hasn't been sent yet!
+    r.screen([
+      "! sample-build --fast",
+      "Building...",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "esc to cancel        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    await pause(120);
+    assert.equal(r.calls().some((c) => c[0] === "send" && c[3] === "Check the build result"), false, "follow-up waits for bang command to finish");
+    assert.equal(tabEvents.length, 0, "queued tab also waits behind active bang command");
+
+    // Bang command finishes -> queued tab emits `runTab`, then follow-up message is sent!
+    r.screen([
+      "! sample-build --fast",
+      "Building...",
+      "Done!",
+      "────────────────────────────────────",
+      ">",
+      "────────────────────────────────────",
+      "? for shortcuts        auto · Gemini 4 Neon · xhigh",
+    ].join("\n"));
+    await until("queued tab fired and follow-up message sent", () =>
+      tabEvents.length === 1 && r.calls().some((c) => c[0] === "send" && c[3] === "Check the build result"),
+    );
+    assert.deepEqual(tabEvents[0], { id: qTab1.id, commands: ["inapse-spaces repair"], space: "sp1", folder: "/tmp/demo" });
+    assert.deepEqual(chat.state.queue, { steering: [], followUp: [] });
+    // Bang ran with `echo: false`: no `! sample-build --fast` user bubble on the timeline.
+    assert.equal(chat.timeline.items.some((it) => it.kind === "user" && it.text.includes("sample-build")), false);
+
+    await chat.shutdown();
+  } finally {
+    if (prevPoll === undefined) delete process.env.HERDR_CHAT_BANG_POLL_MS;
+    else process.env.HERDR_CHAT_BANG_POLL_MS = prevPoll;
+    r.done();
+  }
+});

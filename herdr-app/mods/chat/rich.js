@@ -216,7 +216,7 @@ export function blocks(it, c) {
       el = (!b.open && c.codeView?.(key)) || codeCard(key, b.lang, b.code ?? "", b.lines, b.open, c);
       // Its `!` commands (bang.js): a bar under it for each run.
       const runs = c.runBang && !b.open ? runsInCode(b.code ?? "") : [];
-      if (runs.length) el = v_flex().min_w(0).gap(6).child(el).children(runs.map((r, j) => runBar(`${key}:${j}`, r, runs.length > 1, c)));
+      if (runs.length) el = v_flex().min_w(0).gap(6).child(el).children(runs.map((r, j) => runBar(`${key}:${j}`, r, runs.length > 1, c, it.id)));
     }
     else if (b.type === "mermaid") el = mermaid(key, b, c);
     else if (b.type === "image") el = picture(key, b, c);
@@ -230,20 +230,60 @@ export function blocks(it, c) {
 // in a new tab of the space. A run of several runs them in order, stopping at
 // the first that fails. `named`: the block has more than one run, so each bar
 // says which.
-/** @param {string} key @param {string[]} run @param {boolean} named @param {any} c */
-function runBar(key, run, named, c) {
+/** @param {string} key @param {string[]} run @param {boolean} named @param {any} c @param {string} [messageId] */
+function runBar(key, run, named, c, messageId) {
   const t = c.t;
   const here = c.runBang.here;
+  const working = Boolean(c.runBang.working);
   const line = oneLine(run);
-  const btn = (/** @type {string} */ id, /** @type {string} */ ic, /** @type {string} */ label, /** @type {string} */ tip, /** @type {(cx: any) => void} */ fn) =>
-    h_flex().id(id).h(24).px(8).gap(6).flex_none().items_center().rounded(6).border_1().border_color(c.line).cursor_pointer()
-      .text_size(11.5).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(tip).on_click((_e, cx) => fn(cx)).child(icon(ic, 12)).child(label);
+  const st = c.runBang.stateOf?.(run, key, messageId) ?? null;
+  const ranHere = Boolean(st?.ran && st.where === "agent");
+  const ranTab = Boolean(st?.ran && st.where === "tab");
+  const queuedHere = Boolean(st?.queued && !st.ran && st.where === "agent");
+  const queuedTab = Boolean(st?.queued && !st.ran && st.where === "tab");
+  const btn = (
+    /** @type {string} */ id,
+    /** @type {string} */ ic,
+    /** @type {string} */ label,
+    /** @type {string} */ tip,
+    /** @type {(e: any, cx: any) => void} */ fn,
+    { done = false, queued = false } = {},
+  ) =>
+    h_flex().id(id).h(24).px(8).gap(6).flex_none().items_center().rounded(6).border_1()
+      .border_color(done ? alpha(t.ansi2, 0.45) : queued ? alpha(t.accent, 0.4) : c.line)
+      .when(done, (e) => e.bg(alpha(t.ansi2, 0.1)))
+      .cursor_pointer()
+      .text_size(11.5).text_color(done ? t.ansi2 : queued ? t.accent : t.muted)
+      .hover((s) => s.bg(done ? alpha(t.ansi2, 0.16) : t.hover).text_color(done ? t.ansi2 : t.foreground))
+      .tooltip(tip).on_click((e, cx) => fn(e, cx))
+      .child(icon(done ? "check" : ic, 12).text_color(done ? t.ansi2 : queued ? t.accent : t.muted))
+      .child(label);
   const what = run.length > 1 ? `${run.length} commands in order, stopping at the first that fails` : null;
+  const cmdHint = run.length > 1 ? "…" : run[0];
   return h_flex().min_w(0).gap(6).items_center()
-    .when(Boolean(here) && line !== null, (e) => e.child(btn(`run-here-${key}`, "corner-up-right", `Run in ${here}`,
-      `Types !${run.length > 1 ? "…" : run[0]} into ${here}: it runs there, and ${here} sees what it prints`, (cx) => c.runBang.run(run, "agent", cx))))
-    .child(btn(`run-tab-${key}`, "terminal", "Run in a new tab", "In a terminal of its own, in this space: for a command that asks something", (cx) => c.runBang.run(run, "tab", cx)))
+    .when(Boolean(here) && line !== null, (e) => e.child(btn(
+      `run-here-${key}`,
+      working || queuedHere ? "clock" : "corner-up-right",
+      queuedHere ? `Queued in ${here}` : working ? `Queue in ${here}` : `Run in ${here}`,
+      ranHere
+        ? `Executed in ${here} · Click to run again`
+        : working
+          ? `Queue !${cmdHint} in ${here}: runs automatically after this turn finishes`
+          : `Types !${cmdHint} into ${here}: it runs there, and ${here} sees what it prints`,
+      (_e, cx) => c.runBang.run(run, "agent", cx, { queue: working, barKey: key }),
+      { done: ranHere, queued: queuedHere },
+    )))
+    // a new tab opens at once, so it never waits for the turn: only the run in the agent queues
+    .child(btn(
+      `run-tab-${key}`,
+      queuedTab ? "clock" : "terminal",
+      queuedTab ? "Queued in new tab" : "Run in a new tab",
+      ranTab
+        ? "Executed in a new tab · Click to run again"
+        : "In a terminal of its own, in this space: for a command that asks something",
+      (_e, cx) => c.runBang.run(run, "tab", cx, { queue: false, barKey: key }),
+      { done: ranTab, queued: queuedTab },
+    ))
     .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).when(named, (e) => e.font_family(c.mono))
       .child(named ? `! ${run[0]}${run.length > 1 ? ` (+${run.length - 1})` : ""}` : what ?? ""));
 }
