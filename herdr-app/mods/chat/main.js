@@ -769,6 +769,18 @@ export default class HerdrChat extends View {
     setShared(VIEW_PANES, next);
   }
 
+  /**
+   * The chat's background: the theme's, unless the theme is see-through. A glass setup (a layout
+   * with root `window_blur`, a theme whose `colors.background` has alpha) has Herdr tint the whole
+   * window once, so a live wallpaper (Kaze) moves behind the conversation: the chat then paints
+   * nothing of its own (a second tint would darken it twice). Cards, bubbles and the composer keep
+   * their solid colors either way.
+   */
+  chatBg(t) {
+    const bg = String(t.background ?? "");
+    return /^#[0-9a-f]{8}$/i.test(bg) && !/ff$/i.test(bg) ? "#00000000" : bg;
+  }
+
   // The layout's top bar has the switch (the installer's, mods/chat-switch): the view leaves out its own.
   barSwitch() {
     let found = false;
@@ -3718,7 +3730,7 @@ export default class HerdrChat extends View {
     // The terminal view's own Chat | Terminal pill, unless the top bar has the switch: at the top right, or in a slim row.
     const pill = Boolean(this.view) && !this.sub && !this.barSwitch();
     const floats = pill && this.viewFloats();
-    let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+    let root = v_flex().id("herdr-chat").key_context("HerdrChat").size_full().min_h(0).bg(this.chatBg(t)).text_color(t.foreground).text_size(13)
       .on_size_change((sz, cx) => {
         if (Math.abs(sz.width - this.width) > 0.5) { this.width = sz.width; this.sized(sz.width); this.reportModRoom(cx); cx.notify(); }
         // A hidden pane gets no room: shown or hidden, by this app's flip or another's, the face is read again now.
