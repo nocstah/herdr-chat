@@ -438,7 +438,20 @@ export function activityDrawer(v, s, t) {
   return v_flex().id("activity-drawer").w_full().rounded(10).border_1().border_color(t.border).bg(t.surface).overflow_hidden()
     .child(div().relative().w_full().border_b_1().border_color(alpha(t.border, 0.6))
       .child(v_flex().id("activity-log").w_full().max_h(240).overflow_y_scroll().track_scroll(v.activityScroll).pl(10).pr(14).py(8).gap(4)
-        .on_scroll_wheel((e, cx) => { if (e.delta.y > 0 && v.activityFollow) { v.activityFollow = false; cx.notify(); } })
+        .on_scroll_wheel((e, cx) => {
+          if (e.delta.y > 0 && v.activityFollow) {
+            v.activityFollow = false;
+            cx.notify();
+          } else if (e.delta.y < 0 && !v.activityFollow && typeof v.activityScroll?.offset === "function") {
+            const off = v.activityScroll.offset();
+            const vp = v.activityScroll.viewport_size();
+            const ct = v.activityScroll.content_size();
+            if (ct.height > 0 && off.y + vp.height - e.delta.y >= ct.height - 8) {
+              v.activityFollow = true;
+              cx.notify();
+            }
+          }
+        })
         .children(rows))
       .child(Scrollbar.vertical("activity-log").absolute().inset_0()))
     .child(head);

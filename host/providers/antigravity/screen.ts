@@ -47,6 +47,15 @@ export type AgyQuotaWarning = {
   errorId: string | null;
 };
 
+export type AgyArtifactReviewScreen = {
+  /** `banner`: normal prompt with `N artifact · /artifact to review`; `panel`: open `/artifact` view; `detail`: open artifact reader. */
+  surface: "banner" | "panel" | "detail";
+  /** Pending count read from screen (`1 artifact · /artifact to review` or `Action required (N left)`), or null when unspecified. */
+  pendingCount: number | null;
+  /** Artifact filenames visible on screen (when in `/artifact` panel or detail), if any. */
+  names: string[];
+};
+
 const SOLID_RE = /^\s*─{8,}\s*$/;
 const COMPOSER_RE = /^>\s*(?:$|Auto mode:|Plan mode:|Accept-edits mode:|Type a message|Ask anything|[^\d])/i;
 const STATUS_LEFT_RE = /^(?:\?\s+for shortcuts|esc to cancel|Press up to edit queued messages)\b/i;
@@ -897,6 +906,91 @@ const normWs = (text: string) => text.replace(/\s+/g, " ").trim();
 function capAgyShellOutput(text: string): string {
   if (text.length <= SHELL_MAX_OUTPUT_CHARS) return text;
   return `${text.slice(0, SHELL_OUTPUT_HEAD_CHARS).trimEnd()}\n… trimmed …\n${text.slice(-SHELL_OUTPUT_TAIL_CHARS).trimStart()}`;
+}
+
+const ARTIFACT_BANNER_RE = /(?:^|\s)(\d+)\s+artifacts?\s*[·•]\s*\/artifact\s+to\s+review\b/i;
+const ARTIFACT_CTRL_R_RE = /\bPress\s+ctrl\+r\s+to\s+review\s+pending\s+artifacts\b/i;
+const ARTIFACT_ACTION_LEFT_RE = /\bAction\s+required\s*\((\d+)\s+left\)/i;
+const ARTIFACT_ACTION_HDR_RE = /^\s*Action\s+required\b/i;
+const ARTIFACT_PANEL_HINTS_RE = /\b(?:Approve\s+all|Reject\s+all|Submit\b.*\bDismiss|Dismiss\b.*\bSubmit)\b/i;
+const ARTIFACT_PANEL_ACTIONS_RE = /\bopen\b.*\bapprove\b.*\breject\b/i;
+const ARTIFACT_DETAIL_HINTS_RE = /\b(?:send\s*\+\s*close|discard\s*\+\s*close|Open\s+in\s+Editor)\b/i;
+const ARTIFACT_FILENAME_RE = /\b([A-Za-z0-9._-]+\.(?:md|markdown|txt))\b/g;
+
+function extractScreenArtifactNames(lines: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    for (const m of l.matchAll(ARTIFACT_FILENAME_RE)) {
+      const name = m[1]!;
+      if (!seen.has(name)) {
+        seen.add(name);
+        out.push(name);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Detect Antigravity CLI's artifact review states on the live terminal screen:
+ * 1. Open `/artifact` review panel (`Action required (N left)` / `open · approve · reject` / `Submit · Dismiss`);
+ * 2. Open `ArtifactDetailModel` reader (`send + close` / `discard + close` / `Open in Editor`);
+ * 3. Main-screen pending-artifact banner (`N artifact(s) · /artifact to review` / `Press ctrl+r to review pending artifacts.`)
+ *    near the bottom chrome so assistant prose mentioning `/artifact` never false-triggers.
+ */
+export function readAgyArtifactReview(screen: string): AgyArtifactReviewScreen | null {
+  const plain = String(screen ?? "").replace(ANSI_ESCAPE_RE, "");
+  const lines = screenLines(plain);
+  if (!lines.length) return null;
+
+  const head = lines.slice(0, 12);
+  const tail = lines.slice(-14);
+
+  // 1. Open `/artifact` panel (`ArtifactViewModel.View`).
+  const hasActionLeft = lines.map((l) => ARTIFACT_ACTION_LEFT_RE.exec(l)).find(Boolean) ?? null;
+  const hasActionHeader = head.some((l) => ARTIFACT_ACTION_HDR_RE.test(l));
+  const hasPanelHints = tail.some((l) => ARTIFACT_PANEL_HINTS_RE.test(l));
+  const hasPanelActions = lines.some((l) => ARTIFACT_PANEL_ACTIONS_RE.test(l));
+  if (hasActionLeft || (hasActionHeader && (hasPanelHints || hasPanelActions)) || (hasPanelActions && hasPanelHints)) {
+    const pendingCount = hasActionLeft ? Number.parseInt(hasActionLeft[1]!, 10) : null;
+    return {
+      surface: "panel",
+      pendingCount: pendingCount !== null && Number.isFinite(pendingCount) ? pendingCount : null,
+      names: extractScreenArtifactNames(lines),
+    };
+  }
+
+  // 2. Open artifact detail reader (`ArtifactDetailModel`).
+  if (!agyAtPrompt(plain) && tail.some((l) => ARTIFACT_DETAIL_HINTS_RE.test(l))) {
+    return {
+      surface: "detail",
+      pendingCount: null,
+      names: extractScreenArtifactNames(head),
+    };
+  }
+
+  // 3. Main-screen status line (`1 artifact · /artifact to review`) near the composer.
+  // Only scan lines near the bottom chrome (composer + lines right above/below it) so prose in scrollback is ignored.
+  const bottom = lines.slice(-14);
+  for (let i = bottom.length - 1; i >= 0; i--) {
+    const raw = bottom[i]!;
+    // Skip lines that look like a user-typed prompt line (`> ...`) or tool output (`│ ...`).
+    if (/^\s*[>›❯│]/.test(raw)) continue;
+    const m = ARTIFACT_BANNER_RE.exec(raw);
+    if (m) {
+      const n = Number.parseInt(m[1]!, 10);
+      return {
+        surface: "banner",
+        pendingCount: Number.isFinite(n) && n > 0 ? n : 1,
+        names: [],
+      };
+    }
+    if (ARTIFACT_CTRL_R_RE.test(raw)) {
+      return { surface: "banner", pendingCount: null, names: [] };
+    }
+  }
+  return null;
 }
 
 /**

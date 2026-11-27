@@ -27,8 +27,10 @@ import type { AgyBindIO, AgyBinding } from "./bind.ts";
 import { AgyTranscriptFollower, modelInfoOf } from "./items.ts";
 import { commandAnswer, EFFORT_ORDER, findModelGroup, newLines, parseModelLabel, parseModelsOutput, startingState } from "./models.ts";
 import type { AgyModelGroup } from "./models.ts";
-import { agyAtPrompt, agyMovesTo, agyPromptKey, extractAgyShellOutput, parseAgyPermissionBody, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyRunningCommand, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
+import { agyAtPrompt, agyMovesTo, agyPromptKey, extractAgyShellOutput, parseAgyPermissionBody, readAgyArtifactReview, readAgyInterrupted, readAgyPrompt, readAgyQuotaWarning, readAgyRunningCommand, readAgySendNowKey, readAgyStatusBar, readAgyWorkingStatus } from "./screen.ts";
 import type { AgyMode, AgyPrompt, AgyRow } from "./screen.ts";
+import { AgyArtifactTracker, formatArtifactReviewSubmission } from "./artifacts.ts";
+import type { ArtifactEntry, ArtifactReviewRequest } from "./artifacts.ts";
 import { sendAgyBang } from "./bang.ts";
 import {
   buildSwarmActionPrompt,
@@ -135,7 +137,7 @@ const VIEW_COMMANDS: [string, string][] = [
   ["hooks", "Active hooks (in the terminal)"],
   ["plugin", "Plugins manager (in the terminal)"],
   ["agents", "Agents (in the terminal)"],
-  ["artifact", "Artifact review panel (in the terminal)"],
+  ["artifact", "Review and approve artifacts"],
   ["btw", "Ask a quick side question"],
   ["goal", "Run autonomously until the goal is verified"],
   ["grill-me", "Clarify requirements before starting"],
@@ -201,6 +203,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private disposed = false;
   private live = true;
   private status: string | null = null;
+  private statusKind: string | null = null;
+  private statusMessage: string | null = null;
   private fg: Fg | null = null;
   private file: string | null = null;
   private conversationId: string | null = null;
@@ -220,11 +224,19 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   private quitSaid = false;
   private binding = false;
   private usageNow: { contextTokens: number | null; contextWindow: number | null } = { contextTokens: null, contextWindow: null };
-  private ask: { id: string; key: string; prompt: AgyPrompt } | null = null;
+  private ask:
+    | { id: string; key: string; kind: "prompt"; prompt: AgyPrompt }
+    | { id: string; key: string; kind: "artifact"; artifacts: ArtifactEntry[] }
+    | null = null;
   private askSeq = 0;
   private askTimer: NodeJS.Timeout | null = null;
   private answering = false;
   private askHold = 0;
+  private artifactTracker: AgyArtifactTracker | null = null;
+  private artifactsKey = "[]";
+  private artifactOnlyBlock = false;
+  private dismissedArtifactKey: string | null = null;
+  private lastArtifactKey: string | null = null;
   private modelNow: string | null = null;
   private effortNow: string | null = null;
   private modeNow: AgyMode | null = null;
@@ -365,10 +377,23 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   private onStatus(s: Rec | null): void {
     const app = typeof s?.app === "string" ? s.app : null;
-    const state = s && (!app || AGENT_APPS.has(app)) && typeof s.state === "string" ? s.state : null;
-    if (state === this.status) return;
+    const matched = Boolean(s && (!app || AGENT_APPS.has(app)));
+    const state = matched && typeof s!.state === "string" ? s!.state : null;
+    const kind = matched && typeof s!.kind === "string" ? s!.kind : null;
+    const msg = matched && typeof s!.message === "string" ? s!.message : null;
+    const metaChanged = kind !== this.statusKind || msg !== this.statusMessage;
+    this.statusKind = kind;
+    this.statusMessage = msg;
+    if (state === this.status) {
+      if (metaChanged && this.host && state === "blocked" && !this.answering) this.watchAsk();
+      return;
+    }
     const prev = this.status;
     this.status = state;
+    if (state !== "blocked") {
+      this.artifactOnlyBlock = false;
+      if (state === "working") this.dismissedArtifactKey = null;
+    }
     if (!this.host) return;
     if (state === "working" || state === "blocked") {
       this.setQuotaWarning(null);
@@ -513,6 +538,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     this.settle(true);
     this.clearQueued();
     this.clearSwarm();
+    this.clearArtifacts();
     this.emit({ type: "notice", level: "warning", source: "host", text: "Antigravity's terminal has ended." });
   }
 
@@ -612,6 +638,12 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       if (warn && this.running) this.settle();
       this.setQuotaWarning(warn);
       this.handleScreenInterruption(text);
+      const artScreen = readAgyArtifactReview(text);
+      const tracker = this.ensureArtifactTracker();
+      if (tracker) {
+        tracker.scanDisk(artScreen ? (artScreen.pendingCount ?? 1) : 0);
+        this.publishArtifacts();
+      }
     }
     const bar = readAgyStatusBar(text);
     if (!bar) return;
@@ -647,6 +679,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
             this.stopWorkStatus();
             this.settle();
             this.clearSwarm();
+            this.clearArtifacts();
             this.emit({ type: "notice", level: "info", source: "host", text: "Antigravity quit in its terminal. Start it there again and this view follows it." });
           }
         } else {
@@ -674,9 +707,14 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       this.recentBangs.length = 0;
       this.clearQueued();
       this.swarmEtag = null;
+      this.artifactTracker = this.dataDir && b.id ? new AgyArtifactTracker(this.dataDir, b.id) : null;
+      this.artifactOnlyBlock = false;
+      this.dismissedArtifactKey = null;
+      this.lastArtifactKey = null;
       if (!first) this.awaitingHistory = true;
       this.emit({ type: "session", id: b.id, file: b.path, ...(first ? {} : { reload: true }) });
       this.syncSwarm(true);
+      if (first) this.publishArtifacts(true);
     } catch (e) {
       this.log(`binding: ${(e as Error).message}`);
     } finally {
@@ -763,6 +801,8 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     const { lines } = this.readLines(this.file, this.offset);
     const fullFile = fullTranscriptPath(this.file);
     let ended = false;
+    let artifactsChanged = false;
+    const tracker = this.ensureArtifactTracker();
     for (const { text, end } of lines) {
       if (!text.trim()) {
         this.offset = end;
@@ -799,6 +839,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
         const step = (r as Rec).step_index as number;
         for (const k of this.fullCache.keys()) if (k <= step) this.fullCache.delete(k);
       }
+      if (tracker?.feed(r)) artifactsChanged = true;
       const before = this.follower.turn;
       const fed = this.follower.feed(r);
       if (r && typeof r === "object" && !Array.isArray(r) && (r as Rec).type === "USER_INPUT" && this.bangWatchers.size > 0) {
@@ -810,8 +851,14 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       for (const ev of fed) this.emit(this.matchEcho(withImages(ev)));
       if (this.follower.turn !== before) ended = this.follower.turn === "ended";
     }
+    if (artifactsChanged && tracker) {
+      tracker.scanDisk();
+      this.publishArtifacts();
+    }
     this.usageNow = this.follower.usage();
-    if (ended && this.running && this.status !== "working" && this.status !== "blocked") this.settle();
+    if (ended && this.running && this.status !== "working" && (this.status !== "blocked" || (this.artifactOnlyBlock && Boolean(this.dismissedArtifactKey)))) {
+      this.settle();
+    }
   }
 
   private matchEcho(ev: NormalizedEvent): NormalizedEvent {
@@ -874,7 +921,50 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     return { ...ev, source: "external" };
   }
 
-  // ---------------------------------------------------------------- its dialogs
+  // ---------------------------------------------------------------- its dialogs & artifact review
+
+  private isArtifactBlockedStatus(): boolean {
+    return this.status === "blocked" && this.statusMessage !== null && /^Approve plan\b/i.test(this.statusMessage);
+  }
+
+  private canBypassArtifactBlock(): boolean {
+    return this.status === "blocked" && this.ask?.kind !== "prompt" && (this.artifactOnlyBlock || this.isArtifactBlockedStatus());
+  }
+
+  private ensureArtifactTracker(): AgyArtifactTracker | null {
+    if (!this.dataDir || !this.conversationId) return null;
+    if (!this.artifactTracker) {
+      this.artifactTracker = new AgyArtifactTracker(this.dataDir, this.conversationId);
+    }
+    return this.artifactTracker;
+  }
+
+  private publishArtifacts(force = false): void {
+    const list = this.artifactTracker ? this.artifactTracker.summaryList() : [];
+    const key = JSON.stringify(list);
+    if (force || key !== this.artifactsKey) {
+      this.artifactsKey = key;
+      this.emit({ type: "artifacts", artifacts: list });
+    }
+    const pendingKey = this.artifactTracker?.pendingKey() ?? null;
+    if (pendingKey !== this.lastArtifactKey) {
+      if (this.dismissedArtifactKey && pendingKey !== this.dismissedArtifactKey) {
+        this.dismissedArtifactKey = null;
+      }
+      this.lastArtifactKey = pendingKey;
+    }
+  }
+
+  private clearArtifacts(): void {
+    this.artifactTracker = null;
+    this.artifactOnlyBlock = false;
+    this.dismissedArtifactKey = null;
+    this.lastArtifactKey = null;
+    if (this.artifactsKey !== "[]") {
+      this.artifactsKey = "[]";
+      this.emit({ type: "artifacts", artifacts: [] });
+    }
+  }
 
   private watchAsk(): void {
     if (this.askTimer || this.disposed) return;
@@ -884,14 +974,52 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   private async pollAsk(): Promise<void> {
     if (!this.disposed && this.status === "blocked" && !this.answering && Date.now() >= this.askHold) {
-      const p = await this.screenPrompt();
-      if (this.status === "blocked" && !this.answering && Date.now() >= this.askHold && p !== undefined) this.showAsk(p);
+      const screen = await this.screenText();
+      if (this.status === "blocked" && !this.answering && Date.now() >= this.askHold && screen !== null) {
+        const p = readAgyPrompt(screen);
+        if (p) {
+          this.artifactOnlyBlock = false;
+          this.showAsk(p);
+        } else {
+          this.pollArtifactAsk(screen);
+        }
+      }
     }
     this.askTimer = null;
     if (!this.disposed && this.status === "blocked") {
       this.askTimer = setTimeout(() => void this.pollAsk(), ASK_MS());
       this.askTimer.unref();
     }
+  }
+
+  private pollArtifactAsk(screen: string): void {
+    const artScreen = readAgyArtifactReview(screen);
+    const isArtBlock = this.isArtifactBlockedStatus() || artScreen !== null;
+    if (!isArtBlock) {
+      this.artifactOnlyBlock = false;
+      this.closeAsk();
+      return;
+    }
+    this.tail();
+    const tracker = this.ensureArtifactTracker();
+    const expected = artScreen?.pendingCount ?? 1;
+    if (tracker) {
+      tracker.scanDisk(expected);
+      this.publishArtifacts();
+    }
+    const pending = tracker ? tracker.pendingWithContent() : [];
+    const key = `artifact:${tracker?.pendingKey() ?? (artScreen?.names.join(",") || "pending")}`;
+    this.artifactOnlyBlock = true;
+    if (this.dismissedArtifactKey === key) {
+      this.closeAsk();
+      if (this.running && this.follower?.turn === "ended") this.settle();
+      return;
+    }
+    if (!pending.length) {
+      this.closeAsk();
+      return;
+    }
+    this.showAskArtifact(key, pending);
   }
 
   private async screenPrompt(): Promise<AgyPrompt | null | undefined> {
@@ -914,7 +1042,7 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   private showAsk(p: AgyPrompt | null): void {
     const key = p ? agyPromptKey(p) : null;
-    if (this.ask && key === this.ask.key) {
+    if (this.ask?.kind === "prompt" && key === this.ask.key) {
       this.ask.prompt = p!;
       return;
     }
@@ -923,8 +1051,22 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     // Pull any freshly-flushed pending tool call so command approvals can recover exact verbatim CommandLine text.
     if (p.kind === "permission") this.tail();
     const id = `tv-ask-${++this.askSeq}`;
-    this.ask = { id, key, prompt: p };
+    this.ask = { id, key, kind: "prompt", prompt: p };
     this.emit({ type: "ask", ask: this.askOf(id, p) });
+  }
+
+  private showAskArtifact(key: string, artifacts: ArtifactEntry[]): void {
+    if (this.ask?.kind === "artifact" && this.ask.key === key) {
+      this.ask.artifacts = artifacts;
+      return;
+    }
+    this.closeAsk();
+    const id = `tv-ask-${++this.askSeq}`;
+    this.ask = { id, key, kind: "artifact", artifacts };
+    const title = artifacts.length === 1
+      ? `Review ${artifacts[0]!.name}`
+      : `Review ${artifacts.length} artifacts`;
+    this.emit({ type: "ask", ask: { id, kind: "artifact", title, artifacts } });
   }
 
   private closeAsk(): void {
@@ -1111,14 +1253,76 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     });
   }
 
+  /** If Antigravity currently has its `/artifact` review panel or detail reader open, close it back to the `>` prompt. */
+  private async ensurePromptFromArtifactOverlay(): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const screen = await this.screenText();
+      if (screen === null) return;
+      if (readAgyPrompt(screen)) throw new Error(ASKING_CARD);
+      if (agyAtPrompt(screen)) return;
+      const art = readAgyArtifactReview(screen);
+      if (!art || art.surface === "banner") return;
+      await this.pressKeys(["esc"]);
+      for (let wait = 0; wait < 10; wait++) {
+        await new Promise((r) => setTimeout(r, 100));
+        const next = await this.screenText();
+        if (next && agyAtPrompt(next)) return;
+      }
+    }
+  }
+
+  private async submitArtifactReview(req: ArtifactReviewRequest, askKey?: string | null): Promise<void> {
+    this.tail();
+    const tracker = this.ensureArtifactTracker();
+    if (tracker) {
+      tracker.scanDisk(this.isArtifactBlockedStatus() ? 1 : 0);
+      this.publishArtifacts();
+    }
+    const all = tracker?.summaryList() ?? [];
+    const pendingNames = all.filter((e) => e.status === "pending").map((e) => e.name);
+    const currentKey = askKey ?? (tracker?.pendingKey() ? `artifact:${tracker.pendingKey()}` : null);
+
+    if (req.action === "dismiss") {
+      if (currentKey) this.dismissedArtifactKey = currentKey;
+      this.closeAsk();
+      await this.ensurePromptFromArtifactOverlay().catch(() => {});
+      if (this.running && this.follower?.turn === "ended") this.settle();
+      return;
+    }
+
+    const payload = formatArtifactReviewSubmission(req, pendingNames, all[0]?.name ?? null);
+    await this.ensurePromptFromArtifactOverlay();
+    this.log(`artifact review: ${req.action}${req.artifact ? ` (${req.artifact})` : ""}`);
+    const r = await this.hc(["send", "--json", "--force", this.opts.terminal, payload], 70_000);
+    if (r.code !== 0) {
+      throw new Error(`Couldn't submit artifact review: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
+    }
+    this.closeAsk();
+    this.dismissedArtifactKey = null;
+    this.artifactOnlyBlock = false;
+    if (tracker) {
+      if (req.action === "approve_all") {
+        for (const name of pendingNames) tracker.applyDecision(name, "approved");
+      } else if (req.action === "approve") {
+        tracker.applyDecision(req.artifact || pendingNames[0] || all[0]?.name || "", "approved");
+      } else if (req.action === "reject") {
+        tracker.applyDecision(req.artifact || pendingNames[0] || all[0]?.name || "", "rejected");
+      }
+      this.publishArtifacts();
+    }
+  }
+
   private async typeInlineCommand(line: string, check: (bar: ReturnType<typeof readAgyStatusBar>) => boolean): Promise<void> {
     if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
     if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
-    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    const force = this.canBypassArtifactBlock();
+    if (this.status === "blocked" && !force) throw new Error(this.ask ? ASKING_CARD : ASKING);
+    if (force) await this.ensurePromptFromArtifactOverlay();
     const before = await this.screenText();
     let sent: { code: number | null; out: string } | null = null;
     let sentAt = 0;
-    void this.hc(["send", "--json", this.opts.terminal, line], 70_000).then((r) => {
+    const sendArgs = force ? ["send", "--json", "--force", this.opts.terminal, line] : ["send", "--json", this.opts.terminal, line];
+    void this.hc(sendArgs, 70_000).then((r) => {
       sent = { code: r.code, out: r.stdout || r.stderr };
       sentAt = Date.now();
     });
@@ -1218,10 +1422,12 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
       }
     }
     const past = new AgyTranscriptFollower({ history: true, catalog: () => this.catalog });
+    const tracker = this.ensureArtifactTracker();
     const out: NormalizedEvent[] = [];
     const now = new Map<string, NormalizedEvent>();
     for (const rec of parsed) {
       const full = typeof rec.step_index === "number" ? this.fullCache.get(rec.step_index) ?? rec : rec;
+      tracker?.feed(full);
       for (const ev of past.feed(full)) {
         if (ev.type === "model" || ev.type === "thinking") now.set(ev.type, ev);
         else out.push(withImages(ev));
@@ -1229,6 +1435,10 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     }
     this.fullCache.clear();
     for (const ev of now.values()) this.emit(ev);
+    if (tracker) {
+      tracker.scanDisk(this.isArtifactBlockedStatus() ? 1 : 0);
+      this.publishArtifacts(true);
+    }
     this.usageNow = past.usage();
     if (this.usageNow.contextTokens !== null) queueMicrotask(() => this.emit({ type: "turn_end" }));
     past.setLive();
@@ -1239,12 +1449,16 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   async prompt(p: { id: string; text: string; images: ImageBlock[]; mode: PromptMode; busy: boolean; noBang?: boolean }): Promise<{ disposition: Disposition }> {
     if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
     if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
-    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    const artifactBypass = this.canBypassArtifactBlock();
+    if (this.status === "blocked" && !artifactBypass) throw new Error(this.ask ? ASKING_CARD : ASKING);
     const trimmed = p.text.trim();
     const bang = !p.noBang && !/[\r\n]/.test(trimmed) && trimmed.length <= 4000 ? /^!\s*([^\s=!].*)$/.exec(trimmed) : null;
     if (bang && this.status === "working") throw new Error(BUSY);
     const command = Boolean(bang) || /^\/\S/.test(trimmed);
     if (command && p.images.length) throw new Error("Images go with a message, not a command: send them on their own or with words.");
+    if (artifactBypass) {
+      await this.ensurePromptFromArtifactOverlay();
+    }
     if (bang) {
       // `hc send` bracketed-pastes `!cmd`, which `agy` treats as a literal LLM prompt instead of
       // opening bash mode; type raw `!` over `hc connect` (`terminal.attach`), verify bash mode,
@@ -1262,17 +1476,24 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
     const display = p.text.trim() || (p.images.length === 1 ? "[1 image]" : `[${p.images.length} images]`);
     // Hold steering messages locally while Antigravity is working so they stay cleanly editable/removable
     // in the chat UI and can be flushed on demand via Send immediately or drained when the turn settles.
-    if (p.busy && !command) {
+    // When paused only for artifact review at the `>` prompt, deliver directly instead of holding in the queue.
+    if (p.busy && !command && !artifactBypass) {
       this.queued.push({ id: p.id, text: display, raw: p.text, sendText: text });
       this.publishQueue();
       return { disposition: "queued" };
     }
     const sent = { id: p.id, text: p.text, at: Date.now() };
     if (!command) this.sent.push(sent);
-    const r = await this.hc(["send", "--json", this.opts.terminal, text], 70_000);
+    const sendArgs = artifactBypass
+      ? ["send", "--json", "--force", this.opts.terminal, text]
+      : ["send", "--json", this.opts.terminal, text];
+    const r = await this.hc(sendArgs, 70_000);
     if (r.code !== 0) {
       this.sent = this.sent.filter((x) => x !== sent);
       throw new Error(`Couldn't type into the terminal: ${sendError(r.stdout || r.stderr) || `hc exit ${r.code}`}`);
+    }
+    if (artifactBypass) {
+      this.closeAsk();
     }
     if (command) return { disposition: "handled" };
     return { disposition: "started" };
@@ -1340,20 +1561,55 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
 
   answer(askId: string, a: AskAnswer): void {
     const ask = this.ask;
-    const what = "choice" in a ? `choice ${a.choice}${a.message ? " with a reason" : ""}` : Object.keys(a).join(",");
+    const what = "choice" in a
+      ? `choice ${a.choice}${a.message ? " with a reason" : ""}`
+      : "artifactAction" in a
+        ? `artifact:${a.artifactAction}${a.artifact ? `(${a.artifact})` : ""}`
+        : Object.keys(a).join(",");
     if (!ask || ask.id !== askId) {
       this.log(`dialog: ${what} for ${askId}, not the open one (${ask?.id ?? "none"})`);
       return;
     }
-    this.log(`dialog: ${ask.prompt.kind} ${askId}: ${what}`);
+    const label = ask.kind === "artifact" ? "artifact" : ask.prompt.kind;
+    this.log(`dialog: ${label} ${askId}: ${what}`);
     this.ask = null;
     this.answering = true;
-    void this.answerAsk(ask.key, a)
+    const work = ask.kind === "artifact"
+      ? this.submitArtifactReview(
+          "artifactAction" in a
+            ? { action: a.artifactAction, ...(a.artifact ? { artifact: a.artifact } : {}), ...(a.message ? { message: a.message } : {}) }
+            : { action: "dismiss" },
+          ask.key,
+        )
+      : this.answerAsk(ask.key, a);
+    void work
       .catch((e: Error) => this.emit({ type: "notice", level: "warning", source: "host", text: `Couldn't answer in Antigravity's terminal: ${e.message}` }))
       .finally(() => {
         this.answering = false;
         this.askHold = Date.now() + ASK_SETTLE_MS;
       });
+  }
+
+  readArtifact(name: string): ArtifactEntry | null {
+    const tracker = this.ensureArtifactTracker();
+    if (!tracker) return null;
+    tracker.scanDisk();
+    return tracker.readArtifact(name);
+  }
+
+  async artifactReview(req: ArtifactReviewRequest): Promise<void> {
+    if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
+    if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
+    if (this.status === "blocked" && !this.canBypassArtifactBlock() && req.action !== "dismiss") {
+      throw new Error(this.ask ? ASKING_CARD : ASKING);
+    }
+    this.answering = true;
+    try {
+      await this.submitArtifactReview(req);
+    } finally {
+      this.answering = false;
+      this.askHold = Date.now() + ASK_SETTLE_MS;
+    }
   }
 
   async dispose(): Promise<void> {
@@ -1612,7 +1868,9 @@ export class AntigravityTerminalAdapter implements ProviderAdapter {
   async setPermissionMode(mode: string): Promise<void> {
     if (!this.live) throw new AgentError("Antigravity's terminal has ended.", true);
     if (!this.agyRuns()) throw new Error("Antigravity isn't running in its terminal. Start it there (Ctrl+Shift+J flips to it).");
-    if (this.status === "blocked") throw new Error(this.ask ? ASKING_CARD : ASKING);
+    const bypass = this.canBypassArtifactBlock();
+    if (this.status === "blocked" && !bypass) throw new Error(this.ask ? ASKING_CARD : ASKING);
+    if (bypass) await this.ensurePromptFromArtifactOverlay();
     const want = (mode === "acceptEdits" ? "accept-edits" : mode) as AgyMode;
     if (!MODES.some((m) => m.id === want)) throw new Error(`Unknown Antigravity mode "${mode}".`);
     const cur = readAgyStatusBar((await this.screenText()) ?? "");

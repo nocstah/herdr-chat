@@ -157,6 +157,62 @@ export function decorateInlineCode(text, bgColor) {
   }).join("\n");
 }
 
+/**
+ * UTF-16 `{ start, end }` offsets of standalone single-line inline code spans in Markdown,
+ * for Herdr 0.1.18+'s `TextView.highlight_range()` (replaces `<mark>` HTML injection so
+ * `.raw_html(false)` can stay on and `selection.range` maps cleanly to Markdown source).
+ * @param {string} text
+ * @returns {Array<{ start: number, end: number }>}
+ */
+export function inlineCodeRanges(text) {
+  if (!text || !text.includes("`")) return [];
+  const ranges = [];
+  let fence = null;
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    const f = FENCE_RE.exec(line);
+    if (fence) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) fence = null;
+      offset += line.length + 1;
+      continue;
+    }
+    if (f) {
+      fence = f[1];
+      offset += line.length + 1;
+      continue;
+    }
+    if (!/^( {4}|\t)/.test(line) && line.includes("`")) {
+      const re = new RegExp(INLINE_TOKEN_RE.source, "g");
+      let m;
+      while ((m = re.exec(line)) !== null) {
+        if (m[1] && m[2] && m[2].trim()) {
+          ranges.push({ start: offset + m.index, end: offset + m.index + m[0].length });
+        }
+      }
+    }
+    offset += line.length + 1;
+  }
+  return ranges;
+}
+
+/**
+ * Case-insensitive UTF-16 `{ start, end }` ranges of `query` in `text` for `TextView.highlight_range()`.
+ * @param {string} text
+ * @param {string | null | undefined} query
+ * @param {number} [limit]
+ * @returns {Array<{ start: number, end: number }>}
+ */
+export function findMatchRanges(text, query, limit = 80) {
+  const q = String(query ?? "").trim().toLowerCase();
+  if (!q || !text) return [];
+  const hay = text.toLowerCase();
+  const out = [];
+  for (let at = hay.indexOf(q); at >= 0 && out.length < limit; at = hay.indexOf(q, at + q.length)) {
+    out.push({ start: at, end: at + q.length });
+  }
+  return out;
+}
+
 // Structured markdown chunker: splits markdown blocks into typed chunks (headings,
 // horizontal rules, GitHub callouts, blockquotes, GFM pipe tables, clean lists, and
 // prose) so rich.js can apply Antigravity-style color flavor while preserving spacing

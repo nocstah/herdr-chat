@@ -28,9 +28,10 @@
 import { View, div } from "gpui-kit";
 import { fps_monitor } from "gpui-fps";
 import { v_flex, h_flex, Popup, ScrollHandle } from "gpui-base";
+import * as herdr from "herdr";
 import { agents, appHome, closeOverlay, focused, hc, home, layout, nextCommand, notify, openOverlay, panes, props, run, settings, setShared, shared, spaces, terminals, theme, updates, window as appWindow } from "herdr";
 import { faceOf, facesOf, flip, sharedFace } from "./faces.js";
-import { HANDOFF_MS, SETTLE_MS, copiedText, ctrlCCommand, messageMenuItems, swallowsStop } from "./selcopy.js";
+import { messageMenuItems, selectionForQuote, updateSelection } from "./selcopy.js";
 import { MessageMenu } from "./msgmenu.js";
 import { HOVER_CLAIM_MS, mayClaim, typedChar } from "./claim.js";
 
@@ -60,6 +61,8 @@ import { buildRows, cardLive, defaultOpen, groupCards } from "./rows.js";
 import { space } from "./space.js";
 import { activityDrawer, backgroundStrip, emptyState, micButton, planStrip, plusButton, queueChips, queueLabels, underRow, widgetTray } from "./chrome.js";
 import { SwarmPanel, swarmDrawer, swarmModal, swarmStrip } from "./swarm.js";
+import { ArtifactReviewPanel, artifactDialogCard, artifactModal, artifactStrip } from "./artifacts.js";
+import { pendingArtifactsOf } from "./artifact-logic.js";
 import { bgDetailLines, bgTicking } from "./background.js";
 import { openFile, openFolder } from "./files.js";
 import { Composer } from "./composer.js";
@@ -138,6 +141,7 @@ export default class HerdrChat extends View {
     this.activityScroll = ScrollHandle.new();
     this.activityScrollCount = 0;
     this.swarm = new SwarmPanel(this);
+    this.artifacts = new ArtifactReviewPanel(this, cx);
     this.picker = null;
     this.handoff = null;
     this.transcript = false;
@@ -219,8 +223,11 @@ export default class HerdrChat extends View {
       // req logs a failure. An older host has no detach_image / detach_file: its chips aren't the chat's copies.
       onRemoveChip: (ch, cx) => this.handleRemoveChip(ch, cx),
       skills: () => this.commandList().filter((c) => c.source === "skill").map((c) => ({ command: c.name, name: c.name.replace(/^skill:/, "") })),
-    });    // A copy key in the composer with no text of its own selected: the text selected in the chat (selcopy.js).
-    this.composer.copyMiss = (cx) => this.handOffCopy(cx);
+    });
+    // Live TextView selection reported via TextView.on_selection_change (Herdr 0.1.18+).
+    this.textSelection = null;
+    // A copy key in the composer with no text of its own selected: copy the active chat selection.
+    this.composer.copyMiss = (cx) => this.copySelectedText(cx);
     // The chat's own hold on the keyboard: a click on the conversation keeps the keys here, for typeAnywhere.
     this.rootFocus = cx.focus_handle();
 
@@ -451,7 +458,8 @@ export default class HerdrChat extends View {
       this.bgDetail = null;
       changed = true;
     }
-    if (bgTicking(this.store.state.background) || this.bgOpenId) {
+    const visible = appWindow()?.visible !== false;
+    if (visible && (bgTicking(this.store.state.background) || this.bgOpenId)) {
       const sec = Math.floor(Date.now() / 1000);
       if (sec !== this.bgSecond) {
         this.bgSecond = sec;
@@ -509,9 +517,9 @@ export default class HerdrChat extends View {
     if (this.svgWanted?.size) this.loadSizes(cx);
     if (this.mirrorWanted?.size) this.loadMirrors(cx);
     if (Date.now() - (this.sweptAt ?? 0) > 30000) this.sweepOrphans(cx);
-    // Elapsed seconds (thinking, the activity line) while Pi works: data, once a second.
+    // Elapsed seconds (thinking, the activity line) while Pi works: data, once a second while visible.
     const sec = Math.floor(Date.now() / 1000);
-    if ((this.store.working() || this.store.state.dialog) && sec !== this.lastSec) { this.lastSec = sec; changed = true; }
+    if (visible && (this.store.working() || this.store.state.dialog) && sec !== this.lastSec) { this.lastSec = sec; changed = true; }
     if (this.copiedAt.size) for (const [k, at] of this.copiedAt) if (Date.now() - at > 1500) {
       this.copiedAt.delete(k);
       changed = true;
@@ -943,7 +951,8 @@ export default class HerdrChat extends View {
     const block = b ?? cur?.block;
     if (!block) return;
     const themeKey = themeSig(theme());
-    const props = block.type === "markdown" ? { owner: this.uid, key, markdown: block.text ?? "", id: `md-${key.replace(":", "-")}`, themeKey }
+    const findQuery = this.find?.query?.trim() || "";
+    const props = block.type === "markdown" ? { owner: this.uid, key, itemId: key.split(":")[0], markdown: block.text ?? "", id: `md-${key.replace(":", "-")}`, themeKey, findQuery }
       : { owner: this.uid, key, lang: block.lang ?? null, code: block.code ?? "", lines: block.lines ?? null,
         full: this.expanded.has(`code:${key}`), copied: this.copiedAt.has(`code:${key}`), themeKey };
     if (!cur) {
@@ -952,7 +961,7 @@ export default class HerdrChat extends View {
       return;
     }
     const p = cur.props;
-    if (p.markdown === props.markdown && p.code === props.code && p.lang === props.lang && p.full === props.full && p.copied === props.copied && p.themeKey === props.themeKey && (p.lines?.length ?? 0) === (props.lines?.length ?? 0)) return;
+    if (p.markdown === props.markdown && p.code === props.code && p.lang === props.lang && p.full === props.full && p.copied === props.copied && p.themeKey === props.themeKey && p.findQuery === props.findQuery && (p.lines?.length ?? 0) === (props.lines?.length ?? 0)) return;
     cur.props = props;
     cur.block = block;
     cur.entity.set_props(props);
@@ -983,6 +992,7 @@ export default class HerdrChat extends View {
     } else if (rec.t === "snapshot") {
       this.store.snapshot(rec);
       this.loadedAt = Date.now();
+      this.textSelection = null;
       if (!this.cwd) this.cwd = this.store.state.cwd;
       this.full.clear();
       this.afterState(cx);
@@ -1043,11 +1053,12 @@ export default class HerdrChat extends View {
     const s = this.store.state;
     this.modUi.sync(cx);
     this.reportModRoom(cx);
-    // A permission or questions card leaves the keyboard in the composer
+    // A permission, questions, or artifact card leaves the keyboard in the composer
     // (number keys, Enter and Esc answer while it's empty).
     this.dialog.sync(s.dialog);
+    this.artifacts?.sync(s);
     this.composer.dialogKeys = s.dialog?.method === "select" || s.dialog?.method === "confirm";
-    this.composer.askCard = s.dialog?.method === "permission" || s.dialog?.method === "questions" ? s.dialog.method : null;
+    this.composer.askCard = s.dialog?.method === "permission" || s.dialog?.method === "questions" || s.dialog?.method === "artifact" ? s.dialog.method : null;
     if (s.editorText != null && s.editorText !== this.editorAcked) {
       this.editorAcked = s.editorText;
       this.composer.set(s.editorText);
@@ -1145,6 +1156,11 @@ export default class HerdrChat extends View {
       this.composer.clear();
       if (this.store.state.swarm) return this.swarm.openTab("overview", cx);
       return this.swarm.openStart(cx);
+    }
+    if (this.view && m?.[1] === "artifact" && !m[2].trim() && !hasAttachments && this.providerId() === "antigravity") {
+      this.pastePreviewId = null;
+      this.composer.clear();
+      return this.artifacts.openModal(null, cx);
     }
     if (m && !hasAttachments) {
       const cmd = this.commandList().find((c) => c.name === m[1]);
@@ -1359,7 +1375,12 @@ export default class HerdrChat extends View {
   viewWord(all = false) {
     const st = this.viewStatus;
     // Waiting on a dialog the chat shows as a card: answered here; one it doesn't know: in the terminal.
-    const words = { working: "working", blocked: this.store.state.dialog ? "needs you" : "needs you in the terminal", done: "finished", idle: "idle", ended: "terminal ended" };
+    const blockedWord = this.store.state.dialog
+      ? "needs you"
+      : pendingArtifactsOf(this.store.state.artifacts).length
+        ? "review artifact"
+        : "needs you in the terminal";
+    const words = { working: "working", blocked: blockedWord, done: "finished", idle: "idle", ended: "terminal ended" };
     return all || st === "blocked" || st === "ended" ? words[st] ?? "" : "";
   }
 
@@ -1480,10 +1501,9 @@ export default class HerdrChat extends View {
   uploadFiles(cx) {
     if (this.pickingFiles) return;
     this.pickingFiles = true;
-    const startDir = this.remoteMachine() ? this.homeDir : (this.store.state.cwd || this.cwd || this.homeDir);
     cx.spawn(async (cx) => {
       try {
-        const paths = await pickFiles(exec, { platform: MAC ? "darwin" : "linux", startDir });
+        const paths = await pickFiles(herdr.pickFiles, { prompt: "Upload files", multiple: true });
         if (paths.length) this.drop(paths, cx);
         else this.composer.focus();
       } catch (e) {
@@ -1886,8 +1906,6 @@ export default class HerdrChat extends View {
       case "mode": return toggle("permission", () => this.openModePicker(cx));
       case "cycleMode": return this.cycleMode(cx);
       case "stop":
-        // the Ctrl+C a copy asked Herdr for: not the person's Stop, but on to Herdr's own copy of the selection
-        if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; cx.propagate(); return; }
         if (!this.store.working()) return this.flash("Nothing to stop", cx);
         return this.abort(cx);
       case "tui":
@@ -2215,9 +2233,10 @@ export default class HerdrChat extends View {
     else if (a === "herdrchat_up") this.composer.recall(this.store.sentPrompts(), -1);
     else if (a === "herdrchat_down") this.composer.recall(this.store.sentPrompts(), 1);
     else if (a === "herdrchat_enter") this.send(cx);
-    else if (a === "herdrchat_stop") { if (swallowsStop(this.copyHandoffUntil, Date.now())) { this.copyHandoffUntil = 0; cx.propagate(); } else this.abort(cx); }
+    else if (a === "herdrchat_stop") this.abort(cx);
     else if (a === "herdrchat_escape") {
       if (this.pastePreviewId) return this.closePastePreview(cx);
+      if (this.artifacts?.modalOpen) return this.artifacts.closeModal(cx);
       if (this.swarm?.open || this.swarm?.startOpen) return this.swarm.close(cx);
       if (m) this.composer.menu = null;
       else if (this.store.state.dialog) this.answer("cancel", null, cx);
@@ -2252,6 +2271,12 @@ export default class HerdrChat extends View {
       else return false;
       return true;
     }
+    if (d.method === "artifact" && this.artifacts) {
+      if (digit) return this.artifacts.shortcut(Number(digit[1]), d, cx);
+      if (a === "herdrchat_enter") return this.artifacts.shortcut("enter", d, cx);
+      if (a === "herdrchat_escape") return this.artifacts.shortcut("escape", d, cx);
+      return false;
+    }
     return false;
   }
 
@@ -2264,6 +2289,7 @@ export default class HerdrChat extends View {
     else if (kind === "submit") args = { dialog: d.id, value: this.dialog.value() };
     else if (kind === "choice") { if (!value) return; args = { dialog: d.id, ...value }; }
     else if (kind === "answers") { if (!value) return; args = { dialog: d.id, answers: value }; }
+    else if (kind === "artifact") { if (!value) return; args = { dialog: d.id, ...value }; }
     else args = { dialog: d.id, value };
     this.lastAnswer = { ...args, at: Date.now() };
     this.fire("dialog_answer", args, cx);
@@ -2343,44 +2369,34 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
-  // The text selected in the chat's text views, which only Herdr's own Ctrl+C copies (selcopy.js): for a copy key
-  // with nothing of an input's own to copy (Super+C), and a message's right-click (look: {it, text}), whose menu
-  // offers Copy for what this found, then Copy message. On Linux only, through Hyprland: elsewhere, a hint, or the
-  // menu without Copy.
-  /** @param {import("gpui-kit").Context} cx @param {{ it: any, text: string } | null} [look] */
-  handOffCopy(cx, look = null) {
-    /** @param {any} cx */
-    const read = (cx) => { try { return cx.read_from_clipboard() ?? null; } catch { return null; } };
-    if (appWindow()?.platform !== "linux") return look ? this.openMessageMenu(look, null) : undefined;
-    const before = read(cx);
-    this.copyHandoffUntil = Date.now() + HANDOFF_MS;
-    // The composer's Ctrl+C copies its own field: while it has the keys, the chat holds them for the hand-off, so
-    // Herdr's copy sees the chat's selection, and the composer has them back after.
-    const giveBack = Boolean(this.composer?.focused && this.rootFocus);
-    if (giveBack) this.rootFocus.focus();
-    cx.spawn(async (cx) => {
-      await cx.sleep(0);
-      const { program, args } = ctrlCCommand();
-      const r = await exec(program, args, { timeout: 5000 }).catch(() => null);
-      if (r?.code === 0) await cx.sleep(SETTLE_MS);
-      else this.copyHandoffUntil = 0;
-      const got = r?.code === 0 ? copiedText(before, read(cx)) : null;
-      if (giveBack && this.rootFocus?.is_focused?.()) this.composer.focus();
-      if (look) {
-        // a look, not a copy: the clipboard's text goes back (a picture on it can't, and gives way to the text)
-        if (got != null && typeof before === "string") cx.write_to_clipboard(before);
-        this.openMessageMenu(look, got);
-      } else if (got != null) this.flash(`Copied ${plural(got.length, "character")}`, cx);
-      else if (r?.code === 0) this.flash("Nothing new to copy: select text in the chat first", cx);
-      else this.flash("Select the text, then press Ctrl+C to copy it", cx);
-      this.debug.mark();
-      cx.notify();
-    });
+  // Live selection from TextView.on_selection_change (Herdr 0.1.18+).
+  /** @param {string} viewId @param {any} sel @param {{ itemId?: string | null, source?: string | null }} [meta] @param {import("gpui-kit").Context} [cx] */
+  onTextSelection(viewId, sel, meta, cx) {
+    this.textSelection = updateSelection(this.textSelection, viewId, sel, meta);
+    this.debug.mark();
+    cx?.notify?.();
   }
 
-  // Something in the chat other than the composer has the keys: a question card, a picker, a dialog, find.
+  // Copy active chat TextView selection directly (Super+C / Ctrl+Shift+C / Ctrl+Insert),
+  // cross-platform and synchronous without shelling out or touching the clipboard on empty selection.
+  /** @param {import("gpui-kit").Context} cx */
+  copySelectedText(cx) {
+    const text = this.textSelection?.text ?? "";
+    if (text) {
+      cx.write_to_clipboard(text);
+      this.copied = text.length;
+      this.lastCopy = { id: "text-selection", len: text.length, text: text.slice(0, 500) };
+      this.flash(`Copied ${plural(text.length, "character")}`, cx);
+    } else {
+      this.flash("Nothing selected to copy", cx);
+    }
+    this.debug.mark();
+    cx.notify();
+  }
+
+  // Something in the chat other than the composer has the keys: a question card, a picker, a dialog, find, or a modal.
   keysBusy() {
-    return Boolean(this.picker || this.store?.state?.dialog || this.find || this.composer?.askCard);
+    return Boolean(this.picker || this.store?.state?.dialog || this.find || this.composer?.askCard || this.artifacts?.modalOpen || this.pastePreviewId);
   }
 
   // A character typed while the chat has the keyboard outside its inputs (the conversation clicked, text selected in
@@ -2432,8 +2448,8 @@ export default class HerdrChat extends View {
     this.pointerInAt = 0;
   }
 
-  /** @param {{ it: any, text: string }} look @param {string | null} selection */
-  openMessageMenu(look, selection) {
+  /** @param {{ it: any, text: string }} look @param {string | null} [selection] */
+  openMessageMenu(look, selection = this.textSelection?.text ?? null) {
     const items = messageMenuItems(selection, look.text);
     if (items.length) openOverlay({ mod: MOD, kind: "popup", props: { messageMenu: { items } }, width: 250, height: 10 + items.length * 26 });
   }
@@ -2455,22 +2471,22 @@ export default class HerdrChat extends View {
     cx.notify();
   }
 
-  // Quote an answer in your reply, as a markdown quote after what the draft holds: the
-  // part of it you copied (select, Ctrl+C, Quote; mods can't read a text view's
-  // selection), else all of it.
+  // Quote an answer in your reply, as a markdown quote after what the draft holds:
+  // prefers the live TextView selection in this answer (with Markdown formatting),
+  // else a snippet copied to the clipboard, else the whole answer.
   /** @param {any} it @param {import("gpui-kit").Context} cx */
   quote(it, cx) {
     const whole = String(it.text ?? "").trim();
     if (!whole) return;
     let clip = "";
     try { clip = (cx.read_from_clipboard() ?? "").trim(); } catch {}
-    const part = plainText(clip).length >= 8 && clip.length < whole.length && plainText(whole).includes(plainText(clip)) ? clip : null;
-    const body = (part ?? whole).split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n");
+    const picked = selectionForQuote(this.textSelection, it.id, whole, clip, plainText);
+    const body = (picked?.body ?? whole).split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n");
     const draft = this.composer.value.trimEnd();
     this.composer.set(`${draft ? `${draft}\n\n` : ""}${body}\n\n`);
     this.composer.focus();
-    this.lastQuote = { item: it.id, part: Boolean(part), len: body.length };
-    this.flash(part ? "Quoted the part you copied" : "Quoted the answer", cx);
+    this.lastQuote = { item: it.id, part: Boolean(picked), source: picked?.source ?? "whole", len: body.length };
+    this.flash(picked?.source === "selection" ? "Quoted your selection" : picked ? "Quoted the part you copied" : "Quoted the answer", cx);
   }
 
   // Edit and resend: the message's text back in the composer.
@@ -2607,6 +2623,7 @@ export default class HerdrChat extends View {
   /** @param {import("gpui-kit").Context} cx */
   closeFind(cx) {
     this.find = null;
+    this.syncCode(cx);
     this.composer.focus();
     this.debug.mark();
     cx.notify();
@@ -2629,7 +2646,8 @@ export default class HerdrChat extends View {
     const seq = ++f.seq;
     const q = f.query;
     f.busy = Boolean(q.trim());
-    if (!q.trim()) { f.set([], 0, false); this.debug.mark(); cx.notify(); return; }
+    if (!q.trim()) { f.set([], 0, false); this.syncCode(cx); this.debug.mark(); cx.notify(); return; }
+    this.syncCode(cx);
     cx.spawn(async (cx) => {
       await cx.sleep(150);
       if (this.find !== f || f.seq !== seq) return;
@@ -2691,7 +2709,24 @@ export default class HerdrChat extends View {
     if (bang) return this.askRun([bang], cx);
     const f = fileLink(url);
     if (f) return this.openFile(f.path, f.line, cx, { mustExist: true, anchor: f.anchor });
-    if (/^https?:\/\//i.test(url)) return cx.open_url(url);
+    if (/^https?:\/\//i.test(url)) {
+      const opener = /** @type {{ command?: string[] } | null} */ (shared("inapse-spaces.open-url"));
+      if (Array.isArray(opener?.command) && opener.command.length > 0) {
+        const me = this.myPane();
+        const sp = me ? spaces().find((x) => x.tabs.some((tb) => tb.id === me.tab))?.id ?? null : null;
+        const cmd = opener.command;
+        const args = [...cmd.slice(1), url, ...(sp ? ["--space", sp] : [])];
+        cx.spawn(async (cx) => {
+          try {
+            const r = await exec(cmd[0], args, { timeout: 15000 });
+            if (r?.code === 0) return;
+          } catch {}
+          cx.open_url(url);
+        });
+        return;
+      }
+      return cx.open_url(url);
+    }
     this.flash(`Can't open link: ${url}`, cx);
   }
 
@@ -3191,6 +3226,7 @@ export default class HerdrChat extends View {
         }
         if (what.startsWith("unsent:dismiss:")) return this.dismissFailedSend(what.slice(15), cx);
         if (what.startsWith("swarm:")) return this.swarm?.control(what.slice(6), cx);
+        if (what.startsWith("artifact:")) return this.artifacts?.control(what.slice(9), cx);
         if (what.startsWith("bg:open:")) return this.bgOpen(what.slice(8), cx);
         if (what.startsWith("bg:stop:")) return this.bgStop(what.slice(8), cx);
         if (what.startsWith("bg:output:")) {
@@ -3496,6 +3532,7 @@ export default class HerdrChat extends View {
     this.rootFocus?.release?.();
     this.activityScroll?.release?.();
     this.swarm?.release?.();
+    this.artifacts?.release?.();
     owners.delete(this.uid);
     // A sub-agent's host is its parent's: closing its peek or its tab leaves it running.
     if (this.sub || hostTerminal(this.chat)?.parent) {
@@ -3606,6 +3643,7 @@ export default class HerdrChat extends View {
       background: s.background ? { rows: (this.bgShown ?? []).map((r) => [r.kind, r.name, r.state, r.meta]), shells: s.background.shells, monitors: s.background.monitors, open: !this.bgClosed,
         opened: this.bgOpenId ?? null, detail: this.bgDetail ? { kind: this.bgDetail.kind ?? null, state: this.bgDetail.state ?? null, lines: bgDetailLines(this.bgDetail).length, stoppable: Boolean(this.bgDetail.stoppable), error: this.bgDetail.error ?? null } : null } : null,
       swarm: this.swarm?.dump(s.swarm) ?? null,
+      artifacts: this.artifacts?.dump(s) ?? null,
       dialog: s.dialog ? { id: s.dialog.id, method: s.dialog.method, title: s.dialog.title, value: this.dialog.field ? this.dialog.value() : null,
         ...this.dialog.form?.debugState() } : null,
       quotaWarning: s.quotaWarning ?? null,
@@ -3816,7 +3854,10 @@ export default class HerdrChat extends View {
       terminalView: this.view ? (cx) => this.visitTerminal(cx) : null,
       imageRel: (p) => this.imageRel(p), imagePending: (p) => this.imagePending(p),
       quote: (/** @type {any} */ it, /** @type {import("gpui-kit").Context} */ cx) => this.quote(it, cx),
-      messageMenu: (/** @type {any} */ it, /** @type {string} */ text, /** @type {import("gpui-kit").Context} */ cx) => this.handOffCopy(cx, { it, text }),
+      messageMenu: (/** @type {any} */ it, /** @type {string} */ text) => this.openMessageMenu({ it, text }),
+      onSelect: (/** @type {string} */ vid, /** @type {any} */ sel, /** @type {any} */ meta, /** @type {import("gpui-kit").Context} */ cx) => this.onTextSelection(vid, sel, meta, cx),
+      findQuery: this.find?.query?.trim() || null,
+      findColor: this.find?.query?.trim() ? alpha(t.ansi3 ?? t.accent, 0.35) : null,
       runBang: this.sub ? null : this.bangTarget(),
       openFile: (p, line, cx) => this.openFile(p, line, cx), onLink: (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => this.onLink(url, cx), editResend: (it, cx) => this.editResend(it, cx),
       setHover: (id, on, cx) => this.setHover(id, on, cx), svgHover: this.svgHover ?? null, findItem: this.find?.current?.id ?? null,
@@ -3882,7 +3923,9 @@ export default class HerdrChat extends View {
     const keyName = (a, plain) => { const k = keyHint(a); return k === "↩" ? plain : k; };
     const sendKey = keyName("steer", "Enter");
     const followKey = keyName("followUp", null);
-    const hintText = this.flashText?.text ?? (s.dialog ? (s.dialog.method === "permission" ? "Answer above · Esc denies" : "Answer above · Esc cancels") : working
+    const hintText = this.flashText?.text ?? (s.dialog
+      ? (s.dialog.method === "permission" ? "Answer above · Esc denies" : s.dialog.method === "artifact" ? "Review above · Enter approves · Esc dismisses" : "Answer above · Esc cancels")
+      : working
       ? [sendKey && `${sendKey} ${s.capabilities?.steer === false ? "queues" : "steers"}`, followKey && `${followKey} after this run`, "Esc stops"].filter(Boolean).join(" · ")
       : this.peekMode && this.composer.focused && !this.composer.value ? "Esc closes" : null);
     // A new chat's card is the full one (+, hint and mic in it); once there's a conversation it's a reply's, one
@@ -3904,13 +3947,23 @@ export default class HerdrChat extends View {
     else if (this.activityOpen && this.activityFollow && actEntries.length > this.activityScrollCount) {
       this.activityScrollCount = actEntries.length;
       this.activityScroll.scroll_to_item(actEntries.length - 1);
+    } else if (this.activityOpen && !this.activityFollow && typeof this.activityScroll?.offset === "function") {
+      const off = this.activityScroll.offset();
+      const vp = this.activityScroll.viewport_size();
+      const ct = this.activityScroll.content_size();
+      if (ct.height > 0 && off.y + vp.height >= ct.height - 2) this.activityFollow = true;
     }
+    const dialogEl = s.dialog
+      ? (s.dialog.method === "artifact"
+        ? artifactDialogCard(this, s.dialog, s.dialogsPending, t, c)
+        : this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c))
+      : null;
     const bottom = v_flex().id("chat-bottom").w_full().gap(8)
       .on_size_change((sz, cx) => { if (sz.height !== this.bottomH) { this.bottomH = sz.height; this.debug.mark(); } })
-      .when(Boolean(s.dialog), (e) => e.child(this.dialog.view(s.dialog, s.dialogsPending, t, (k, v, cx) => this.answer(k, v, cx), c)))
+      .when(Boolean(dialogEl), (e) => e.child(dialogEl))
       .when(Boolean(quotaCard), (e) => e.child(quotaCard))
       .when(Boolean(this.runAsk) && !s.dialog, (e) => e.child(this.runCard(t)))
-      .children([modInline, widgetTray(this, above, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t), this.modUi.band(t, c)].filter(Boolean))
+      .children([modInline, widgetTray(this, above, t), artifactStrip(this, s, t), swarmDrawer(this, s, t, c), swarmStrip(this, s, t), backgroundStrip(this, s, t), activityDrawer(this, s, t), queueChips(this, s, t), planStrip(this, s, t), this.modUi.band(t, c)].filter(Boolean))
       .when(this.failedSends.length > 0, (e) => e.child(this.unsentCard(t)))
       .child(composer)
       .children([widgetTray(this, below, t)].filter(Boolean))
@@ -3932,8 +3985,8 @@ export default class HerdrChat extends View {
       .children(this.sub ? [this.subBar(t)] : pill && !floats ? [h_flex().flex_none().w_full().justify_end().pt(4).px(10).child(this.viewBar(t))] : [])
       .children(banner ? [div().flex_none().pt(10).child(this.column(div().child(banner)))] : []);
     for (const a of Object.keys(SHORTCUTS)) root = root.on_action(actionName(a), (_e, cx) => this.shortcut(a, cx));
-    // Super+C's Ctrl+Shift+C (or Ctrl+Insert) outside an input: the text selected in the chat (selcopy.js).
-    root = root.on_action("herdrchat_copy", (_e, cx) => this.handOffCopy(cx));
+    // Super+C's Ctrl+Shift+C (or Ctrl+Insert) outside an input: copy the active TextView selection.
+    root = root.on_action("herdrchat_copy", (_e, cx) => this.copySelectedText(cx));
     // Typing, pasting, and the pointer over the chat: the composer claims the keyboard (claim.js).
     root = root.on_action("herdrchat_paste_anywhere", (_e, cx) => this.pasteAnywhere(cx))
       .on_key_down((e, cx) => this.typeAnywhere(e, cx))
@@ -3984,6 +4037,8 @@ export default class HerdrChat extends View {
     if (modal) el = el.relative().child(modal);
     const swModal = swarmModal(this, this.store.state, t, this.ctx(t));
     if (swModal) el = el.relative().child(swModal);
+    const artModal = artifactModal(this, this.store.state, t, this.ctx(t));
+    if (artModal) el = el.relative().child(artModal);
     return this.debug?.fps ? el.relative().child(fps_monitor()) : el;
   }
 

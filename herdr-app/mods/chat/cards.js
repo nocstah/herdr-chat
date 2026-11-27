@@ -17,7 +17,7 @@ import { cardLive, defaultOpen, groupCards, groupSummary } from "./rows.js";
 import { SPACE } from "./space.js";
 import { keepBreaks } from "./lines.js";
 import { verbatimUserMarkdown } from "./paste.js";
-import { flavorPalette, toolVerb } from "./flavor.js";
+import { flavorPalette, findMatchRanges, toolVerb } from "./flavor.js";
 
 const MAX_LINES = 400;
 
@@ -86,7 +86,7 @@ function actions(it, footer, c, { align = "start", text } = {}) {
     .child(div().id(`ts-${it.id}`).px(4).text_size(11).text_color(t.dim).tooltip(absTime(it.ts)).child(relTime(it.ts, c.now)))
     .when(on, (e) => e.child(copyButton(`msg:${it.id}`, text ?? it.text ?? "", c, { size: 12.5 }))
       .when(it.kind === "user", (x) => x.child(btn(`edit-${it.id}`, "pencil", "Edit and resend", (_e, cx) => c.editResend(it, cx))))
-      .when(it.kind === "assistant", (x) => x.child(btn(`quote-${it.id}`, "quote", "Quote in your reply: the part you copied from it, else all of it",
+      .when(it.kind === "assistant", (x) => x.child(btn(`quote-${it.id}`, "quote", "Quote in your reply: your selection, else all of it",
         (/** @type {any} */ _e, /** @type {import("gpui-kit").Context} */ cx) => c.quote(it, cx)))))
     : null;
   let foot = null;
@@ -137,7 +137,16 @@ function user(it, c) {
   const open = !long || c.expanded.has(`user:${it.id}`);
   const shown = open ? text : lines.slice(0, USER_LINES).join("\n").slice(0, 1200).trimEnd() + "\n\n…";
   const body = (key) => {
-    const view = TextView.markdown(`md-${it.id}${key}${open ? "" : "-f"}`, verbatimUserMarkdown(shown) || " ").selectable(true);
+    const vid = `md-${it.id}${key}${open ? "" : "-f"}`;
+    const md = verbatimUserMarkdown(shown) || " ";
+    let view = TextView.markdown(vid, md).selectable(true);
+    if (typeof view.raw_html === "function") view = view.raw_html(false);
+    if (c.findQuery && c.findColor && typeof view.highlight_range === "function") {
+      for (const r of findMatchRanges(md, c.findQuery)) view = view.highlight_range(r.start, r.end, c.findColor);
+    }
+    if (c.onSelect && typeof view.on_selection_change === "function") {
+      view = view.on_selection_change((sel, cx) => c.onSelect(vid, sel, { itemId: it.id, source: md }, cx));
+    }
     return div().text_size(14).line_height(`${SPACE.lineH}px`).child(c.onLink ? view.on_link_click(c.onLink) : view);
   };
   const more = long ? [h_flex().id(`user-more-${it.id}`).gap(4).items_center().text_size(11.5).text_color(t.accent).cursor_pointer()
@@ -146,7 +155,11 @@ function user(it, c) {
   const skill = it.skill;
   // What the agent got for the skill, under its pill once opened.
   const skillBody = Boolean(skill?.body) && c.expanded.has(`skill:${it.id}`)
-    ? [div().pl(12).border_l_1().border_color(t.border).text_size(12.5).line_height("19px").text_color(t.muted).child(prose(`skill-${it.id}`, skill.body))]
+    ? [div().pl(12).border_l_1().border_color(t.border).text_size(12.5).line_height("19px").text_color(t.muted).child(prose(`skill-${it.id}`, skill.body, undefined, {
+      onSelect: c.onSelect ? (vid, sel, src, cx) => c.onSelect(vid, sel, { itemId: it.id, source: src }, cx) : null,
+      findQuery: c.findQuery ?? null,
+      findColor: c.findColor ?? null,
+    }))]
     : [];
   // A skill: its pill, then the message: beside it when that is one short line,
   // else under it (as the bubble's own rows: a nested column sizes the text too narrow).
@@ -201,7 +214,12 @@ function report(it, from, text, c) {
         .when(long, (e) => e.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.dim)
           .child(open ? "Fold" : plural(lines.length, "line")).child(icon(open ? "chevron-up" : "chevron-down", 11)))))
       .child(div().border_t_1().border_color(c.line).px(12).py(8).text_size(13.5).line_height("20px")
-        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, keepBreaks(shown) || " ", c.onLink, { t })))
+        .child(prose(`rp-${it.id}-${open ? 1 : 0}`, keepBreaks(shown) || " ", c.onLink, {
+          t,
+          onSelect: c.onSelect ? (vid, sel, src, cx) => c.onSelect(vid, sel, { itemId: it.id, source: src }, cx) : null,
+          findQuery: c.findQuery ?? null,
+          findColor: c.findColor ?? null,
+        })))
       .when(long && !open, (e) => e.child(div().id(`report-more-${it.id}`).px(12).pb(8).text_size(11.5).text_color(t.accent).cursor_pointer()
         .on_click((_e, cx) => c.toggle(`report:${it.id}`, cx)).child("Show all"))));
 }
@@ -239,7 +257,11 @@ export function thinking(it, c) {
         : div().flex_none().child(label))
       .when(secs != null, (e) => e.child(div().flex_none().text_color(t.dim).child(`${secs}s`))))
     .when(open, (e) => e.child(div().ml(9).mt(2).mb(6).pl(14).border_l_2().border_color(f.thinkingRail).text_size(13).line_height("20px")
-      .text_color(t.dim).italic().child(prose(`th-${it.id}`, it.text || " "))));
+      .text_color(t.dim).italic().child(prose(`th-${it.id}`, it.text || " ", undefined, {
+        onSelect: c.onSelect ? (vid, sel, src, cx) => c.onSelect(vid, sel, { itemId: it.id, source: src }, cx) : null,
+        findQuery: c.findQuery ?? null,
+        findColor: c.findColor ?? null,
+      }))));
 }
 
 const TOOL_ICON = { bash: "terminal", read: "file-text", edit: "pencil", write: "file-plus", search: "search", web: "globe", agent: "bot", script: "code", generic: "wrench" };
@@ -482,7 +504,16 @@ function spansOrText(it, c, base) {
 
 function custom(it, c) {
   const t = c.t;
-  const view = TextView.markdown(`cu-${it.id}`, it.text || " ").selectable(true);
+  const vid = `cu-${it.id}`;
+  const md = it.text || " ";
+  let view = TextView.markdown(vid, md).selectable(true);
+  if (typeof view.raw_html === "function") view = view.raw_html(false);
+  if (c.findQuery && c.findColor && typeof view.highlight_range === "function") {
+    for (const r of findMatchRanges(md, c.findQuery)) view = view.highlight_range(r.start, r.end, c.findColor);
+  }
+  if (c.onSelect && typeof view.on_selection_change === "function") {
+    view = view.on_selection_change((sel, cx) => c.onSelect(vid, sel, { itemId: it.id, source: md }, cx));
+  }
   return v_flex()
     .child(v_flex().gap(4).px(12).py(8).rounded(10).border_1().border_color(t.border)
       .child(div().text_size(11).text_color(t.dim).child(it.customType ?? "message"))

@@ -1,1 +1,54 @@
-{ "place": "none", "title": "New chat", "focusable": true, "overlay": { "kind": "dialog", "width": 300, "height": 196 } }
+{
+  "place": "none",
+  "title": "New chat",
+  "focusable": true,
+  "overlay": {
+    "kind": "dialog",
+    "width": 300,
+    "height": 196
+  },
+  "palette": [
+    {
+      "title": "New chat…",
+      "command": "new-chat.open",
+      "group": "Chat",
+      "words": "launcher agent conversation"
+    },
+    {
+      "title": "New Claude Code chat",
+      "command": "new-chat.claude",
+      "group": "Chat",
+      "words": "claude agent"
+    },
+    {
+      "title": "New Codex chat",
+      "command": "new-chat.codex",
+      "group": "Chat",
+      "words": "codex openai agent"
+    },
+    {
+      "title": "New Pi chat",
+      "command": "new-chat.pi",
+      "group": "Chat",
+      "words": "pi agent"
+    },
+    {
+      "title": "Flip Chat / Terminal view",
+      "command": "new-chat.flip",
+      "group": "Chat",
+      "words": "switch toggle view face"
+    },
+    {
+      "title": "Continue terminal as chat",
+      "command": "new-chat.continue",
+      "group": "Chat",
+      "words": "tui handoff convert"
+    },
+    {
+      "title": "Check for herdr-chat updates",
+      "command": "new-chat.update-check",
+      "group": "Chat",
+      "words": "upgrade version"
+    }
+  ]
+}

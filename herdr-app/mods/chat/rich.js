@@ -11,7 +11,7 @@ import { alpha, codeLine, homeRel, icon, monoFont, plural, spinner } from "./uti
 import { SPACE } from "./space.js";
 import { linkPaths } from "./paths.js";
 import { oneLine, runsInCode } from "./bang.js";
-import { decorateInlineCode, flavorPalette, mdChunks, parseInlineSpans, picturesAsLinks, stripHeading } from "./flavor.js";
+import { decorateInlineCode, findMatchRanges, flavorPalette, inlineCodeRanges, mdChunks, parseInlineSpans, picturesAsLinks, stripHeading } from "./flavor.js";
 
 export { mdChunks };
 
@@ -21,27 +21,46 @@ export const LINE_H = 19;
 const HEADING = /^ {0,3}#{1,6}(\s|$)/;
 
 // `onLink` (an answer's prose): its file paths become links (linkPaths), and
-// every link's click goes to it instead of straight to the system. When `opts.t`
-// is provided (and `opts.codeTint !== false`), standalone inline code spans get a
-// warm tinted pill matching Antigravity's terminal flavor while copying cleanly.
+// every link's click goes to it instead of straight to the system. On Herdr 0.1.18+
+// (`highlight_range` + `raw_html`), standalone inline code spans and active Find
+// matches paint natively with `highlight_range()` while `.raw_html(false)` keeps raw
+// HTML tags literal and `selection.range` aligned with Markdown source.
 /** @typedef {(url: string, cx: import("gpui-kit").Context) => void} OnLink */
+/** @typedef {(viewId: string, sel: any, source: string, cx: import("gpui-kit").Context) => void} OnSelect */
 /**
  * @param {string} id
  * @param {string} text
  * @param {OnLink} [onLink]
- * @param {{ t?: any, codeTint?: boolean }} [opts]
+ * @param {{ t?: any, codeTint?: boolean, onSelect?: OnSelect | null, findQuery?: string | null, findColor?: string | null }} [opts]
  */
 export const prose = (id, text, onLink, opts) => {
-  let src = onLink ? linkPaths(text) : text;
-  if (opts?.t && opts.codeTint !== false) src = decorateInlineCode(src, flavorPalette(opts.t).codeBg);
-  const view = TextView.markdown(id, src).selectable(true);
+  const base = onLink ? linkPaths(text) : text;
+  const wantTint = Boolean(opts?.t && opts.codeTint !== false);
+  const codeBg = wantTint ? flavorPalette(opts.t).codeBg : null;
+  let view = TextView.markdown(id, base).selectable(true);
+  const nativeHighlight = typeof view.highlight_range === "function";
+  if (nativeHighlight) {
+    if (typeof view.raw_html === "function") view = view.raw_html(false);
+    if (codeBg) {
+      for (const r of inlineCodeRanges(base)) view = view.highlight_range(r.start, r.end, codeBg);
+    }
+    if (opts?.findQuery && opts?.findColor) {
+      for (const r of findMatchRanges(base, opts.findQuery)) view = view.highlight_range(r.start, r.end, opts.findColor);
+    }
+  } else if (codeBg) {
+    view = TextView.markdown(id, decorateInlineCode(base, codeBg)).selectable(true);
+  }
+  if (opts?.onSelect && typeof view.on_selection_change === "function") {
+    const onSelect = opts.onSelect;
+    view = view.on_selection_change((sel, cx) => onSelect(id, sel, base, cx));
+  }
   return onLink ? view.on_link_click(onLink) : view;
 };
 
 // The space above a piece of an answer, after `prev` (null: the first).
 const above = (heading, prev) => (prev == null ? 0 : heading ? SPACE.headingAbove : prev.heading ? SPACE.headingBelow : SPACE.block);
 
-function renderList(id, items, onLink, t, f) {
+function renderList(id, items, onLink, t, f, opts) {
   const maxOrd = items.reduce((m, it) => (it.ordered ? Math.max(m, it.marker.length) : m), 0);
   const numW = Math.max(20, maxOrd * 8 + 6);
   const bulletOf = (depth) => (depth === 0 ? ["•", f.bullet] : depth === 1 ? ["◦", f.bulletSub] : ["▪", f.bulletDeep]);
@@ -58,7 +77,7 @@ function renderList(id, items, onLink, t, f) {
       lead = div().flex_none().w(18).pr(6).text_right().font_semibold().text_color(col).child(glyph);
     }
     const body = div().flex_1().min_w(0).when(it.checked === true, (e) => e.text_color(t?.muted))
-      .child(prose(`${id}-li-${idx}`, it.text || " ", onLink, { t }));
+      .child(prose(`${id}-li-${idx}`, it.text || " ", onLink, { ...opts, t }));
     return h_flex().min_w(0).items_start().when(padL > 0, (e) => e.pl(padL)).child(lead).child(body);
   }));
 }
@@ -129,25 +148,25 @@ function styledInline(id, text, color, onLink, t, f, { size = 14, lh = "20px", a
     .children(parts);
 }
 
-function renderTable(id, chunk, onLink, t, f) {
+function renderTable(id, chunk, onLink, t, f, opts) {
   // Very wide tables (6+ cols) fall back to native TextView table column measurement.
-  if (chunk.headers.length > 5) return prose(id, chunk.text, onLink, { t });
+  if (chunk.headers.length > 5) return prose(id, chunk.text, onLink, { ...opts, t });
   const alignCell = (el, a) => (a === "right" ? el.justify_end() : a === "center" ? el.justify_center() : el);
   const headCell = (cid, txt, a) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
     .child(div().min_w(0).child(styledInline(cid, txt || " ", f.tableHead, onLink, t, f, { size: 13, lh: "19px", align: a })));
-  const cell = (cid, txt, a, opts) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
-    .child(div().min_w(0).child(prose(cid, txt || " ", onLink, opts)));
+  const cell = (cid, txt, a, cellOpts) => alignCell(h_flex().flex_1().min_w(0).px(10).py(6), a)
+    .child(div().min_w(0).child(prose(cid, txt || " ", onLink, cellOpts)));
   const head = h_flex().w_full().bg(f.tableHeadBg).border_b_1().border_color(t?.border).text_size(13).font_semibold().text_color(f.tableHead)
     .children(chunk.headers.map((h, ci) => headCell(`${id}-th-${ci}`, h, chunk.aligns[ci])));
   const body = chunk.rows.map((r, ri) => h_flex().w_full().text_size(13).line_height("20px")
     .when(ri > 0, (e) => e.border_t_1().border_color(alpha(t?.border, 0.55)))
     .when(ri % 2 === 1, (e) => e.bg(f.tableStripe))
-    .children(r.map((val, ci) => cell(`${id}-td-${ri}-${ci}`, val, chunk.aligns[ci], { t }))));
+    .children(r.map((val, ci) => cell(`${id}-td-${ri}-${ci}`, val, chunk.aligns[ci], { ...opts, t }))));
   return v_flex().w_full().rounded(8).overflow_hidden().border_1().border_color(t?.border).child(head).children(body);
 }
 
-function renderChunk(id, p, onLink, t, f) {
-  if (!t) return prose(id, p.text, onLink);
+function renderChunk(id, p, onLink, t, f, opts) {
+  if (!t) return prose(id, p.text, onLink, opts);
   switch (p.kind) {
     case "heading": {
       const level = Math.max(1, Math.min(6, p.level ?? 1));
@@ -166,18 +185,18 @@ function renderChunk(id, p, onLink, t, f) {
         .border_l_2().border_color(ca.color).bg(ca.bg)
         .child(h_flex().gap(6).items_center().text_size(12.5).font_semibold().text_color(ca.color)
           .child(icon(ca.icon, 13).text_color(ca.color)).child(ca.label))
-        .child(div().min_w(0).child(markdown(`${id}-b`, p.body, onLink, t)));
+        .child(div().min_w(0).child(markdown(`${id}-b`, p.body, onLink, t, opts)));
     }
     case "blockquote":
       return div().w_full().min_w(0).pl(12).pr(10).py(6).rounded_r(8)
         .border_l_2().border_color(f.quoteBar).bg(f.quoteBg)
-        .child(markdown(`${id}-q`, p.body, onLink, t));
+        .child(markdown(`${id}-q`, p.body, onLink, t, opts));
     case "table":
-      return renderTable(id, p, onLink, t, f);
+      return renderTable(id, p, onLink, t, f, opts);
     case "list":
-      return renderList(id, p.items, onLink, t, f);
+      return renderList(id, p.items, onLink, t, f, opts);
     default:
-      return prose(id, p.text, onLink, { t });
+      return prose(id, p.text, onLink, { ...opts, t });
   }
 }
 
@@ -187,12 +206,13 @@ function renderChunk(id, p, onLink, t, f) {
  * @param {string} text
  * @param {OnLink} [onLink]
  * @param {any} [t]
+ * @param {{ onSelect?: OnSelect | null, findQuery?: string | null, findColor?: string | null }} [opts]
  */
-export function markdown(id, text, onLink, t) {
+export function markdown(id, text, onLink, t, opts) {
   const parts = mdChunks(picturesAsLinks(text || " "));
   const f = t ? flavorPalette(t) : null;
-  if (parts.length === 1) return renderChunk(id, parts[0], onLink, t, f);
-  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(renderChunk(`${id}-${j}`, p, onLink, t, f))));
+  if (parts.length === 1) return renderChunk(id, parts[0], onLink, t, f, opts);
+  return v_flex().min_w(0).children(parts.map((p, j) => div().pt(above(p.heading, parts[j - 1])).child(renderChunk(`${id}-${j}`, p, onLink, t, f, opts))));
 }
 
 // Whether a block starts or ends with a heading (for the space around it).
@@ -220,7 +240,11 @@ export function blocks(it, c) {
     }
     else if (b.type === "mermaid") el = mermaid(key, b, c);
     else if (b.type === "image") el = picture(key, b, c);
-    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink, c.t);
+    else el = c.codeView?.(key) || markdown(`md-${it.id}-${i}`, b.text, c.onLink, c.t, {
+      onSelect: c.onSelect ? (vid, sel, src, cx) => c.onSelect(vid, sel, { itemId: it.id, source: src }, cx) : null,
+      findQuery: c.findQuery ?? null,
+      findColor: c.findColor ?? null,
+    });
     return div().pt(gap).child(el);
   }));
 }

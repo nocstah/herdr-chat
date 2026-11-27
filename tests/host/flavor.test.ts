@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, mdChunks, parseTableRow, splitToolVerb, toolVerb, stripHeading, parseInlineSpans, picturesAsLinks } from "../../herdr-app/mods/chat/flavor.js";
+import { isDarkBg, themeSig, flavorPalette, decorateInlineCode, inlineCodeRanges, findMatchRanges, mdChunks, parseTableRow, splitToolVerb, toolVerb, stripHeading, parseInlineSpans, picturesAsLinks } from "../../herdr-app/mods/chat/flavor.js";
 import { CODEX_PERMISSION_MODES } from "../../host/providers/codex/adapter.ts";
 
 const DARK = {
@@ -103,6 +103,24 @@ test("decorateInlineCode wraps standalone inline code spans without breaking lin
   // Invalid color or empty code leaves input untouched.
   assert.equal(decorateInlineCode("Run `x`", "not-a-color"), "Run `x`");
   assert.equal(decorateInlineCode("Empty `` ticks", c), "Empty `` ticks");
+});
+
+test("inlineCodeRanges and findMatchRanges return exact UTF-16 ranges for TextView.highlight_range", () => {
+  const md = [
+    "Run `npm test` and ``a ` b`` now.",
+    "See [`src/a.ts`](herdr-chat-file:src%2Fa.ts) and `flag`.",
+    "```ts",
+    "const s = `template`;",
+    "```",
+    "    indented `code`",
+    "Emoji 😀 `ok`.",
+  ].join("\n");
+  const codeSlices = inlineCodeRanges(md).map((r: { start: number; end: number }) => md.slice(r.start, r.end));
+  assert.deepEqual(codeSlices, ["`npm test`", "``a ` b``", "`flag`", "`ok`"]);
+
+  const matches = findMatchRanges("Alpha beta ALPHA and alpha!", "alpha");
+  assert.deepEqual(matches.map((r: { start: number; end: number }) => "Alpha beta ALPHA and alpha!".slice(r.start, r.end)), ["Alpha", "ALPHA", "alpha"]);
+  assert.deepEqual(findMatchRanges("nothing here", "  "), []);
 });
 
 test("mdChunks classifies headings, hrs, blockquotes, GitHub callouts, tables, lists and prose", () => {

@@ -29,9 +29,10 @@ import type { ModUi } from "./modui.ts";
 import { presentTool, prettyArgs } from "./tools.ts";
 import { AgentError } from "./providers/types.ts";
 import type {
-  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background, QuotaWarning, SwarmSnapshot,
+  ProviderAdapter, AdapterHost, NormalizedEvent, EventOf, Capabilities, Ask, AskAnswer, ModelInfo, PermissionChoice, Question, AgentModel, ForkPoint, PlanLimits, Background, QuotaWarning, SwarmSnapshot, ArtifactEntry,
 } from "./providers/types.ts";
 import { parseSwarmAction, writeSwarmGraphSvg } from "./providers/antigravity/swarm.ts";
+import { parseArtifactReviewRequest } from "./providers/antigravity/artifacts.ts";
 
 export type { ModelInfo, Capabilities };
 
@@ -61,7 +62,8 @@ export type PermissionDialog = {
   choices: PermissionChoice[]; timeoutAt?: number;
 };
 export type QuestionsDialog = { id: string; method: "questions"; title: string; questions: Question[]; timeoutAt?: number };
-export type Dialog = ExtensionDialog | PermissionDialog | QuestionsDialog;
+export type ArtifactDialog = { id: string; method: "artifact"; title: string; artifacts: ArtifactEntry[]; timeoutAt?: number };
+export type Dialog = ExtensionDialog | PermissionDialog | QuestionsDialog | ArtifactDialog;
 
 const diffLinesOf = (diff: string, path: string) => {
   const r = diffLines(diff, path);
@@ -166,6 +168,8 @@ export type ChatState = {
   activityLog: ActivityEntry[];
   /** Live Antigravity `/swarm` snapshot for this conversation; null when no swarm is active. */
   swarm: SwarmSnapshot | null;
+  /** Conversation artifacts tracked for review/approval (metadata only; content fetched on demand). */
+  artifacts: ArtifactEntry[];
   /** What the agent's mods draw (Claude Code: panes, the band above the prompt; protocol.md v3.10); null: nothing. */
   modUi: ModUi | null;
 };
@@ -416,7 +420,7 @@ export class Chat {
       model: null, thinking: null, plan: null, usage: null, queue: { steering: [], followUp: [] }, dialog: null, dialogsPending: 0,
       statuses: [], widgets: [], title: null, editorText: null, commands: [],
       provider: this.adapter.id, providerName: this.adapter.name, capabilities: structuredClone(this.adapter.capabilities), permissionMode: null,
-      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [], swarm: null, modUi: null,
+      handoff: null, conflict: null, git: null, background: null, quotaWarning: null, activityText: null, activityLog: [], swarm: null, artifacts: [], modUi: null,
     };
     this.state.commands = this.menu();
     this.git = new GitWatch(opts.cwd, (git) => this.set({ git }), opts.log);
@@ -945,8 +949,11 @@ export class Chat {
       case "swarm":
         this.set({ swarm: ev.swarm });
         return;
+      case "artifacts":
+        this.set({ artifacts: ev.artifacts });
+        return;
       case "exited":
-        if (this.state.background || this.state.swarm) this.set({ background: null, swarm: null });
+        if (this.state.background || this.state.swarm || this.state.artifacts.length) this.set({ background: null, swarm: null, artifacts: [] });
         this.onExit(ev);
         return;
     }
@@ -1220,6 +1227,9 @@ export class Chat {
       }
       case "questions":
         d = { id, method: "questions", title, questions: ask.questions };
+        break;
+      case "artifact":
+        d = { id, method: "artifact", title, artifacts: ask.artifacts };
         break;
       default: {
         const x: ExtensionDialog = { id, method: ask.kind, title };
@@ -1632,14 +1642,17 @@ export class Chat {
     return { sent };
   }
 
-  dialogAnswer(args: { dialog?: string; value?: unknown; confirmed?: unknown; cancelled?: unknown; choice?: unknown; message?: unknown; answers?: unknown }): Record<string, never> {
+  dialogAnswer(args: { dialog?: string; value?: unknown; confirmed?: unknown; cancelled?: unknown; choice?: unknown; message?: unknown; answers?: unknown; artifactAction?: unknown; artifact?: unknown }): Record<string, never> {
     const id = String(args.dialog ?? "");
     const d = this.dialogs.find((x) => x.id === id);
     if (!d) throw new Error("That dialog is no longer open");
     const agent = this.requireAgent();
     let resp: AskAnswer;
-    if (args.cancelled === true) resp = { cancelled: true };
-    else if (d.method === "confirm") {
+    if (args.cancelled === true) resp = d.method === "artifact" ? { artifactAction: "dismiss" } : { cancelled: true };
+    else if (d.method === "artifact") {
+      const req = parseArtifactReviewRequest({ action: args.artifactAction, artifact: args.artifact, message: args.message });
+      resp = { artifactAction: req.action, ...(req.artifact ? { artifact: req.artifact } : {}), ...(req.message ? { message: req.message } : {}) };
+    } else if (d.method === "confirm") {
       if (typeof args.confirmed !== "boolean") throw new Error("confirm needs `confirmed: true|false`");
       resp = { confirmed: args.confirmed };
     } else if (d.method === "permission") {
@@ -2178,6 +2191,20 @@ export class Chat {
           this.opts.imageDir ?? null,
         );
         return { graph };
+      }
+      case "artifact_read": {
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("artifact_read needs `name`");
+        const artifact = this.adapter.readArtifact?.(name) ?? null;
+        if (!artifact) throw new Error(`Artifact not found: ${name}`);
+        return { artifact };
+      }
+      case "artifact_review": {
+        const agent = this.requireAgent();
+        if (!agent.artifactReview) throw new Error(`${this.agent} doesn't support artifact review from here`);
+        const req = parseArtifactReviewRequest(a);
+        await agent.artifactReview(req);
+        return { ok: true, action: req.action };
       }
       case "handoff":
         return this.handoff();

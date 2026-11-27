@@ -1,35 +1,51 @@
-// Copying text selected in the chat through Herdr's own Ctrl+C (herdr-app/mods/chat/selcopy.js): the command it
-// asks Hyprland with, what it reads back from the clipboard, the Stop it keeps from stopping, and a message's menu.
+// Native TextView selection state, quoting, and message context menu (herdr-app/mods/chat/selcopy.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { HANDOFF_MS, copiedText, ctrlCCommand, messageMenuItems, swallowsStop } from "../../herdr-app/mods/chat/selcopy.js";
+import { messageMenuItems, selectionForQuote, updateSelection } from "../../herdr-app/mods/chat/selcopy.js";
 
-test("ctrlCCommand: Hyprland sends the window Ctrl+C with explicit modifiers, down then up, never through a virtual keyboard", () => {
-  const { program, args } = ctrlCCommand();
-  assert.equal(program, "/bin/sh");
-  assert.match(args[1], /^hyprctl dispatch "\$1" >\/dev\/null && sleep 0\.05 && hyprctl dispatch "\$2"/);
-  assert.deepEqual(args.slice(3), [
-    'hl.dsp.send_key_state({ mods = "CTRL", key = "C", state = "down" })',
-    'hl.dsp.send_key_state({ mods = "CTRL", key = "C", state = "up" })',
-  ]);
-  assert.doesNotMatch(args.join(" "), /wtype|ydotool/);
+const plainText = (s: string) =>
+  s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`~#>|•]/g, " ").replace(/^\s*[-+]\s+/gm, " ")
+    .replace(/\s+/g, " ").trim().toLowerCase();
+
+test("updateSelection tracks active TextView selection, extracts Markdown slice, and ignores clears from other views", () => {
+  const src = "See **important** and `code` here.";
+  const start = src.indexOf("**important**");
+  const end = start + "**important**".length;
+  const s1 = updateSelection(null, "md-1-0", { text: "important", range: { start, end }, position: { x: 120, y: 240 } }, { itemId: "m1", source: src });
+  assert.deepEqual(s1, {
+    viewId: "md-1-0",
+    itemId: "m1",
+    text: "important",
+    markdown: "**important**",
+    range: { start, end },
+    position: { x: 120, y: 240 },
+  });
+
+  // A null/clear from a different TextView must not wipe out the newer selection.
+  assert.deepEqual(updateSelection(s1, "md-0-0", null), s1);
+  // Clearing the owning TextView clears it.
+  assert.equal(updateSelection(s1, "md-1-0", null), null);
+  // Out-of-bounds range falls back cleanly to markdown: null while keeping plain text.
+  const s2 = updateSelection(null, "md-2-0", { text: "hello", range: { start: 0, end: 999 } }, { itemId: "m2", source: "hi" });
+  assert.equal(s2.markdown, null);
+  assert.equal(s2.text, "hello");
 });
 
-test("copiedText: the clipboard's new text, else null (nothing selected, or nothing came)", () => {
-  assert.equal(copiedText("old", "Alpha beta"), "Alpha beta");
-  assert.equal(copiedText(null, "Alpha beta"), "Alpha beta");
-  assert.equal(copiedText("same", "same"), null);
-  assert.equal(copiedText("old", ""), null);
-  assert.equal(copiedText("old", null), null);
-});
-
-test("swallowsStop: only inside the hand-off's window", () => {
-  const now = 1_000_000;
-  assert.equal(swallowsStop(now + HANDOFF_MS, now), true);
-  assert.equal(swallowsStop(now, now), false);
-  assert.equal(swallowsStop(0, now), false);
-  assert.equal(swallowsStop(undefined, now), false);
+test("selectionForQuote prefers live selection on the target message, then clipboard substring, else null", () => {
+  const whole = "First line with **bold words** and more details here.";
+  const sel = updateSelection(null, "md-a-0", { text: "bold words", range: { start: 16, end: 30 } }, { itemId: "a1", source: whole });
+  assert.deepEqual(selectionForQuote(sel, "a1", whole, "unrelated clipboard", plainText), {
+    body: "**bold words**",
+    source: "selection",
+  });
+  // Selection from another message does not bleed into a different message's Quote.
+  assert.equal(selectionForQuote(sel, "a2", whole, "unrelated clipboard", plainText), null);
+  // Falls back to clipboard snippet matching the message when no live selection exists.
+  assert.deepEqual(selectionForQuote(null, "a1", whole, "bold words and more", plainText), {
+    body: "bold words and more",
+    source: "clipboard",
+  });
 });
 
 test("messageMenuItems: Copy for the selection (its start in the label), then Copy message; none without either", () => {

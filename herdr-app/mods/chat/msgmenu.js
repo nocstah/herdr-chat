@@ -1,4 +1,4 @@
-// A message's right-click menu, opened by a chat as a popup at the pointer (main.js handOffCopy): selcopy.js
+// A message's right-click menu, opened by a chat as a popup at the pointer (main.js openMessageMenu): selcopy.js
 // messageMenuItems, each with the text it copies.
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";

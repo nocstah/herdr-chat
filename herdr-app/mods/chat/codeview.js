@@ -115,15 +115,14 @@ export class CodeView extends View {
         this.dragging = e.click_count < 2;
         this.changed(cx);
       })
-      .on_mouse_move((e, cx) => {
+      .on_window_mouse_move((e, cx) => {
         if (!this.dragging || !this.sel) return;
         const p = at(e);
         if (!p || (p.r === this.sel.b.r && p.c === this.sel.b.c)) return;
         this.sel = { a: this.sel.a, b: p };
         this.changed(cx);
       })
-      .on_mouse_up("left", () => { this.dragging = false; })
-      .on_hover((on) => { if (!on) this.dragging = false; })
+      .on_window_mouse_up("left", () => { this.dragging = false; })
       // The wheel never moves the lines (up/down scrolls the chat: overflow_scroll on both axes
       // keeps GPUI from turning it sideways); a sideways swipe goes nowhere.
       .on_scroll_wheel((e, cx) => { if (Math.abs(e.delta.x) > Math.abs(e.delta.y)) cx.stop_propagation(); })
@@ -150,7 +149,21 @@ export class CodeView extends View {
   render() {
     const p = this.p;
     const t = theme();
-    if (p.markdown != null) return markdown(p.id, p.markdown, (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => (owners.get(p.owner) ? owners.get(p.owner).onLink(url, cx) : cx.open_url(url)), t);
+    if (p.markdown != null) {
+      const owner = owners.get(p.owner);
+      const itemId = p.itemId ?? String(p.key ?? "").split(":")[0] ?? null;
+      return markdown(
+        p.id,
+        p.markdown,
+        (/** @type {string} */ url, /** @type {import("gpui-kit").Context} */ cx) => (owner ? owner.onLink(url, cx) : cx.open_url(url)),
+        t,
+        {
+          onSelect: owner ? (vid, sel, src, cx) => owner.onTextSelection(vid, sel, { itemId, source: src }, cx) : null,
+          findQuery: p.findQuery || null,
+          findColor: p.findQuery ? alpha(t.ansi3 ?? t.accent, 0.35) : null,
+        },
+      );
+    }
     const key = p.key;
     const owner = () => owners.get(p.owner);
     const c = {

@@ -1,37 +1,65 @@
-// Copying text selected in the chat: an answer's, a message's, a tool card's (rich.js and cards.js text views).
-// Herdr's text views copy their selection on Ctrl+C only (the window's own copy, which runs before a mod's Ctrl+C and
-// passes the key on when nothing is selected), and a mod can neither read that selection nor ask for that copy.
-// Super+C sends a terminal app Ctrl+Shift+C (desktop terminal-clipboard bindings, for a window like Herdr's that holds
-// terminals), which reached only the chat's inputs. So on Linux, a copy key the chat can't serve from an input of its
-// own asks Hyprland to send the window Ctrl+C with explicit modifiers, as Omarchy's universal copy does (never a
-// virtual keyboard: a held Super would join it), and reads the clipboard after to say what was copied. A right-click
-// on a message looks the same way, to offer Copy for what is selected, then puts the clipboard's text back. With
-// nothing selected, that Ctrl+C goes on to the chat's Stop, which swallowsStop keeps from stopping the agent.
+// Text selection state and actions for chat prose (rich.js and cards.js TextViews).
+// Herdr 0.1.18+ reports settled selections through TextView.on_selection_change({ text, range, position }),
+// so copy, right-click menus, and quoting read the live selection directly without shelling out or touching
+// the system clipboard.
 
-/** How long after the chat asked for it a Ctrl+C reaching Stop is that one, not the person's. */
-export const HANDOFF_MS = 1200;
-/** How long after the Ctrl+C was sent the clipboard is read: Herdr has copied by then. */
-export const SETTLE_MS = 200;
-
-/** @param {"down" | "up"} state */
-const key = (state) => `hl.dsp.send_key_state({ mods = "CTRL", key = "C", state = "${state}" })`;
-
-/** Sends the focused window Ctrl+C through Hyprland: down, then up 50 ms later, as Omarchy's universal copy does. */
-export function ctrlCCommand() {
-  return { program: "/bin/sh", args: ["-c", 'hyprctl dispatch "$1" >/dev/null && sleep 0.05 && hyprctl dispatch "$2" >/dev/null', "sh", key("down"), key("up")] };
+/**
+ * Updates the active TextView selection snapshot.
+ * Only clears when `viewId` matches the currently tracked view so a blur/clear from a previously
+ * selected TextView cannot clobber a newer selection in another TextView.
+ *
+ * @typedef {{ viewId: string, itemId: string | null, text: string, markdown: string | null, range: { start: number, end: number } | null, position: { x: number, y: number } | null }} ChatSelection
+ * @param {ChatSelection | null | undefined} current
+ * @param {string} viewId
+ * @param {{ text?: string, range?: { start: number, end: number } | null, position?: { x: number, y: number } | null } | null | undefined} sel
+ * @param {{ itemId?: string | null, source?: string | null }} [meta]
+ * @returns {ChatSelection | null}
+ */
+export function updateSelection(current, viewId, sel, meta = {}) {
+  const text = typeof sel?.text === "string" ? sel.text : "";
+  if (!text) return current?.viewId === viewId ? null : (current ?? null);
+  const src = typeof meta.source === "string" ? meta.source : null;
+  const r = sel?.range;
+  const markdown = src != null && r && Number.isInteger(r.start) && Number.isInteger(r.end)
+    && r.start >= 0 && r.end <= src.length && r.end > r.start
+    ? src.slice(r.start, r.end)
+    : null;
+  return {
+    viewId,
+    itemId: meta.itemId ?? null,
+    text,
+    markdown,
+    range: r ? { start: r.start, end: r.end } : null,
+    position: sel?.position ? { x: sel.position.x, y: sel.position.y } : null,
+  };
 }
 
-/** What a hand-off copied: the clipboard's text after it, when that changed; null for nothing new (nothing selected).
- *  @param {string | null | undefined} before @param {string | null | undefined} after */
-export function copiedText(before, after) {
-  return typeof after === "string" && after !== "" && after !== before ? after : null;
+/**
+ * Picks the passage to quote for an assistant message:
+ * 1. The live selection inside that message (preferring its Markdown slice when available),
+ * 2. Else a clipboard snippet that matches part of the message (`plainText` fallback),
+ * 3. Else `null` (caller quotes the whole message).
+ *
+ * @param {ChatSelection | null | undefined} sel
+ * @param {string | null | undefined} itemId
+ * @param {string} whole
+ * @param {string | null | undefined} clipboard
+ * @param {(s: string) => string} plainText
+ * @returns {{ body: string, source: "selection" | "clipboard" } | null}
+ */
+export function selectionForQuote(sel, itemId, whole, clipboard, plainText) {
+  if (sel?.text && (!sel.itemId || sel.itemId === itemId)) {
+    const picked = (sel.markdown ?? sel.text).trim();
+    if (picked) return { body: picked, source: "selection" };
+  }
+  const clip = String(clipboard ?? "").trim();
+  if (clip && plainText(clip).length >= 8 && clip.length < whole.length && plainText(whole).includes(plainText(clip))) {
+    return { body: clip, source: "clipboard" };
+  }
+  return null;
 }
 
-/** Whether a Ctrl+C reaching Stop at `now` is the hand-off's (`until`: when its window ends).
- *  @param {number | null | undefined} until @param {number} now */
-export const swallowsStop = (until, now) => typeof until === "number" && now < until;
-
-/** A message's right-click menu: Copy for the selection the look found (its start in the label), then Copy message.
+/** A message's right-click menu: Copy for the active selection (its start in the label), then Copy message.
  *  @param {string | null} selection @param {string | null | undefined} message */
 export function messageMenuItems(selection, message) {
   /** @type {{ id: string, label: string, text: string }[]} */

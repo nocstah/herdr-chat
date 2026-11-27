@@ -8,9 +8,14 @@
 import type { ToolDetail, UserSource, StopReason, Usage, NoticeItem, PlanStep } from "../timeline.ts";
 import type { ToolMap } from "../tools.ts";
 import type { SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest } from "./antigravity/swarm.ts";
+import type { ArtifactEntry, ArtifactReviewAction, ArtifactReviewRequest, ArtifactReviewStatus } from "./antigravity/artifacts.ts";
 import type { ModUi } from "../modui.ts";
 
-export type { ToolDetail, UserSource, StopReason, Usage, PlanStep, SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest };
+export type {
+  ToolDetail, UserSource, StopReason, Usage, PlanStep,
+  SwarmSnapshot, SwarmMemberTranscript, SwarmActionRequest,
+  ArtifactEntry, ArtifactReviewAction, ArtifactReviewRequest, ArtifactReviewStatus,
+};
 
 /** Provider ids. The core treats this as an opaque string; these are the known ones. */
 export type ProviderId = "pi" | "claude" | "codex" | "antigravity" | (string & {});
@@ -149,7 +154,8 @@ export type Ask =
       choices: PermissionChoice[];
       timeoutAt?: number;
     }
-  | { id: string; kind: "questions"; title: string; questions: Question[]; timeoutAt?: number };
+  | { id: string; kind: "questions"; title: string; questions: Question[]; timeoutAt?: number }
+  | { id: string; kind: "artifact"; title: string; artifacts: ArtifactEntry[]; timeoutAt?: number };
 
 /** The core validates an answer against its ask before passing it on. */
 export type AskAnswer =
@@ -157,7 +163,8 @@ export type AskAnswer =
   | { confirmed: boolean }
   | { value: string }
   | { choice: string; message?: string }
-  | { answers: Record<string, string | string[]> };
+  | { answers: Record<string, string | string[]> }
+  | { artifactAction: ArtifactReviewAction; artifact?: string; message?: string };
 
 // ---------------------------------------------------------------- events
 
@@ -241,6 +248,8 @@ export type NormalizedEvent = Common &
     | { type: "background"; background: Background | null }
     /** Live Antigravity `/swarm` state; null when no swarm is active for this conversation. */
     | { type: "swarm"; swarm: SwarmSnapshot | null }
+    /** Conversation artifacts tracked for review/approval (metadata only; content fetched on demand). */
+    | { type: "artifacts"; artifacts: ArtifactEntry[] }
     /** The agent's plan: it replaces the chat's plan. No steps: the plan is gone. */
     | { type: "plan"; parent?: undefined; explanation?: string; steps: PlanStep[] }
     /** A subagent's plan: a card in the group of its `parent`, replaced in place per `key`. */
@@ -413,6 +422,10 @@ export interface ProviderAdapter {
   swarmRefresh?(): SwarmSnapshot | null;
   /** Optional: runs a validated swarm steering/lifecycle action via the attached agent. */
   swarmAction?(req: SwarmActionRequest): Promise<void>;
+  /** Optional: reads one conversation artifact's bounded Markdown content safely from disk. */
+  readArtifact?(name: string): ArtifactEntry | null;
+  /** Optional: submits an artifact review decision (`approve`, `approve_all`, `reject`, `comment`, `dismiss`). */
+  artifactReview?(req: ArtifactReviewRequest): Promise<void>;
   answer(askId: string, answer: AskAnswer): void;
 
   // ---- queries

@@ -14,8 +14,8 @@
 // the SVG with width/height × 2, 4, 8 (viewBox kept) to data/herdr-chat/zoom and
 // draws the smallest one at least as big as the zoom, within RASTER_MAX (past
 // that the bitmap stretches). The bucket below stays under the new one while
-// it loads, so a switch never shows a blank frame. Pinch: GPUI has
-// PinchEvent, but gpui-kit gives mods no on_pinch, so a pinch does nothing.
+// it loads, so a switch never shows a blank frame. Trackpad pinch zooms around
+// the pointer via on_pinch (Herdr 0.1.18+).
 //
 // Commands (`chat.viewer:<c>`, for the E2E): zoom:<pct>[:x:y] (around a
 // frame point, default the center) · wheel:<dx>:<dy>[:cmd][:x:y] (the wheel
@@ -283,6 +283,14 @@ export class Viewer {
         cx.stop_propagation();
         cx.notify();
       })
+      .on_pinch((e, cx) => {
+        if (!e.delta) return;
+        const p = local(e);
+        this.zoomTo(this.z * Math.min(2, Math.max(0.5, Math.exp(e.delta))), p.x, p.y);
+        this.want(cx);
+        cx.stop_propagation();
+        cx.notify();
+      })
       .on_mouse_down("left", (e, cx) => {
         this.focus.focus();
         const p = local(e);
@@ -299,12 +307,11 @@ export class Viewer {
         if (m.platform || m.control || m.alt) return;
         if (this.key(e.key_char ?? e.key)) { this.want(cx); cx.stop_propagation(); cx.notify(); }
       })
-      .on_mouse_move((e, cx) => {
+      .on_window_mouse_move((e, cx) => {
         if (!this.drag || !this.dragOrigin) return;
         if (this.dragMove(e.position.x - this.dragOrigin.x, e.position.y - this.dragOrigin.y)) cx.notify();
       })
-      .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.dragEnd(); cx.notify(); } })
-      .on_hover((h, cx) => { if (!h && this.drag) { this.dragEnd(); cx.notify(); } })
+      .on_window_mouse_up("left", (_e, cx) => { if (this.drag) { this.dragEnd(); cx.notify(); } })
       .child(h_flex().gap(4).items_center()
         .child(div().flex_none().max_w(260).truncate().text_size(12).text_color(t.dim).child(this.path.split("/").pop()))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).pl(8).child(`${MAC ? "⌘" : "Ctrl+"} scroll to zoom · drag to pan · 0 fit`))
