@@ -3713,6 +3713,9 @@ export default class HerdrChat extends View {
         .border_1().border_color(i === 0 ? t.solid : t.input).text_size(12).hover((x) => x.opacity(0.85))
         .on_click((_e, cx) => this.control(what, cx)).child(label)));
     const restart = (label) => [["banner-btn", label, "restart"]];
+    // Silent background host auto-restart on install: hide transient reconnect/stop flicker for up to 10 s.
+    const silentUpdate = Boolean(this.healing?.from === "update" && Date.now() - this.healing.at < 10_000);
+    if (silentUpdate && (c.status === "stopped" || c.status === "starting" || c.status === "connecting" || c.status === "reconnecting")) return null;
     if (this.sub && (c.status === "stopped" || c.status === "failed")) return row(t.muted, icon("info", 13), "The sub-agent ended. Its parent started it and ends it; the session is kept.");
     if (c.status === "stopped" && this.byeAt) return row(t.muted, icon("info", 13), "This chat was closed: its session moved to another chat (Take over there).", restart("Reopen here"));
     if (c.status === "stopped") return row(t.blocked, icon("alert", 13), "The chat's host stopped. The session is kept.", restart("Restart"));

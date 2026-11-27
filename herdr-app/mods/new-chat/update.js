@@ -84,19 +84,16 @@ export const QUESTION_KEY = "herdr-chat.update";
 const dialog = (p) => openOverlay({ mod: "new-chat", kind: "window", key: QUESTION_KEY, width: 460, height: 188, props: { role: "update", ...p } });
 
 /**
- * Question 2, after an install (or at start): asked once about each chat (update-rule.js), whatever the answer; not
- * while an update runs (its end asks). `always`: the person asked for it (the update-check command, or the
- * update they started from the question just ended).
+ * After an install (or at start): signal any outdated chats to auto-restart silently once idle,
+ * without opening a "Restart N chats?" popup window.
  */
 export async function checkHosts({ always = false } = {}) {
+  void always;
   const cfg = await config();
-  if (!cfg.build || shared(RUNNING) || shared(RESTART_ALL) === cfg.build || (!always && shared(LATER) === cfg.build)) return null;
-  const { live, older: chats } = await chatsNow(cfg);
-  const q = restartQuestion(chats, live, shared(ASKED), always, Boolean(shared(LATER) || shared(RESTART_ALL)));
-  setShared(ASKED, q.asked);
-  if (!q.ask) return null;
-  dialog({ step: "restart", version: cfg.version ?? null, build: cfg.build, count: chats.length });
-  return chats;
+  if (!cfg.build || shared(RUNNING)) return null;
+  const { older: chats } = await chatsNow(cfg);
+  if (chats.length && shared(RESTART_ALL) !== cfg.build) setShared(RESTART_ALL, cfg.build);
+  return null;
 }
 
 /**
