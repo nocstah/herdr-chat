@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // @ts-expect-error a plain JS module of the mod's
-import { bangHash, bangKey, bangOf, findAutoRan, oneLine, runHref, runLink, runsInCode, tabScript } from "../../herdr-app/mods/chat/bang.js";
+import { RUN_MARK, bangHash, bangKey, bangOf, findAutoRan, oneLine, runHref, runLink, runsInCode, tabScript } from "../../herdr-app/mods/chat/bang.js";
 // @ts-expect-error a plain JS module of the mod's
 import { linkPaths } from "../../herdr-app/mods/chat/paths.js";
 import { TranscriptFollower } from "../../host/providers/claude/follow.ts";
@@ -13,6 +13,9 @@ import { bashOf, promptText } from "../../host/providers/claude/sessions.ts";
 import { Timeline } from "../../host/timeline.ts";
 import { CLAUDE_TOOLS } from "../../host/providers/claude/tools.ts";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("a block's `!` lines: one after another is one run; a line of text, a placeholder or `!=` ends it", () => {
   assert.deepEqual(runsInCode("! pnpm install\n! pnpm build\n"), [["pnpm install", "pnpm build"]]);
@@ -38,11 +41,48 @@ test("a run joins with && unless a command can't be joined; the tab's script sto
   assert.equal(oneLine(["cd web", "pnpm build"]), "cd web && pnpm build");
   assert.equal(oneLine(["ls # all", "pwd"]), null);
   assert.equal(oneLine(["echo 'open", "x"]), null);
-  const out = spawnSync("bash", ["-c", tabScript(["echo one", "false", "echo never"])], { input: "\n", encoding: "utf8" }).stdout;
+  const noHc = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HC_")));
+  const out = spawnSync("bash", ["-c", tabScript(["echo one", "false", "echo never"])], { input: "\n", encoding: "utf8", env: noHc }).stdout;
   assert.match(out, /\$ echo one\none\n/);
   assert.match(out, /\$ false\n/);
   assert.doesNotMatch(out, /never/);
   assert.match(out, /\[exit 1\] Enter closes this tab\./);
+});
+
+test("Enter closes only a marked run tab (turning keep off and killing via HC_TERMINAL_SOCKET), leaving other terminals alone", () => {
+  const dir = mkdtempSync(join(tmpdir(), "herdr-chat-bang-close-"));
+  try {
+    const log = join(dir, "hc.log");
+    const fakeHc = join(dir, "hc");
+    writeFileSync(fakeHc, `#!/bin/sh
+echo "HC_SOCKET=\${HC_SOCKET-} $*" >> ${JSON.stringify(log)}
+case "$1" in
+  get) printf '{"argv":["/usr/bin/fish","-ic","...","bash","-c","%s"]}\n' "$FAKE_ARGV" ;;
+  keep) exit 1 ;;
+  kill) exit 0 ;;
+esac
+`, { mode: 0o755 });
+    const noHc = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("HC_")));
+    const baseEnv = { ...noHc, PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`, HC_TERMINAL_ID: "t99", HC_TERMINAL_SOCKET: "/tmp/disposable-core.sock" };
+
+    // Unmarked terminal: never disables keep or kills
+    spawnSync("bash", ["-c", tabScript(["echo safe"])], { input: "\n", encoding: "utf8", env: { ...baseEnv, FAKE_ARGV: "normal shell" } });
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+      "HC_SOCKET=/tmp/disposable-core.sock get t99 --json",
+    ]);
+
+    // Marked run tab: propagates HC_TERMINAL_SOCKET into HC_SOCKET, disables keep, and kills even if keep fails
+    writeFileSync(log, "");
+    const fast = tabScript(["echo done"]).replace("sleep 2", ":");
+    spawnSync("bash", ["-c", fast], { input: "\n", encoding: "utf8", env: { ...baseEnv, FAKE_ARGV: RUN_MARK } });
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+      "HC_SOCKET=/tmp/disposable-core.sock get t99 --json",
+      "HC_SOCKET=/tmp/disposable-core.sock keep t99 --off",
+      "HC_SOCKET=/tmp/disposable-core.sock kill t99",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // Claude Code's records for a `!` run in its TUI (bash mode).

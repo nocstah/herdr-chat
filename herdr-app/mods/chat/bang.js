@@ -64,15 +64,39 @@ export function oneLine(commands) {
 
 const quoted = (/** @type {string} */ s) => `'${s.replaceAll("'", "'\\''")}'`;
 
+/** First line of every run tab's script so the closing step verifies this terminal belongs to it. */
+export const RUN_MARK = "# herdr-chat: a command an agent asked for";
+
 /**
- * The script a new tab runs (bash -c): each command shown, then run, stopping
- * at the first that fails; then its exit status, open until Enter.
+ * The script a new tab runs (bash -c): RUN_MARK, then each command shown and run,
+ * stopping at the first that fails; then its exit status, open until Enter.
+ * Enter closes the tab: Herdr wraps tab.new programs in an interactive shell that
+ * stays open after the command exits (and herdr-core may have `keep` on), so the
+ * script disables `keep` and kills its own terminal once `hc get` confirms RUN_MARK
+ * in its argv (leaving any other terminal, such as a test runner, untouched).
  * @param {string[]} commands
  */
 export function tabScript(commands) {
-  const end = `printf '\\n[exit %s] Enter closes this tab.' "$status"\nread -r _`;
+  const end = `set +eu 2>/dev/null || true
+printf '\\n[exit %s] Enter closes this tab.' "$status"
+read -r _ || true
+__hc_t=\${HC_TERMINAL_ID-}
+if [ -n "$__hc_t" ]; then
+  [ -z "\${HC_TERMINAL_SOCKET-}" ] || export HC_SOCKET="$HC_TERMINAL_SOCKET"
+  __hc_bin=$(command -v hc 2>/dev/null || true)
+  if [ -z "$__hc_bin" ]; then
+    for __hc_p in "$HOME/.local/bin/hc" /opt/homebrew/bin/hc /usr/local/bin/hc "$HOME/.cargo/bin/hc"; do
+      [ -x "$__hc_p" ] && { __hc_bin=$__hc_p; break; }
+    done
+  fi
+  if [ -n "$__hc_bin" ] && "$__hc_bin" get "$__hc_t" --json 2>/dev/null | grep -qF ${quoted(RUN_MARK)}; then
+    "$__hc_bin" keep "$__hc_t" --off >/dev/null 2>&1 || true
+    "$__hc_bin" kill "$__hc_t" >/dev/null 2>&1 || true
+    sleep 2
+  fi
+fi`;
   const steps = commands.map((c, i) => `${i ? '[ "$status" -ne 0 ] || ' : ""}{ printf '${i ? "\\n" : ""}$ %s\\n' ${quoted(c)}; {\n${c}\n}; status=$?; }`);
-  return `status=0\n${steps.join("\n")}\n${end}`;
+  return `${RUN_MARK}\nstatus=0\n${steps.join("\n")}\n${end}`;
 }
 
 /** An inline `! command` in prose is a link to this (paths.js linkPaths); the chat asks where to run it. */
